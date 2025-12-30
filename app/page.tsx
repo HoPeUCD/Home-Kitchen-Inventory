@@ -3,15 +3,30 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 
+/**
+ * Layout:
+ * Column 2 now includes K21 + Fridge + Freezer under it.
+ */
 const KITCHEN_LAYOUT = [
   { title: "Column 1", cells: ["K11", "K12", "K13", "K14", "K15", "K16", "K17", "K18"] },
-  { title: "Column 2", cells: ["K21"] },
+  { title: "Column 2", cells: ["K21", "K2_FRIDGE", "K2_FREEZER"] },
   { title: "Column 3", cells: ["K31", "K32", "K33", "K34", "K35", "K36"] },
   { title: "Column 4", cells: ["K41", "K42", "K43", "K44", "K45"] },
   { title: "Column 5", cells: ["K51", "K52", "K53", "K54", "K55", "K56"] },
   { title: "Column 6", cells: ["K61", "K62", "K63", "K64"] },
   { title: "Column 7", cells: ["K71", "K72"] },
 ] as const;
+
+/** Pretty labels for special cells */
+const CODE_LABELS: Record<string, string> = {
+  K2_FRIDGE: "Fridge",
+  K2_FREEZER: "Freezer",
+};
+
+function displayCode(code: string) {
+  const c = code.toUpperCase();
+  return CODE_LABELS[c] ?? c;
+}
 
 const ALL_CODES = Array.from(
   new Set(KITCHEN_LAYOUT.flatMap((c) => c.cells.map((x) => x.toUpperCase())))
@@ -55,28 +70,29 @@ export default function Page() {
 
   const [items, setItems] = useState<Item[]>([]);
 
+  // per-cell summaries
   const [countByCellId, setCountByCellId] = useState<Record<string, number>>({});
   const [namesByCellId, setNamesByCellId] = useState<Record<string, string[]>>({});
 
-  // Add form
+  // add form
   const [name, setName] = useState("");
   const [qty, setQty] = useState("1");
   const [unit, setUnit] = useState("");
 
-  // Loading + error states
+  // loading + error states
   const [cellsLoading, setCellsLoading] = useState(true);
   const [cellsError, setCellsError] = useState<string | null>(null);
   const [itemsError, setItemsError] = useState<string | null>(null);
   const [summaryError, setSummaryError] = useState<string | null>(null);
 
-  // Search state
+  // search state
   const [q, setQ] = useState("");
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [hits, setHits] = useState<SearchHit[]>([]);
-  const debounceRef = useRef<number | null>(null);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // --- Edit state (new) ---
+  // edit state
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
   const [editQty, setEditQty] = useState("1");
@@ -88,7 +104,7 @@ export default function Page() {
     return cellsByCode[selectedCode.toUpperCase()] ?? null;
   }, [cellsByCode, selectedCode]);
 
-  // Load cells
+  // Load cells by code list (robust)
   useEffect(() => {
     (async () => {
       setCellsLoading(true);
@@ -112,9 +128,11 @@ export default function Page() {
         byCode[code] = c;
         byId[c.id] = c;
       });
+
       setCellsByCode(byCode);
       setCellsById(byId);
 
+      // auto-select first cell existing in DB
       const firstExisting =
         KITCHEN_LAYOUT.flatMap((col) => col.cells.map((x) => x.toUpperCase())).find((code) => byCode[code]) ?? null;
 
@@ -125,6 +143,7 @@ export default function Page() {
 
   async function refreshItems(cellId: string) {
     setItemsError(null);
+
     const { data, error } = await supabase
       .from("items")
       .select("id,cell_id,name,qty,unit,note,updated_at")
@@ -138,6 +157,7 @@ export default function Page() {
     setItems((data as Item[]) ?? []);
   }
 
+  // counts + ALL names per cell, restricted to this layout
   async function refreshCellSummaries() {
     setSummaryError(null);
 
@@ -176,13 +196,14 @@ export default function Page() {
     setNamesByCellId(namesMap);
   }
 
+  // when selected cell changes, load items + exit edit mode
   useEffect(() => {
     if (!selectedCell) return;
-    // Leaving edit mode when switching cells avoids confusing UI
     setEditingId(null);
     refreshItems(selectedCell.id);
   }, [selectedCell?.id]);
 
+  // when cells loaded, load summaries
   useEffect(() => {
     if (cellsLoading) return;
     refreshCellSummaries();
@@ -215,10 +236,7 @@ export default function Page() {
 
     await refreshItems(selectedCell.id);
     await refreshCellSummaries();
-
-    if (q.trim()) {
-      await runSearch(q.trim());
-    }
+    if (q.trim()) await runSearch(q.trim());
   }
 
   async function deleteItem(itemId: string) {
@@ -227,12 +245,13 @@ export default function Page() {
       setItemsError(error.message);
       return;
     }
+
     setItems((prev) => prev.filter((x) => x.id !== itemId));
     await refreshCellSummaries();
     if (q.trim()) await runSearch(q.trim());
   }
 
-  // --- Search ---
+  // search (fuzzy contains match via ilike)
   async function runSearch(term: string) {
     const t = term.trim();
     if (!t) {
@@ -257,7 +276,7 @@ export default function Page() {
       .in("cell_id", cellIds)
       .ilike("name", `%${t}%`)
       .order("updated_at", { ascending: false })
-      .limit(50);
+      .limit(100);
 
     if (error) {
       setSearchError(error.message);
@@ -270,15 +289,17 @@ export default function Page() {
     setSearching(false);
   }
 
+  // debounce search input
   useEffect(() => {
     const term = q;
-    if (debounceRef.current) window.clearTimeout(debounceRef.current);
-    debounceRef.current = window.setTimeout(() => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+
+    debounceRef.current = setTimeout(() => {
       runSearch(term);
     }, 250);
 
     return () => {
-      if (debounceRef.current) window.clearTimeout(debounceRef.current);
+      if (debounceRef.current) clearTimeout(debounceRef.current);
     };
   }, [q, Object.keys(cellsByCode).length]);
 
@@ -288,7 +309,7 @@ export default function Page() {
     setSelectedCode(cell.code.toUpperCase());
   }
 
-  // --- Edit actions (new) ---
+  // edit actions
   function startEdit(it: Item) {
     setEditingId(it.id);
     setEditName(it.name ?? "");
@@ -330,7 +351,6 @@ export default function Page() {
       return;
     }
 
-    // Refresh UI
     if (selectedCell) await refreshItems(selectedCell.id);
     await refreshCellSummaries();
     if (q.trim()) await runSearch(q.trim());
@@ -345,7 +365,11 @@ export default function Page() {
           <div>
             <div className="title">Kitchen Inventory</div>
             <div className="subtitle">
-              {cellsLoading ? "Loading…" : selectedCell ? `Selected: ${selectedCell.code}` : "Select a cell"}
+              {cellsLoading
+                ? "Loading…"
+                : selectedCell
+                ? `Selected: ${displayCode(selectedCell.code)}`
+                : "Select a cell"}
             </div>
           </div>
         </div>
@@ -381,7 +405,7 @@ export default function Page() {
               <ul className="resultsList">
                 {hits.map((h) => {
                   const cell = cellsById[h.cell_id];
-                  const where = cell?.code ?? "Unknown";
+                  const where = cell ? displayCode(cell.code) : "Unknown";
                   return (
                     <li key={h.id} className="resultRow">
                       <button className="resultBtn" onClick={() => jumpToCell(h.cell_id)}>
@@ -415,7 +439,7 @@ export default function Page() {
       )}
 
       <div className="main">
-        {/* Left */}
+        {/* Left: layout */}
         <section className="left">
           <div className="columns">
             {KITCHEN_LAYOUT.map((col) => (
@@ -443,7 +467,7 @@ export default function Page() {
                         title={missingAfterLoad ? "Missing cell record in DB for this code" : undefined}
                       >
                         <div className="cellTop">
-                          <div className="cellCode">{code}</div>
+                          <div className="cellCode">{displayCode(code)}</div>
                           {!isLoading && cell && <div className="badge">{count}</div>}
                         </div>
 
@@ -471,7 +495,7 @@ export default function Page() {
           </div>
         </section>
 
-        {/* Right */}
+        {/* Right: details */}
         <aside className="right">
           {!selectedCell ? (
             <div className="empty">{cellsLoading ? "Loading…" : "Select a cell to view and edit items."}</div>
@@ -511,7 +535,7 @@ export default function Page() {
               </div>
 
               <div className="itemsHeader">
-                <div className="itemsTitle">Items in {selectedCell.code}</div>
+                <div className="itemsTitle">Items in {displayCode(selectedCell.code)}</div>
                 <div className="itemsCount">{items.length} total</div>
               </div>
 
@@ -590,279 +614,271 @@ export default function Page() {
         </aside>
       </div>
 
+      {/* Oat + Blue theme (your latest request) */}
       <style jsx global>{`
-    :root {
-      /* Oat + Dusty Blue palette */
-      --bg: #fbf7f0;          /* oat milk */
-      --panel: #fffaf2;       /* warm card */
-      --panel2: #fffdf7;      /* lighter */
-      --text: #1f2328;        /* near-black */
-      --muted: #6b6f76;       /* grey */
-      --border: #e7ddcf;      /* warm border */
-      --border2: #efe6d9;     /* softer border */
+        :root {
+          --bg: #fbf7f0;          /* oat */
+          --panel: #fffaf2;
+          --panel2: #fffdf7;
+          --text: #1f2328;
+          --muted: #6b6f76;
+          --border: #e7ddcf;
+          --border2: #efe6d9;
 
-      --blue: #2f5d7c;        /* dusty deep blue */
-      --blue2: #3f759a;       /* hover blue */
-      --blueSoft: #e7f0f7;    /* pale blue background */
+          --blue: #2f5d7c;
+          --blue2: #3f759a;
+          --blueSoft: #e7f0f7;
 
-      --dangerBg: #fff1f1;
-      --dangerBorder: #f0caca;
+          --dangerBg: #fff1f1;
+          --dangerBorder: #f0caca;
 
-      --shadow: 0 10px 24px rgba(31, 35, 40, 0.06);
-      --radius: 14px;
-    }
+          --shadow: 0 10px 24px rgba(31, 35, 40, 0.06);
+          --radius: 14px;
+        }
 
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
-      background: var(--bg);
-      color: var(--text);
-    }
+        * { box-sizing: border-box; }
+        body {
+          margin: 0;
+          font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+          background: var(--bg);
+          color: var(--text);
+        }
 
-    .app {
-      padding: 16px;
-      padding-bottom: max(16px, env(safe-area-inset-bottom));
-    }
+        .app {
+          padding: 16px;
+          padding-bottom: max(16px, env(safe-area-inset-bottom));
+        }
 
-    .header { margin-bottom: 12px; }
-    .headerTop {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      margin-bottom: 10px;
-    }
+        .header { margin-bottom: 12px; }
+        .headerTop { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
 
-    .title { font-size: 20px; font-weight: 900; line-height: 1.2; }
-    .subtitle { margin-top: 4px; font-size: 12px; color: var(--muted); }
+        .title { font-size: 20px; font-weight: 900; line-height: 1.2; }
+        .subtitle { margin-top: 4px; font-size: 12px; color: var(--muted); }
 
-    .searchBar {
-      display: grid;
-      grid-template-columns: 1fr auto;
-      gap: 10px;
-      align-items: center;
-      margin-top: 10px;
-    }
-    .searchInput {
-      padding: 10px 12px;
-      border-radius: var(--radius);
-      border: 1px solid var(--border);
-      background: var(--panel2);
-      font-size: 14px;
-      width: 100%;
-      box-shadow: 0 1px 0 rgba(31, 35, 40, 0.03);
-    }
-    .searchInput:focus {
-      outline: none;
-      border-color: rgba(47, 93, 124, 0.5);
-      box-shadow: 0 0 0 4px rgba(47, 93, 124, 0.12);
-    }
-    .searchStatus { font-size: 12px; color: var(--muted); white-space: nowrap; }
+        .searchBar {
+          display: grid;
+          grid-template-columns: 1fr auto;
+          gap: 10px;
+          align-items: center;
+          margin-top: 10px;
+        }
+        .searchInput {
+          padding: 10px 12px;
+          border-radius: var(--radius);
+          border: 1px solid var(--border);
+          background: var(--panel2);
+          font-size: 14px;
+          width: 100%;
+          box-shadow: 0 1px 0 rgba(31, 35, 40, 0.03);
+        }
+        .searchInput:focus {
+          outline: none;
+          border-color: rgba(47, 93, 124, 0.5);
+          box-shadow: 0 0 0 4px rgba(47, 93, 124, 0.12);
+        }
+        .searchStatus { font-size: 12px; color: var(--muted); white-space: nowrap; }
 
-    .results {
-      margin-top: 10px;
-      border: 1px solid var(--border2);
-      border-radius: var(--radius);
-      padding: 8px;
-      background: var(--panel);
-      box-shadow: var(--shadow);
-    }
-    .resultsList {
-      list-style: none;
-      padding: 0;
-      margin: 0;
-      display: grid;
-      gap: 6px;
-    }
-    .resultBtn {
-      width: 100%;
-      border: 1px solid var(--border2);
-      border-radius: var(--radius);
-      padding: 10px;
-      background: var(--panel2);
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      text-align: left;
-      transition: transform 80ms ease, border-color 120ms ease, background 120ms ease;
-    }
-    .resultBtn:hover {
-      transform: translateY(-1px);
-      border-color: rgba(47, 93, 124, 0.35);
-      background: #ffffff;
-    }
-    .resultMain { min-width: 0; }
-    .resultName { font-weight: 900; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .resultMeta { font-size: 12px; color: var(--muted); margin-top: 2px; }
-    .resultGo { font-size: 12px; font-weight: 900; color: var(--blue); }
+        .results {
+          margin-top: 10px;
+          border: 1px solid var(--border2);
+          border-radius: var(--radius);
+          padding: 8px;
+          background: var(--panel);
+          box-shadow: var(--shadow);
+        }
+        .resultsList { list-style: none; padding: 0; margin: 0; display: grid; gap: 6px; }
+        .resultBtn {
+          width: 100%;
+          border: 1px solid var(--border2);
+          border-radius: var(--radius);
+          padding: 10px;
+          background: var(--panel2);
+          cursor: pointer;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          text-align: left;
+          transition: transform 80ms ease, border-color 120ms ease, background 120ms ease;
+        }
+        .resultBtn:hover {
+          transform: translateY(-1px);
+          border-color: rgba(47, 93, 124, 0.35);
+          background: #ffffff;
+        }
+        .resultMain { min-width: 0; }
+        .resultName { font-weight: 900; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .resultMeta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+        .resultGo { font-size: 12px; font-weight: 900; color: var(--blue); }
+        .emptySmall { font-size: 12px; color: var(--muted); padding: 6px 4px; }
 
-    .emptySmall { font-size: 12px; color: var(--muted); padding: 6px 4px; }
+        .errorBox {
+          border: 1px solid var(--dangerBorder);
+          background: var(--dangerBg);
+          border-radius: var(--radius);
+          padding: 12px;
+          margin-top: 12px;
+          margin-bottom: 12px;
+        }
+        .errorTitle { font-weight: 900; margin-bottom: 6px; }
+        .errorLine { font-size: 12px; color: rgba(31, 35, 40, 0.85); margin-top: 2px; }
+        .errorHint { font-size: 12px; color: var(--muted); margin-top: 8px; }
 
-    .errorBox {
-      border: 1px solid var(--dangerBorder);
-      background: var(--dangerBg);
-      border-radius: var(--radius);
-      padding: 12px;
-      margin-top: 12px;
-      margin-bottom: 12px;
-    }
-    .errorTitle { font-weight: 900; margin-bottom: 6px; }
-    .errorLine { font-size: 12px; color: rgba(31, 35, 40, 0.85); margin-top: 2px; }
-    .errorHint { font-size: 12px; color: var(--muted); margin-top: 8px; }
+        .main { display: flex; gap: 16px; align-items: flex-start; }
+        .left { flex: 1; overflow-x: auto; padding-bottom: 6px; }
+        .columns { display: flex; gap: 12px; align-items: flex-start; min-height: 420px; }
 
-    .main { display: flex; gap: 16px; align-items: flex-start; }
+        .col { min-width: 150px; }
+        .colTitle { font-size: 12px; font-weight: 900; color: rgba(31, 35, 40, 0.75); margin-bottom: 8px; }
+        .colCells { display: grid; gap: 8px; }
 
-    .left { flex: 1; overflow-x: auto; padding-bottom: 6px; }
-    .columns { display: flex; gap: 12px; align-items: flex-start; min-height: 420px; }
+        .cellBtn {
+          width: 100%;
+          padding: 12px;
+          border-radius: var(--radius);
+          border: 1px solid var(--border);
+          background: var(--panel);
+          text-align: left;
+          cursor: pointer;
+          box-shadow: 0 1px 0 rgba(31, 35, 40, 0.03);
+          transition: transform 80ms ease, border-color 120ms ease, background 120ms ease;
+        }
+        .cellBtn:hover {
+          transform: translateY(-1px);
+          border-color: rgba(47, 93, 124, 0.25);
+          background: #ffffff;
+        }
+        .cellBtn:disabled { opacity: 0.55; cursor: not-allowed; box-shadow: none; }
+        .cellBtn.selected { background: var(--blueSoft); border-color: rgba(47, 93, 124, 0.35); }
 
-    .col { min-width: 150px; }
-    .colTitle { font-size: 12px; font-weight: 900; color: rgba(31, 35, 40, 0.75); margin-bottom: 8px; }
+        .cellTop { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+        .cellCode { font-weight: 900; }
+        .badge {
+          font-size: 12px;
+          color: var(--blue);
+          border: 1px solid rgba(47, 93, 124, 0.25);
+          padding: 2px 8px;
+          border-radius: 999px;
+          background: rgba(47, 93, 124, 0.08);
+          flex: 0 0 auto;
+        }
 
-    .colCells { display: grid; gap: 8px; }
+        .cellMeta { margin-top: 6px; font-size: 12px; color: rgba(31, 35, 40, 0.78); }
+        .emptyMeta { color: var(--muted); }
+        .listMeta { max-height: 96px; overflow: auto; padding-right: 4px; }
+        .cellItemLine { line-height: 1.25; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-    .cellBtn {
-      width: 100%;
-      padding: 12px;
-      border-radius: var(--radius);
-      border: 1px solid var(--border);
-      background: var(--panel);
-      text-align: left;
-      cursor: pointer;
-      box-shadow: 0 1px 0 rgba(31, 35, 40, 0.03);
-      transition: transform 80ms ease, border-color 120ms ease, background 120ms ease;
-    }
-    .cellBtn:hover {
-      transform: translateY(-1px);
-      border-color: rgba(47, 93, 124, 0.25);
-      background: #ffffff;
-    }
-    .cellBtn:disabled { opacity: 0.55; cursor: not-allowed; box-shadow: none; }
-    .cellBtn.selected {
-      background: var(--blueSoft);
-      border-color: rgba(47, 93, 124, 0.35);
-    }
+        .right { width: 380px; }
 
-    .cellTop { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
-    .cellCode { font-weight: 900; }
-    .badge {
-      font-size: 12px;
-      color: var(--blue);
-      border: 1px solid rgba(47, 93, 124, 0.25);
-      padding: 2px 8px;
-      border-radius: 999px;
-      background: rgba(47, 93, 124, 0.08);
-      flex: 0 0 auto;
-    }
+        .card {
+          border: 1px solid var(--border);
+          border-radius: var(--radius);
+          padding: 12px;
+          background: var(--panel);
+          box-shadow: var(--shadow);
+        }
+        .cardTitle { font-size: 12px; font-weight: 900; margin-bottom: 8px; }
 
-    .cellMeta { margin-top: 6px; font-size: 12px; color: rgba(31, 35, 40, 0.78); }
-    .emptyMeta { color: var(--muted); }
+        .form { display: grid; gap: 8px; }
+        .row { display: flex; gap: 8px; align-items: center; }
 
-    .listMeta { max-height: 96px; overflow: auto; padding-right: 4px; }
-    .cellItemLine { line-height: 1.25; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .input {
+          padding: 10px;
+          border-radius: 12px;
+          border: 1px solid var(--border);
+          background: var(--panel2);
+          width: 100%;
+          min-width: 0;
+          font-size: 14px;
+        }
+        .input:focus {
+          outline: none;
+          border-color: rgba(47, 93, 124, 0.5);
+          box-shadow: 0 0 0 4px rgba(47, 93, 124, 0.12);
+        }
+        .input.qty { width: 110px; flex: 0 0 auto; }
 
-    .right { width: 380px; }
+        .primary {
+          padding: 10px 12px;
+          border-radius: 12px;
+          border: 1px solid rgba(47, 93, 124, 0.35);
+          background: var(--blue);
+          color: #fff;
+          font-weight: 900;
+          cursor: pointer;
+          transition: transform 80ms ease, background 120ms ease;
+        }
+        .primary:hover { transform: translateY(-1px); background: var(--blue2); }
+        .primary:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
 
-    .card {
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 12px;
-      background: var(--panel);
-      box-shadow: var(--shadow);
-    }
-    .cardTitle { font-size: 12px; font-weight: 900; margin-bottom: 8px; }
+        .neutral, .danger {
+          border: 1px solid var(--border);
+          border-radius: 12px;
+          padding: 8px 10px;
+          cursor: pointer;
+          background: var(--panel2);
+        }
 
-    .form { display: grid; gap: 8px; }
-    .row { display: flex; gap: 8px; align-items: center; }
+        .itemsHeader {
+          display: flex;
+          justify-content: space-between;
+          align-items: baseline;
+          gap: 12px;
+          margin-top: 12px;
+          margin-bottom: 8px;
+        }
+        .itemsTitle { font-size: 12px; font-weight: 900; }
+        .itemsCount { font-size: 12px; color: var(--muted); }
 
-    .input {
-      padding: 10px;
-      border-radius: 12px;
-      border: 1px solid var(--border);
-      background: var(--panel2);
-      width: 100%;
-      min-width: 0;
-      font-size: 14px;
-    }
-    .input:focus {
-      outline: none;
-      border-color: rgba(47, 93, 124, 0.5);
-      box-shadow: 0 0 0 4px rgba(47, 93, 124, 0.12);
-    }
-    .input.qty { width: 110px; flex: 0 0 auto; }
+        .list { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
 
-    .primary {
-      padding: 10px 12px;
-      border-radius: 12px;
-      border: 1px solid rgba(47, 93, 124, 0.35);
-      background: var(--blue);
-      color: #fff;
-      font-weight: 900;
-      cursor: pointer;
-      transition: transform 80ms ease, background 120ms ease;
-    }
-    .primary:hover { transform: translateY(-1px); background: var(--blue2); }
-    .primary:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
+        .item {
+          border: 1px solid var(--border);
+          border-radius: var(--radius);
+          padding: 12px;
+          display: flex;
+          justify-content: space-between;
+          gap: 10px;
+          align-items: center;
+          background: var(--panel);
+          box-shadow: 0 1px 0 rgba(31, 35, 40, 0.03);
+        }
+        .itemLeft { min-width: 0; }
+        .itemName { font-weight: 900; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .itemMeta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+        .itemActions { display: flex; gap: 8px; flex: 0 0 auto; }
 
-    .neutral, .danger {
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 8px 10px;
-      cursor: pointer;
-      background: var(--panel2);
-    }
-    .danger:hover, .neutral:hover { border-color: rgba(47, 93, 124, 0.25); }
+        .editWrap { width: 100%; display: grid; gap: 10px; }
+        .editGrid { display: grid; grid-template-columns: 1fr 110px 1fr; gap: 8px; align-items: center; }
+        .editActions { display: flex; justify-content: flex-end; gap: 8px; }
 
-    .itemsHeader {
-      display: flex;
-      justify-content: space-between;
-      align-items: baseline;
-      gap: 12px;
-      margin-top: 12px;
-      margin-bottom: 8px;
-    }
-    .itemsTitle { font-size: 12px; font-weight: 900; }
-    .itemsCount { font-size: 12px; color: var(--muted); }
+        .empty { font-size: 13px; color: var(--muted); }
 
-    .list { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
+        @media (max-width: 768px) {
+          .app { padding: 12px; }
+          .main { flex-direction: column; gap: 12px; }
+          .columns { min-height: unset; }
+          .col { min-width: 132px; }
+          .cellBtn { padding: 10px; }
+          .right { width: 100%; }
 
-    .item {
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 12px;
-      display: flex;
-      justify-content: space-between;
-      gap: 10px;
-      align-items: center;
-      background: var(--panel);
-      box-shadow: 0 1px 0 rgba(31, 35, 40, 0.03);
-    }
-    .itemLeft { min-width: 0; }
-    .itemName { font-weight: 900; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .itemMeta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+          .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+          .input.qty { width: 100%; }
+          .primary { grid-column: 1 / -1; width: 100%; }
 
-    .empty { font-size: 13px; color: var(--muted); }
+          .searchBar { grid-template-columns: 1fr; gap: 6px; }
+          .searchStatus { text-align: right; }
 
-    @media (max-width: 768px) {
-      .app { padding: 12px; }
-      .main { flex-direction: column; gap: 12px; }
-      .columns { min-height: unset; }
-      .col { min-width: 132px; }
-      .cellBtn { padding: 10px; }
-      .right { width: 100%; }
+          .listMeta { max-height: 88px; }
 
-      .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-      .input.qty { width: 100%; }
-      .primary { grid-column: 1 / -1; width: 100%; }
+          .item { align-items: flex-start; }
+          .itemActions { width: 100%; justify-content: flex-end; }
 
-      .searchBar { grid-template-columns: 1fr; gap: 6px; }
-      .searchStatus { text-align: right; }
-
-      .listMeta { max-height: 88px; }
-    }
-`}</style>
+          .editGrid { grid-template-columns: 1fr 1fr; }
+          .editGrid .input:nth-child(1) { grid-column: 1 / -1; }
+          .editActions { justify-content: space-between; }
+        }
+      `}</style>
     </div>
   );
 }
