@@ -58,10 +58,12 @@ export default function Page() {
   const [countByCellId, setCountByCellId] = useState<Record<string, number>>({});
   const [namesByCellId, setNamesByCellId] = useState<Record<string, string[]>>({});
 
+  // Add form
   const [name, setName] = useState("");
   const [qty, setQty] = useState("1");
   const [unit, setUnit] = useState("");
 
+  // Loading + error states
   const [cellsLoading, setCellsLoading] = useState(true);
   const [cellsError, setCellsError] = useState<string | null>(null);
   const [itemsError, setItemsError] = useState<string | null>(null);
@@ -74,12 +76,19 @@ export default function Page() {
   const [hits, setHits] = useState<SearchHit[]>([]);
   const debounceRef = useRef<number | null>(null);
 
+  // --- Edit state (new) ---
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editQty, setEditQty] = useState("1");
+  const [editUnit, setEditUnit] = useState("");
+  const [savingEdit, setSavingEdit] = useState(false);
+
   const selectedCell: Cell | null = useMemo(() => {
     if (!selectedCode) return null;
     return cellsByCode[selectedCode.toUpperCase()] ?? null;
   }, [cellsByCode, selectedCode]);
 
-  // Load cells by CODE list (robust; does not depend on zone)
+  // Load cells
   useEffect(() => {
     (async () => {
       setCellsLoading(true);
@@ -129,7 +138,6 @@ export default function Page() {
     setItems((data as Item[]) ?? []);
   }
 
-  // Per-cell summaries (counts + ALL names), restricted to this kitchen layout
   async function refreshCellSummaries() {
     setSummaryError(null);
 
@@ -170,6 +178,8 @@ export default function Page() {
 
   useEffect(() => {
     if (!selectedCell) return;
+    // Leaving edit mode when switching cells avoids confusing UI
+    setEditingId(null);
     refreshItems(selectedCell.id);
   }, [selectedCell?.id]);
 
@@ -206,7 +216,6 @@ export default function Page() {
     await refreshItems(selectedCell.id);
     await refreshCellSummaries();
 
-    // If a search is active, refresh search results too (so UX feels consistent)
     if (q.trim()) {
       await runSearch(q.trim());
     }
@@ -220,13 +229,10 @@ export default function Page() {
     }
     setItems((prev) => prev.filter((x) => x.id !== itemId));
     await refreshCellSummaries();
-
-    if (q.trim()) {
-      await runSearch(q.trim());
-    }
+    if (q.trim()) await runSearch(q.trim());
   }
 
-  // --- Search (fuzzy via ilike %q%) ---
+  // --- Search ---
   async function runSearch(term: string) {
     const t = term.trim();
     if (!t) {
@@ -238,10 +244,7 @@ export default function Page() {
     setSearching(true);
     setSearchError(null);
 
-    // Restrict search to cells that exist in this layout (kitchen only)
     const cellIds = Object.values(cellsByCode).map((c) => c.id);
-
-    // If cells aren't loaded yet, don't search
     if (cellIds.length === 0) {
       setSearching(false);
       setHits([]);
@@ -267,7 +270,6 @@ export default function Page() {
     setSearching(false);
   }
 
-  // Debounce search input so we don't spam the DB on every keystroke
   useEffect(() => {
     const term = q;
     if (debounceRef.current) window.clearTimeout(debounceRef.current);
@@ -284,7 +286,56 @@ export default function Page() {
     const cell = cellsById[cellId];
     if (!cell) return;
     setSelectedCode(cell.code.toUpperCase());
-    // items refresh happens via selectedCell effect
+  }
+
+  // --- Edit actions (new) ---
+  function startEdit(it: Item) {
+    setEditingId(it.id);
+    setEditName(it.name ?? "");
+    setEditQty(String(parseQty(it.qty)));
+    setEditUnit(it.unit ?? "");
+  }
+
+  function cancelEdit() {
+    setEditingId(null);
+    setEditName("");
+    setEditQty("1");
+    setEditUnit("");
+  }
+
+  async function saveEdit(itemId: string) {
+    const trimmed = editName.trim();
+    if (!trimmed) return;
+
+    const qtyNumber = Number(editQty || "1");
+    const safeQty = Number.isFinite(qtyNumber) ? qtyNumber : 1;
+
+    setSavingEdit(true);
+    setItemsError(null);
+
+    const { error } = await supabase
+      .from("items")
+      .update({
+        name: trimmed,
+        qty: safeQty,
+        unit: editUnit.trim(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", itemId);
+
+    setSavingEdit(false);
+
+    if (error) {
+      setItemsError(error.message);
+      return;
+    }
+
+    // Refresh UI
+    if (selectedCell) await refreshItems(selectedCell.id);
+    await refreshCellSummaries();
+    if (q.trim()) await runSearch(q.trim());
+
+    cancelEdit();
   }
 
   return (
@@ -299,7 +350,7 @@ export default function Page() {
           </div>
         </div>
 
-        {/* Search bar */}
+        {/* Search */}
         <div className="searchBar">
           <input
             className="searchInput"
@@ -308,7 +359,11 @@ export default function Page() {
             placeholder="Search item (fuzzy: contains match)…"
             inputMode="text"
           />
-          {searching ? <div className="searchStatus">Searching…</div> : <div className="searchStatus">{hits.length ? `${hits.length} found` : ""}</div>}
+          {searching ? (
+            <div className="searchStatus">Searching…</div>
+          ) : (
+            <div className="searchStatus">{hits.length ? `${hits.length} found` : ""}</div>
+          )}
         </div>
 
         {searchError && (
@@ -318,7 +373,6 @@ export default function Page() {
           </div>
         )}
 
-        {/* Search results */}
         {q.trim() && !searching && (
           <div className="results">
             {hits.length === 0 ? (
@@ -350,12 +404,12 @@ export default function Page() {
 
       {(cellsError || summaryError || itemsError) && (
         <div className="errorBox">
-          <div className="errorTitle">Data loading error</div>
+          <div className="errorTitle">Data error</div>
           {cellsError && <div className="errorLine">Cells: {cellsError}</div>}
           {summaryError && <div className="errorLine">Summaries: {summaryError}</div>}
           {itemsError && <div className="errorLine">Items: {itemsError}</div>}
           <div className="errorHint">
-            If you enabled Supabase RLS without policies, reads may fail or return empty.
+            If Supabase RLS is enabled without policies, reads/updates may fail or return empty.
           </div>
         </div>
       )}
@@ -465,19 +519,70 @@ export default function Page() {
                 <div className="empty">No items yet.</div>
               ) : (
                 <ul className="list">
-                  {items.map((it) => (
-                    <li key={it.id} className="item">
-                      <div className="itemLeft">
-                        <div className="itemName">{it.name}</div>
-                        <div className="itemMeta">
-                          {parseQty(it.qty)} {it.unit ?? ""}
-                        </div>
-                      </div>
-                      <button className="danger" onClick={() => deleteItem(it.id)}>
-                        Delete
-                      </button>
-                    </li>
-                  ))}
+                  {items.map((it) => {
+                    const isEditing = editingId === it.id;
+
+                    return (
+                      <li key={it.id} className="item">
+                        {!isEditing ? (
+                          <>
+                            <div className="itemLeft">
+                              <div className="itemName">{it.name}</div>
+                              <div className="itemMeta">
+                                {parseQty(it.qty)} {it.unit ?? ""}
+                              </div>
+                            </div>
+
+                            <div className="itemActions">
+                              <button className="neutral" onClick={() => startEdit(it)}>
+                                Edit
+                              </button>
+                              <button className="danger" onClick={() => deleteItem(it.id)}>
+                                Delete
+                              </button>
+                            </div>
+                          </>
+                        ) : (
+                          <div className="editWrap">
+                            <div className="editGrid">
+                              <input
+                                className="input"
+                                value={editName}
+                                onChange={(e) => setEditName(e.target.value)}
+                                placeholder="Name"
+                              />
+                              <input
+                                className="input qty"
+                                value={editQty}
+                                onChange={(e) => setEditQty(e.target.value)}
+                                placeholder="Qty"
+                                inputMode="decimal"
+                              />
+                              <input
+                                className="input"
+                                value={editUnit}
+                                onChange={(e) => setEditUnit(e.target.value)}
+                                placeholder="Unit"
+                              />
+                            </div>
+
+                            <div className="editActions">
+                              <button className="neutral" disabled={savingEdit} onClick={cancelEdit}>
+                                Cancel
+                              </button>
+                              <button
+                                className="primary"
+                                disabled={savingEdit || !editName.trim()}
+                                onClick={() => saveEdit(it.id)}
+                              >
+                                {savingEdit ? "Saving…" : "Save"}
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
             </>
@@ -493,20 +598,10 @@ export default function Page() {
           background: #fff;
           color: #111;
         }
-
-        .app {
-          padding: 16px;
-          padding-bottom: max(16px, env(safe-area-inset-bottom));
-        }
+        .app { padding: 16px; padding-bottom: max(16px, env(safe-area-inset-bottom)); }
 
         .header { margin-bottom: 12px; }
-        .headerTop {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 12px;
-          margin-bottom: 10px;
-        }
+        .headerTop { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
 
         .title { font-size: 20px; font-weight: 900; line-height: 1.2; }
         .subtitle { margin-top: 4px; font-size: 12px; opacity: 0.75; }
@@ -525,26 +620,10 @@ export default function Page() {
           font-size: 14px;
           width: 100%;
         }
-        .searchStatus {
-          font-size: 12px;
-          opacity: 0.75;
-          white-space: nowrap;
-        }
+        .searchStatus { font-size: 12px; opacity: 0.75; white-space: nowrap; }
 
-        .results {
-          margin-top: 10px;
-          border: 1px solid #eee;
-          border-radius: 12px;
-          padding: 8px;
-        }
-        .resultsList {
-          list-style: none;
-          padding: 0;
-          margin: 0;
-          display: grid;
-          gap: 6px;
-        }
-        .resultRow { margin: 0; }
+        .results { margin-top: 10px; border: 1px solid #eee; border-radius: 12px; padding: 8px; }
+        .resultsList { list-style: none; padding: 0; margin: 0; display: grid; gap: 6px; }
         .resultBtn {
           width: 100%;
           border: 1px solid #eee;
@@ -559,15 +638,9 @@ export default function Page() {
           text-align: left;
         }
         .resultMain { min-width: 0; }
-        .resultName {
-          font-weight: 900;
-          white-space: nowrap;
-          overflow: hidden;
-          text-overflow: ellipsis;
-        }
+        .resultName { font-weight: 900; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .resultMeta { font-size: 12px; opacity: 0.75; margin-top: 2px; }
         .resultGo { font-size: 12px; font-weight: 900; opacity: 0.8; }
-
         .emptySmall { font-size: 12px; opacity: 0.7; padding: 6px 4px; }
 
         .errorBox {
@@ -583,7 +656,6 @@ export default function Page() {
         .errorHint { font-size: 12px; opacity: 0.75; margin-top: 8px; }
 
         .main { display: flex; gap: 16px; align-items: flex-start; }
-
         .left { flex: 1; overflow-x: auto; padding-bottom: 6px; }
         .columns { display: flex; gap: 12px; align-items: flex-start; min-height: 420px; }
 
@@ -617,14 +689,8 @@ export default function Page() {
 
         .cellMeta { margin-top: 6px; font-size: 12px; opacity: 0.8; }
         .emptyMeta { opacity: 0.6; }
-
         .listMeta { max-height: 96px; overflow: auto; padding-right: 4px; }
-        .cellItemLine {
-          line-height: 1.25;
-          white-space: nowrap;
-          overflow: hidden;
-          text-overflow: ellipsis;
-        }
+        .cellItemLine { line-height: 1.25; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
         .right { width: 380px; }
 
@@ -652,7 +718,23 @@ export default function Page() {
           color: #fff;
           font-weight: 900;
           cursor: pointer;
-          flex: 0 0 auto;
+        }
+        .primary:disabled { opacity: 0.6; cursor: not-allowed; }
+
+        .neutral {
+          border: 1px solid #ddd;
+          border-radius: 10px;
+          padding: 8px 10px;
+          cursor: pointer;
+          background: #fff;
+        }
+
+        .danger {
+          border: 1px solid #ddd;
+          border-radius: 10px;
+          padding: 8px 10px;
+          cursor: pointer;
+          background: #fff;
         }
 
         .itemsHeader {
@@ -667,6 +749,7 @@ export default function Page() {
         .itemsCount { font-size: 12px; opacity: 0.7; }
 
         .list { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
+
         .item {
           border: 1px solid #eee;
           border-radius: 12px;
@@ -676,17 +759,34 @@ export default function Page() {
           gap: 10px;
           align-items: center;
         }
+
         .itemLeft { min-width: 0; }
         .itemName { font-weight: 900; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .itemMeta { font-size: 12px; opacity: 0.75; margin-top: 2px; }
 
-        .danger {
-          border: 1px solid #ddd;
-          border-radius: 10px;
-          padding: 8px 10px;
-          cursor: pointer;
-          background: #fff;
+        .itemActions {
+          display: flex;
+          gap: 8px;
           flex: 0 0 auto;
+        }
+
+        .editWrap {
+          width: 100%;
+          display: grid;
+          gap: 10px;
+        }
+
+        .editGrid {
+          display: grid;
+          grid-template-columns: 1fr 110px 1fr;
+          gap: 8px;
+          align-items: center;
+        }
+
+        .editActions {
+          display: flex;
+          justify-content: flex-end;
+          gap: 8px;
         }
 
         .empty { font-size: 13px; opacity: 0.7; }
@@ -698,12 +798,26 @@ export default function Page() {
           .col { min-width: 132px; }
           .cellBtn { padding: 10px; }
           .right { width: 100%; }
+
           .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
           .input.qty { width: 100%; }
           .primary { grid-column: 1 / -1; width: 100%; }
-          .listMeta { max-height: 88px; }
+
           .searchBar { grid-template-columns: 1fr; gap: 6px; }
           .searchStatus { text-align: right; }
+
+          .listMeta { max-height: 88px; }
+
+          .item { align-items: flex-start; }
+          .itemActions { width: 100%; justify-content: flex-end; }
+
+          .editGrid {
+            grid-template-columns: 1fr 1fr;
+          }
+          .editGrid .input:nth-child(1) {
+            grid-column: 1 / -1;
+          }
+          .editActions { justify-content: space-between; }
         }
       `}</style>
     </div>
