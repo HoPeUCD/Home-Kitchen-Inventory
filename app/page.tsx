@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 
 const KITCHEN_LAYOUT = [
@@ -33,6 +33,14 @@ type Item = {
   note?: string | null;
 };
 
+type SearchHit = {
+  id: string;
+  name: string;
+  cell_id: string;
+  qty: number | string | null;
+  unit: string | null;
+};
+
 function parseQty(v: Item["qty"]) {
   if (v === null || v === undefined) return 1;
   if (typeof v === "number") return v;
@@ -42,6 +50,7 @@ function parseQty(v: Item["qty"]) {
 
 export default function Page() {
   const [cellsByCode, setCellsByCode] = useState<Record<string, Cell>>({});
+  const [cellsById, setCellsById] = useState<Record<string, Cell>>({});
   const [selectedCode, setSelectedCode] = useState<string | null>(null);
 
   const [items, setItems] = useState<Item[]>([]);
@@ -53,11 +62,17 @@ export default function Page() {
   const [qty, setQty] = useState("1");
   const [unit, setUnit] = useState("");
 
-  // Loading + error states (prevents flash + helps diagnose “no data”)
   const [cellsLoading, setCellsLoading] = useState(true);
   const [cellsError, setCellsError] = useState<string | null>(null);
   const [itemsError, setItemsError] = useState<string | null>(null);
   const [summaryError, setSummaryError] = useState<string | null>(null);
+
+  // Search state
+  const [q, setQ] = useState("");
+  const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [hits, setHits] = useState<SearchHit[]>([]);
+  const debounceRef = useRef<number | null>(null);
 
   const selectedCell: Cell | null = useMemo(() => {
     if (!selectedCode) return null;
@@ -81,15 +96,18 @@ export default function Page() {
         return;
       }
 
-      const map: Record<string, Cell> = {};
+      const byCode: Record<string, Cell> = {};
+      const byId: Record<string, Cell> = {};
       (data as Cell[] | null)?.forEach((c) => {
-        map[c.code.toUpperCase()] = c;
+        const code = c.code.toUpperCase();
+        byCode[code] = c;
+        byId[c.id] = c;
       });
-      setCellsByCode(map);
+      setCellsByCode(byCode);
+      setCellsById(byId);
 
-      // Auto-select the first code that exists in DB
       const firstExisting =
-        KITCHEN_LAYOUT.flatMap((col) => col.cells.map((x) => x.toUpperCase())).find((code) => map[code]) ?? null;
+        KITCHEN_LAYOUT.flatMap((col) => col.cells.map((x) => x.toUpperCase())).find((code) => byCode[code]) ?? null;
 
       setSelectedCode((prev) => (prev ? prev.toUpperCase() : firstExisting));
       setCellsLoading(false);
@@ -111,7 +129,7 @@ export default function Page() {
     setItems((data as Item[]) ?? []);
   }
 
-  // Fetch per-cell summaries ONLY for cells in your layout
+  // Per-cell summaries (counts + ALL names), restricted to this kitchen layout
   async function refreshCellSummaries() {
     setSummaryError(null);
 
@@ -150,13 +168,11 @@ export default function Page() {
     setNamesByCellId(namesMap);
   }
 
-  // When selected cell changes, load its items
   useEffect(() => {
     if (!selectedCell) return;
     refreshItems(selectedCell.id);
   }, [selectedCell?.id]);
 
-  // When cells are loaded, load summaries
   useEffect(() => {
     if (cellsLoading) return;
     refreshCellSummaries();
@@ -189,6 +205,11 @@ export default function Page() {
 
     await refreshItems(selectedCell.id);
     await refreshCellSummaries();
+
+    // If a search is active, refresh search results too (so UX feels consistent)
+    if (q.trim()) {
+      await runSearch(q.trim());
+    }
   }
 
   async function deleteItem(itemId: string) {
@@ -199,17 +220,132 @@ export default function Page() {
     }
     setItems((prev) => prev.filter((x) => x.id !== itemId));
     await refreshCellSummaries();
+
+    if (q.trim()) {
+      await runSearch(q.trim());
+    }
+  }
+
+  // --- Search (fuzzy via ilike %q%) ---
+  async function runSearch(term: string) {
+    const t = term.trim();
+    if (!t) {
+      setHits([]);
+      setSearchError(null);
+      return;
+    }
+
+    setSearching(true);
+    setSearchError(null);
+
+    // Restrict search to cells that exist in this layout (kitchen only)
+    const cellIds = Object.values(cellsByCode).map((c) => c.id);
+
+    // If cells aren't loaded yet, don't search
+    if (cellIds.length === 0) {
+      setSearching(false);
+      setHits([]);
+      return;
+    }
+
+    const { data, error } = await supabase
+      .from("items")
+      .select("id,name,cell_id,qty,unit,updated_at")
+      .in("cell_id", cellIds)
+      .ilike("name", `%${t}%`)
+      .order("updated_at", { ascending: false })
+      .limit(50);
+
+    if (error) {
+      setSearchError(error.message);
+      setHits([]);
+      setSearching(false);
+      return;
+    }
+
+    setHits((data as SearchHit[]) ?? []);
+    setSearching(false);
+  }
+
+  // Debounce search input so we don't spam the DB on every keystroke
+  useEffect(() => {
+    const term = q;
+    if (debounceRef.current) window.clearTimeout(debounceRef.current);
+    debounceRef.current = window.setTimeout(() => {
+      runSearch(term);
+    }, 250);
+
+    return () => {
+      if (debounceRef.current) window.clearTimeout(debounceRef.current);
+    };
+  }, [q, Object.keys(cellsByCode).length]);
+
+  function jumpToCell(cellId: string) {
+    const cell = cellsById[cellId];
+    if (!cell) return;
+    setSelectedCode(cell.code.toUpperCase());
+    // items refresh happens via selectedCell effect
   }
 
   return (
     <div className="app">
       <header className="header">
-        <div>
-          <div className="title">Kitchen Inventory</div>
-          <div className="subtitle">
-            {cellsLoading ? "Loading…" : selectedCell ? `Selected: ${selectedCell.code}` : "Select a cell"}
+        <div className="headerTop">
+          <div>
+            <div className="title">Kitchen Inventory</div>
+            <div className="subtitle">
+              {cellsLoading ? "Loading…" : selectedCell ? `Selected: ${selectedCell.code}` : "Select a cell"}
+            </div>
           </div>
         </div>
+
+        {/* Search bar */}
+        <div className="searchBar">
+          <input
+            className="searchInput"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="Search item (fuzzy: contains match)…"
+            inputMode="text"
+          />
+          {searching ? <div className="searchStatus">Searching…</div> : <div className="searchStatus">{hits.length ? `${hits.length} found` : ""}</div>}
+        </div>
+
+        {searchError && (
+          <div className="errorBox">
+            <div className="errorTitle">Search error</div>
+            <div className="errorLine">{searchError}</div>
+          </div>
+        )}
+
+        {/* Search results */}
+        {q.trim() && !searching && (
+          <div className="results">
+            {hits.length === 0 ? (
+              <div className="emptySmall">No match.</div>
+            ) : (
+              <ul className="resultsList">
+                {hits.map((h) => {
+                  const cell = cellsById[h.cell_id];
+                  const where = cell?.code ?? "Unknown";
+                  return (
+                    <li key={h.id} className="resultRow">
+                      <button className="resultBtn" onClick={() => jumpToCell(h.cell_id)}>
+                        <div className="resultMain">
+                          <div className="resultName">{h.name}</div>
+                          <div className="resultMeta">
+                            {where} · {parseQty(h.qty)} {h.unit ?? ""}
+                          </div>
+                        </div>
+                        <div className="resultGo">Go</div>
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+        )}
       </header>
 
       {(cellsError || summaryError || itemsError) && (
@@ -219,7 +355,7 @@ export default function Page() {
           {summaryError && <div className="errorLine">Summaries: {summaryError}</div>}
           {itemsError && <div className="errorLine">Items: {itemsError}</div>}
           <div className="errorHint">
-            If you recently enabled Supabase RLS and added no policies, reads will fail or return empty.
+            If you enabled Supabase RLS without policies, reads may fail or return empty.
           </div>
         </div>
       )}
@@ -237,10 +373,8 @@ export default function Page() {
                     const code = rawCode.toUpperCase();
                     const cell = cellsByCode[code];
 
-                    // prevent “Not in DB” flash: during loading we show Loading state instead
                     const isLoading = cellsLoading;
                     const missingAfterLoad = !cellsLoading && !cell;
-
                     const isSelected = selectedCode?.toUpperCase() === code;
 
                     const count = cell ? countByCellId[cell.id] ?? 0 : 0;
@@ -352,9 +486,7 @@ export default function Page() {
       </div>
 
       <style jsx global>{`
-        * {
-          box-sizing: border-box;
-        }
+        * { box-sizing: border-box; }
         body {
           margin: 0;
           font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
@@ -367,80 +499,97 @@ export default function Page() {
           padding-bottom: max(16px, env(safe-area-inset-bottom));
         }
 
-        .header {
+        .header { margin-bottom: 12px; }
+        .headerTop {
           display: flex;
           align-items: center;
           justify-content: space-between;
           gap: 12px;
-          margin-bottom: 12px;
+          margin-bottom: 10px;
         }
-        .title {
-          font-size: 20px;
-          font-weight: 900;
-          line-height: 1.2;
+
+        .title { font-size: 20px; font-weight: 900; line-height: 1.2; }
+        .subtitle { margin-top: 4px; font-size: 12px; opacity: 0.75; }
+
+        .searchBar {
+          display: grid;
+          grid-template-columns: 1fr auto;
+          gap: 10px;
+          align-items: center;
+          margin-top: 10px;
         }
-        .subtitle {
-          margin-top: 4px;
+        .searchInput {
+          padding: 10px 12px;
+          border-radius: 12px;
+          border: 1px solid #ddd;
+          font-size: 14px;
+          width: 100%;
+        }
+        .searchStatus {
           font-size: 12px;
           opacity: 0.75;
+          white-space: nowrap;
         }
+
+        .results {
+          margin-top: 10px;
+          border: 1px solid #eee;
+          border-radius: 12px;
+          padding: 8px;
+        }
+        .resultsList {
+          list-style: none;
+          padding: 0;
+          margin: 0;
+          display: grid;
+          gap: 6px;
+        }
+        .resultRow { margin: 0; }
+        .resultBtn {
+          width: 100%;
+          border: 1px solid #eee;
+          border-radius: 12px;
+          padding: 10px;
+          background: #fff;
+          cursor: pointer;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          text-align: left;
+        }
+        .resultMain { min-width: 0; }
+        .resultName {
+          font-weight: 900;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+        .resultMeta { font-size: 12px; opacity: 0.75; margin-top: 2px; }
+        .resultGo { font-size: 12px; font-weight: 900; opacity: 0.8; }
+
+        .emptySmall { font-size: 12px; opacity: 0.7; padding: 6px 4px; }
 
         .errorBox {
           border: 1px solid #f2c9c9;
           background: #fff6f6;
           border-radius: 12px;
           padding: 12px;
+          margin-top: 12px;
           margin-bottom: 12px;
         }
-        .errorTitle {
-          font-weight: 900;
-          margin-bottom: 6px;
-        }
-        .errorLine {
-          font-size: 12px;
-          opacity: 0.9;
-          margin-top: 2px;
-        }
-        .errorHint {
-          font-size: 12px;
-          opacity: 0.75;
-          margin-top: 8px;
-        }
+        .errorTitle { font-weight: 900; margin-bottom: 6px; }
+        .errorLine { font-size: 12px; opacity: 0.9; margin-top: 2px; }
+        .errorHint { font-size: 12px; opacity: 0.75; margin-top: 8px; }
 
-        .main {
-          display: flex;
-          gap: 16px;
-          align-items: flex-start;
-        }
+        .main { display: flex; gap: 16px; align-items: flex-start; }
 
-        .left {
-          flex: 1;
-          overflow-x: auto;
-          padding-bottom: 6px;
-        }
+        .left { flex: 1; overflow-x: auto; padding-bottom: 6px; }
+        .columns { display: flex; gap: 12px; align-items: flex-start; min-height: 420px; }
 
-        .columns {
-          display: flex;
-          gap: 12px;
-          align-items: flex-start;
-          min-height: 420px;
-        }
-
-        .col {
-          min-width: 150px;
-        }
-
-        .colTitle {
-          font-size: 12px;
-          font-weight: 900;
-          opacity: 0.8;
-          margin-bottom: 8px;
-        }
-
-        .colCells {
-          display: grid;
-          gap: 8px;
-        }
+        .col { min-width: 150px; }
+        .colTitle { font-size: 12px; font-weight: 900; opacity: 0.8; margin-bottom: 8px; }
+        .colCells { display: grid; gap: 8px; }
 
         .cellBtn {
           width: 100%;
@@ -451,24 +600,11 @@ export default function Page() {
           text-align: left;
           cursor: pointer;
         }
-        .cellBtn:disabled {
-          opacity: 0.55;
-          cursor: not-allowed;
-        }
-        .cellBtn.selected {
-          background: #f3f3f3;
-          border-color: #cfcfcf;
-        }
+        .cellBtn:disabled { opacity: 0.55; cursor: not-allowed; }
+        .cellBtn.selected { background: #f3f3f3; border-color: #cfcfcf; }
 
-        .cellTop {
-          display: flex;
-          justify-content: space-between;
-          gap: 8px;
-          align-items: center;
-        }
-        .cellCode {
-          font-weight: 900;
-        }
+        .cellTop { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+        .cellCode { font-weight: 900; }
         .badge {
           font-size: 12px;
           opacity: 0.8;
@@ -479,21 +615,10 @@ export default function Page() {
           flex: 0 0 auto;
         }
 
-        .cellMeta {
-          margin-top: 6px;
-          font-size: 12px;
-          opacity: 0.8;
-        }
-        .emptyMeta {
-          opacity: 0.6;
-        }
+        .cellMeta { margin-top: 6px; font-size: 12px; opacity: 0.8; }
+        .emptyMeta { opacity: 0.6; }
 
-        .listMeta {
-          max-height: 96px;
-          overflow: auto;
-          padding-right: 4px;
-        }
-
+        .listMeta { max-height: 96px; overflow: auto; padding-right: 4px; }
         .cellItemLine {
           line-height: 1.25;
           white-space: nowrap;
@@ -501,31 +626,13 @@ export default function Page() {
           text-overflow: ellipsis;
         }
 
-        .right {
-          width: 380px;
-        }
+        .right { width: 380px; }
 
-        .card {
-          border: 1px solid #eee;
-          border-radius: 12px;
-          padding: 12px;
-        }
-        .cardTitle {
-          font-size: 12px;
-          font-weight: 900;
-          margin-bottom: 8px;
-        }
+        .card { border: 1px solid #eee; border-radius: 12px; padding: 12px; }
+        .cardTitle { font-size: 12px; font-weight: 900; margin-bottom: 8px; }
 
-        .form {
-          display: grid;
-          gap: 8px;
-        }
-
-        .row {
-          display: flex;
-          gap: 8px;
-          align-items: center;
-        }
+        .form { display: grid; gap: 8px; }
+        .row { display: flex; gap: 8px; align-items: center; }
 
         .input {
           padding: 10px;
@@ -535,10 +642,7 @@ export default function Page() {
           min-width: 0;
           font-size: 14px;
         }
-        .input.qty {
-          width: 110px;
-          flex: 0 0 auto;
-        }
+        .input.qty { width: 110px; flex: 0 0 auto; }
 
         .primary {
           padding: 10px 12px;
@@ -559,23 +663,10 @@ export default function Page() {
           margin-top: 12px;
           margin-bottom: 8px;
         }
-        .itemsTitle {
-          font-size: 12px;
-          font-weight: 900;
-        }
-        .itemsCount {
-          font-size: 12px;
-          opacity: 0.7;
-        }
+        .itemsTitle { font-size: 12px; font-weight: 900; }
+        .itemsCount { font-size: 12px; opacity: 0.7; }
 
-        .list {
-          list-style: none;
-          padding: 0;
-          margin: 0;
-          display: grid;
-          gap: 8px;
-        }
-
+        .list { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
         .item {
           border: 1px solid #eee;
           border-radius: 12px;
@@ -585,20 +676,9 @@ export default function Page() {
           gap: 10px;
           align-items: center;
         }
-        .itemLeft {
-          min-width: 0;
-        }
-        .itemName {
-          font-weight: 900;
-          white-space: nowrap;
-          overflow: hidden;
-          text-overflow: ellipsis;
-        }
-        .itemMeta {
-          font-size: 12px;
-          opacity: 0.75;
-          margin-top: 2px;
-        }
+        .itemLeft { min-width: 0; }
+        .itemName { font-weight: 900; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .itemMeta { font-size: 12px; opacity: 0.75; margin-top: 2px; }
 
         .danger {
           border: 1px solid #ddd;
@@ -609,46 +689,21 @@ export default function Page() {
           flex: 0 0 auto;
         }
 
-        .empty {
-          font-size: 13px;
-          opacity: 0.7;
-        }
+        .empty { font-size: 13px; opacity: 0.7; }
 
         @media (max-width: 768px) {
-          .app {
-            padding: 12px;
-          }
-          .main {
-            flex-direction: column;
-            gap: 12px;
-          }
-          .columns {
-            min-height: unset;
-          }
-          .col {
-            min-width: 132px;
-          }
-          .cellBtn {
-            padding: 10px;
-          }
-          .right {
-            width: 100%;
-          }
-          .row {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 8px;
-          }
-          .input.qty {
-            width: 100%;
-          }
-          .primary {
-            grid-column: 1 / -1;
-            width: 100%;
-          }
-          .listMeta {
-            max-height: 88px;
-          }
+          .app { padding: 12px; }
+          .main { flex-direction: column; gap: 12px; }
+          .columns { min-height: unset; }
+          .col { min-width: 132px; }
+          .cellBtn { padding: 10px; }
+          .right { width: 100%; }
+          .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+          .input.qty { width: 100%; }
+          .primary { grid-column: 1 / -1; width: 100%; }
+          .listMeta { max-height: 88px; }
+          .searchBar { grid-template-columns: 1fr; gap: 6px; }
+          .searchStatus { text-align: right; }
         }
       `}</style>
     </div>
