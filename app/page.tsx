@@ -13,6 +13,10 @@ const KITCHEN_LAYOUT = [
   { title: "Column 7", cells: ["K71", "K72"] },
 ] as const;
 
+const ALL_CODES = Array.from(
+  new Set(KITCHEN_LAYOUT.flatMap((c) => c.cells.map((x) => x.toUpperCase())))
+);
+
 type Cell = {
   id: string;
   code: string;
@@ -42,40 +46,58 @@ export default function Page() {
 
   const [items, setItems] = useState<Item[]>([]);
 
-  // per-cell summary
   const [countByCellId, setCountByCellId] = useState<Record<string, number>>({});
   const [namesByCellId, setNamesByCellId] = useState<Record<string, string[]>>({});
 
-  // add form
   const [name, setName] = useState("");
   const [qty, setQty] = useState("1");
   const [unit, setUnit] = useState("");
 
+  // Loading + error states (prevents flash + helps diagnose “no data”)
+  const [cellsLoading, setCellsLoading] = useState(true);
+  const [cellsError, setCellsError] = useState<string | null>(null);
+  const [itemsError, setItemsError] = useState<string | null>(null);
+  const [summaryError, setSummaryError] = useState<string | null>(null);
+
   const selectedCell: Cell | null = useMemo(() => {
     if (!selectedCode) return null;
-    return cellsByCode[selectedCode] ?? null;
+    return cellsByCode[selectedCode.toUpperCase()] ?? null;
   }, [cellsByCode, selectedCode]);
 
-  // Load cells and map by code
+  // Load cells by CODE list (robust; does not depend on zone)
   useEffect(() => {
     (async () => {
-      const { data, error } = await supabase.from("cells").select("*").eq("zone", "kitchen");
+      setCellsLoading(true);
+      setCellsError(null);
+
+      const { data, error } = await supabase
+        .from("cells")
+        .select("id,code,zone,position")
+        .in("code", ALL_CODES);
+
       if (error) {
-        console.error("Failed to load cells:", error.message);
+        setCellsError(error.message);
+        setCellsLoading(false);
         return;
       }
 
       const map: Record<string, Cell> = {};
-      (data as Cell[] | null)?.forEach((c) => (map[c.code] = c));
+      (data as Cell[] | null)?.forEach((c) => {
+        map[c.code.toUpperCase()] = c;
+      });
       setCellsByCode(map);
 
-      const firstCode =
-        KITCHEN_LAYOUT.flatMap((col) => col.cells).find((code) => map[code]) ?? null;
-      setSelectedCode((prev) => prev ?? firstCode);
+      // Auto-select the first code that exists in DB
+      const firstExisting =
+        KITCHEN_LAYOUT.flatMap((col) => col.cells.map((x) => x.toUpperCase())).find((code) => map[code]) ?? null;
+
+      setSelectedCode((prev) => (prev ? prev.toUpperCase() : firstExisting));
+      setCellsLoading(false);
     })();
   }, []);
 
   async function refreshItems(cellId: string) {
+    setItemsError(null);
     const { data, error } = await supabase
       .from("items")
       .select("id,cell_id,name,qty,unit,note,updated_at")
@@ -83,25 +105,31 @@ export default function Page() {
       .order("updated_at", { ascending: false });
 
     if (error) {
-      console.error("Failed to load items:", error.message);
+      setItemsError(error.message);
       return;
     }
     setItems((data as Item[]) ?? []);
   }
 
-  /**
-   * Refresh per-cell summaries:
-   * - countByCellId: total items in each cell
-   * - namesByCellId: ALL item names in each cell (ordered by updated_at desc)
-   */
+  // Fetch per-cell summaries ONLY for cells in your layout
   async function refreshCellSummaries() {
+    setSummaryError(null);
+
+    const cellIds = Object.values(cellsByCode).map((c) => c.id);
+    if (cellIds.length === 0) {
+      setCountByCellId({});
+      setNamesByCellId({});
+      return;
+    }
+
     const { data, error } = await supabase
       .from("items")
       .select("cell_id,name,updated_at")
+      .in("cell_id", cellIds)
       .order("updated_at", { ascending: false });
 
     if (error) {
-      console.error("Failed to load cell summaries:", error.message);
+      setSummaryError(error.message);
       return;
     }
 
@@ -114,9 +142,7 @@ export default function Page() {
       if (!itemName) return;
 
       counts[cellId] = (counts[cellId] ?? 0) + 1;
-
       if (!namesMap[cellId]) namesMap[cellId] = [];
-      // push ALL names (no limit, no "+N more")
       namesMap[cellId].push(itemName);
     });
 
@@ -124,14 +150,17 @@ export default function Page() {
     setNamesByCellId(namesMap);
   }
 
+  // When selected cell changes, load its items
   useEffect(() => {
     if (!selectedCell) return;
     refreshItems(selectedCell.id);
   }, [selectedCell?.id]);
 
+  // When cells are loaded, load summaries
   useEffect(() => {
+    if (cellsLoading) return;
     refreshCellSummaries();
-  }, [Object.keys(cellsByCode).length]);
+  }, [cellsLoading, Object.keys(cellsByCode).length]);
 
   async function addItem() {
     if (!selectedCell) return;
@@ -150,7 +179,7 @@ export default function Page() {
     });
 
     if (error) {
-      console.error("Failed to add item:", error.message);
+      setItemsError(error.message);
       return;
     }
 
@@ -165,7 +194,7 @@ export default function Page() {
   async function deleteItem(itemId: string) {
     const { error } = await supabase.from("items").delete().eq("id", itemId);
     if (error) {
-      console.error("Failed to delete item:", error.message);
+      setItemsError(error.message);
       return;
     }
     setItems((prev) => prev.filter((x) => x.id !== itemId));
@@ -178,13 +207,25 @@ export default function Page() {
         <div>
           <div className="title">Kitchen Inventory</div>
           <div className="subtitle">
-            {selectedCell ? `Selected: ${selectedCell.code}` : "Select a cell"}
+            {cellsLoading ? "Loading…" : selectedCell ? `Selected: ${selectedCell.code}` : "Select a cell"}
           </div>
         </div>
       </header>
 
+      {(cellsError || summaryError || itemsError) && (
+        <div className="errorBox">
+          <div className="errorTitle">Data loading error</div>
+          {cellsError && <div className="errorLine">Cells: {cellsError}</div>}
+          {summaryError && <div className="errorLine">Summaries: {summaryError}</div>}
+          {itemsError && <div className="errorLine">Items: {itemsError}</div>}
+          <div className="errorHint">
+            If you recently enabled Supabase RLS and added no policies, reads will fail or return empty.
+          </div>
+        </div>
+      )}
+
       <div className="main">
-        {/* Left: Cabinet columns */}
+        {/* Left */}
         <section className="left">
           <div className="columns">
             {KITCHEN_LAYOUT.map((col) => (
@@ -192,10 +233,15 @@ export default function Page() {
                 <div className="colTitle">{col.title}</div>
 
                 <div className="colCells">
-                  {col.cells.map((code) => {
+                  {col.cells.map((rawCode) => {
+                    const code = rawCode.toUpperCase();
                     const cell = cellsByCode[code];
-                    const disabled = !cell;
-                    const isSelected = selectedCode === code;
+
+                    // prevent “Not in DB” flash: during loading we show Loading state instead
+                    const isLoading = cellsLoading;
+                    const missingAfterLoad = !cellsLoading && !cell;
+
+                    const isSelected = selectedCode?.toUpperCase() === code;
 
                     const count = cell ? countByCellId[cell.id] ?? 0 : 0;
                     const allNames = cell ? namesByCellId[cell.id] ?? [] : [];
@@ -204,18 +250,19 @@ export default function Page() {
                       <button
                         key={code}
                         className={`cellBtn ${isSelected ? "selected" : ""}`}
-                        disabled={disabled}
+                        disabled={isLoading || missingAfterLoad}
                         onClick={() => cell && setSelectedCode(code)}
-                        title={disabled ? "Cell not found in DB (did you insert it?)" : undefined}
+                        title={missingAfterLoad ? "Missing cell record in DB for this code" : undefined}
                       >
                         <div className="cellTop">
                           <div className="cellCode">{code}</div>
-                          {!disabled && <div className="badge">{count}</div>}
+                          {!isLoading && cell && <div className="badge">{count}</div>}
                         </div>
 
-                        {/* Show ALL item names in this cell */}
-                        {disabled ? (
-                          <div className="cellMeta">Not in DB</div>
+                        {isLoading ? (
+                          <div className="cellMeta emptyMeta">Loading…</div>
+                        ) : missingAfterLoad ? (
+                          <div className="cellMeta emptyMeta">Missing in DB</div>
                         ) : allNames.length === 0 ? (
                           <div className="cellMeta emptyMeta">Empty</div>
                         ) : (
@@ -236,22 +283,20 @@ export default function Page() {
           </div>
         </section>
 
-        {/* Right: Selected cell detail */}
+        {/* Right */}
         <aside className="right">
           {!selectedCell ? (
-            <div className="empty">Select a cell to view and edit items.</div>
+            <div className="empty">{cellsLoading ? "Loading…" : "Select a cell to view and edit items."}</div>
           ) : (
             <>
-              {/* Add form */}
               <div className="card">
                 <div className="cardTitle">Add item</div>
-
                 <div className="form">
                   <input
                     className="input"
                     value={name}
                     onChange={(e) => setName(e.target.value)}
-                    placeholder="Item name (e.g. rice, soy sauce)"
+                    placeholder="Item name"
                     inputMode="text"
                   />
 
@@ -267,7 +312,7 @@ export default function Page() {
                       className="input"
                       value={unit}
                       onChange={(e) => setUnit(e.target.value)}
-                      placeholder="Unit (e.g. bag, bottle)"
+                      placeholder="Unit"
                       inputMode="text"
                     />
                     <button className="primary" onClick={addItem}>
@@ -277,7 +322,6 @@ export default function Page() {
                 </div>
               </div>
 
-              {/* Items */}
               <div className="itemsHeader">
                 <div className="itemsTitle">Items in {selectedCell.code}</div>
                 <div className="itemsCount">{items.length} total</div>
@@ -341,6 +385,28 @@ export default function Page() {
           opacity: 0.75;
         }
 
+        .errorBox {
+          border: 1px solid #f2c9c9;
+          background: #fff6f6;
+          border-radius: 12px;
+          padding: 12px;
+          margin-bottom: 12px;
+        }
+        .errorTitle {
+          font-weight: 900;
+          margin-bottom: 6px;
+        }
+        .errorLine {
+          font-size: 12px;
+          opacity: 0.9;
+          margin-top: 2px;
+        }
+        .errorHint {
+          font-size: 12px;
+          opacity: 0.75;
+          margin-top: 8px;
+        }
+
         .main {
           display: flex;
           gap: 16px;
@@ -386,7 +452,7 @@ export default function Page() {
           cursor: pointer;
         }
         .cellBtn:disabled {
-          opacity: 0.45;
+          opacity: 0.55;
           cursor: not-allowed;
         }
         .cellBtn.selected {
@@ -422,11 +488,10 @@ export default function Page() {
           opacity: 0.6;
         }
 
-        /* This makes "show ALL names" practical without exploding card height */
         .listMeta {
-          max-height: 96px;       /* adjust if you want taller/shorter */
-          overflow: auto;         /* scroll inside the cell */
-          padding-right: 4px;     /* leave room for scrollbar */
+          max-height: 96px;
+          overflow: auto;
+          padding-right: 4px;
         }
 
         .cellItemLine {
@@ -549,48 +614,38 @@ export default function Page() {
           opacity: 0.7;
         }
 
-        /* Mobile */
         @media (max-width: 768px) {
           .app {
             padding: 12px;
           }
-
           .main {
             flex-direction: column;
             gap: 12px;
           }
-
           .columns {
             min-height: unset;
           }
-
           .col {
             min-width: 132px;
           }
-
           .cellBtn {
             padding: 10px;
           }
-
           .right {
             width: 100%;
           }
-
           .row {
             display: grid;
             grid-template-columns: 1fr 1fr;
             gap: 8px;
           }
-
           .input.qty {
             width: 100%;
           }
-
           .primary {
             grid-column: 1 / -1;
             width: 100%;
           }
-
           .listMeta {
             max-height: 88px;
           }
