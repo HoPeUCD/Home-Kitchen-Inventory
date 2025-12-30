@@ -363,41 +363,51 @@ export default function Page() {
   }
 
   async function runSearch(term: string) {
-    const t = term.trim();
-    if (!t) {
-      setHits([]);
-      setSearchError(null);
-      return;
-    }
-
-    setSearching(true);
+  const t = term.trim();
+  if (!t) {
+    setHits([]);
     setSearchError(null);
-
-    const cellIds = Object.values(cellsByCode).map((c) => c.id);
-    if (cellIds.length === 0) {
-      setSearching(false);
-      setHits([]);
-      return;
-    }
-
-    const { data, error } = await supabase
-      .from("items")
-      .select("id,name,cell_id,qty,unit,updated_at")
-      .in("cell_id", cellIds)
-      .ilike("name", `%${t}%`)
-      .order("updated_at", { ascending: false })
-      .limit(100);
-
-    if (error) {
-      setSearchError(error.message);
-      setHits([]);
-      setSearching(false);
-      return;
-    }
-
-    setHits((data as SearchHit[]) ?? []);
-    setSearching(false);
+    return;
   }
+
+  setSearching(true);
+  setSearchError(null);
+
+  const cellIds = Object.values(cellsByCode).map((c) => c.id);
+  if (cellIds.length === 0) {
+    setSearching(false);
+    setHits([]);
+    return;
+  }
+
+  // Uses Supabase RPC: public.search_items_fuzzy
+  // Returns: id, name, cell_id, qty, unit, updated_at, score
+  const { data, error } = await supabase.rpc("search_items_fuzzy", {
+    term: t,
+    cell_ids: cellIds,
+    lim: 100,
+  });
+
+  if (error) {
+    setSearchError(error.message);
+    setHits([]);
+    setSearching(false);
+    return;
+  }
+
+  const mapped =
+    (data as any[] | null)?.map((r) => ({
+      id: String(r.id),
+      name: String(r.name ?? ""),
+      cell_id: String(r.cell_id),
+      qty: r.qty ?? null,
+      unit: r.unit ?? null,
+    })) ?? [];
+
+  setHits(mapped);
+  setSearching(false);
+}
+
 
   useEffect(() => {
     const term = q;
