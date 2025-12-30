@@ -58,7 +58,7 @@ type ExpiringHit = {
   id: string;
   name: string;
   cell_id: string;
-  expires_at: string; // not null in these lists
+  expires_at: string; // not null
   qty: number | string | null;
   unit: string | null;
 };
@@ -102,7 +102,7 @@ function expiryStatus(expiresAt: string | null) {
   if (!expiresAt) return { kind: "none" as const, days: null as number | null };
   const today = startOfToday();
   const exp = parseDateOnlyISO(expiresAt);
-  const d = daysBetween(today, exp); // exp - today
+  const d = daysBetween(today, exp);
   if (d < 0) return { kind: "expired" as const, days: d };
   if (d <= 30) return { kind: "soon" as const, days: d };
   return { kind: "ok" as const, days: d };
@@ -225,7 +225,6 @@ export default function Page() {
       return;
     }
 
-    // Pull enough fields to color each line by expires_at
     const { data, error } = await supabase
       .from("items")
       .select("cell_id,name,expires_at,updated_at")
@@ -300,7 +299,7 @@ export default function Page() {
     for (const r of normalized) {
       const exp = parseDateOnlyISO(r.expires_at);
       const d = daysBetween(today, exp);
-      if (d < 0) continue; // expired not included in these two buckets
+      if (d < 0) continue;
       if (d <= 7) within7.push(r);
       if (d <= 30) within30.push(r);
     }
@@ -504,7 +503,7 @@ export default function Page() {
         <div className="expCard">
           <div className="expHeader">
             <div className="expTitle">Expiring soon</div>
-            <div className="expMeta">Text list · click line to jump</div>
+            <div className="expMeta">Text list · tap to jump</div>
           </div>
 
           {expError ? (
@@ -660,7 +659,11 @@ export default function Page() {
                               const chipClass =
                                 st.kind === "expired" ? "chip chipExpired" : st.kind === "soon" ? "chip chipSoon" : "chip";
                               return (
-                                <div key={`${ln.name}-${idx}`} className={chipClass} title={ln.expires_at ? `${ln.name} · ${ln.expires_at}` : ln.name}>
+                                <div
+                                  key={`${ln.name}-${idx}`}
+                                  className={chipClass}
+                                  title={ln.expires_at ? `${ln.name} · ${ln.expires_at}` : ln.name}
+                                >
                                   {ln.name}
                                 </div>
                               );
@@ -823,7 +826,6 @@ export default function Page() {
         </aside>
       </div>
 
-      {/* Oat + Blue theme + expiry colors */}
       <style jsx global>{`
         :root {
           --bg: #fbf7f0; /* oat */
@@ -838,7 +840,6 @@ export default function Page() {
           --blue2: #3f759a;
           --blueSoft: #e7f0f7;
 
-          /* expiry backgrounds */
           --warnBg: #fff7d1;
           --warnBorder: #e8d48a;
 
@@ -889,7 +890,7 @@ export default function Page() {
           color: var(--muted);
         }
 
-        /* GLOBAL EXPIRING CARD (text list) */
+        /* EXPIRING LIST */
         .expCard {
           border: 1px solid var(--border2);
           background: var(--panel);
@@ -960,6 +961,7 @@ export default function Page() {
           text-decoration-color: rgba(47, 93, 124, 0.55);
         }
 
+        /* Search */
         .searchBar {
           display: grid;
           grid-template-columns: 1fr auto;
@@ -1046,6 +1048,7 @@ export default function Page() {
           padding: 6px 4px;
         }
 
+        /* Errors */
         .errorBox {
           border: 1px solid var(--dangerBorder);
           background: var(--dangerBg);
@@ -1069,39 +1072,52 @@ export default function Page() {
           margin-top: 8px;
         }
 
+        /* Main two-panel layout (desktop) */
         .main {
           display: flex;
           gap: 16px;
           align-items: flex-start;
         }
+
+        /* LEFT: robust grid columns, no overlap */
         .left {
           flex: 1;
           overflow-x: auto;
-          padding-bottom: 6px;
+          padding-bottom: 8px;
         }
         .columns {
-          display: flex;
+          display: grid;
+          grid-auto-flow: column;
+          grid-auto-columns: minmax(160px, 1fr);
           gap: 12px;
-          align-items: flex-start;
-          min-height: 420px;
+          align-items: start;
+          justify-content: start;
+          padding-bottom: 4px;
         }
-
         .col {
-          min-width: 150px;
+          display: grid;
+          grid-template-rows: auto 1fr;
+          gap: 8px;
+          min-width: 160px;
         }
         .colTitle {
           font-size: 12px;
           font-weight: 900;
           color: rgba(31, 35, 40, 0.75);
-          margin-bottom: 8px;
         }
         .colCells {
           display: grid;
-          gap: 8px;
+          gap: 10px;
+          align-content: start;
         }
 
         .cellBtn {
           width: 100%;
+          display: flex;
+          flex-direction: column;
+          align-items: stretch;
+          gap: 8px;
+
           padding: 12px;
           border-radius: var(--radius);
           border: 1px solid var(--border);
@@ -1110,6 +1126,8 @@ export default function Page() {
           cursor: pointer;
           box-shadow: 0 1px 0 rgba(31, 35, 40, 0.03);
           transition: transform 80ms ease, border-color 120ms ease, background 120ms ease;
+
+          min-height: 92px;
         }
         .cellBtn:hover {
           transform: translateY(-1px);
@@ -1129,8 +1147,8 @@ export default function Page() {
         .cellTop {
           display: flex;
           justify-content: space-between;
-          gap: 8px;
           align-items: center;
+          gap: 8px;
         }
         .cellCode {
           font-weight: 900;
@@ -1146,7 +1164,6 @@ export default function Page() {
         }
 
         .cellMeta {
-          margin-top: 8px;
           font-size: 12px;
           color: rgba(31, 35, 40, 0.78);
         }
@@ -1154,12 +1171,13 @@ export default function Page() {
           color: var(--muted);
         }
 
-        /* NEW: chips in overview (background changes, NOT text color) */
+        /* Chips in overview (background changes, NOT text color) */
         .chipWrap {
           display: flex;
           flex-wrap: wrap;
           gap: 6px;
-          max-height: 112px;
+
+          max-height: 120px;
           overflow: auto;
           padding-right: 4px;
         }
@@ -1183,10 +1201,10 @@ export default function Page() {
           border-color: var(--expBorder);
         }
 
+        /* RIGHT panel */
         .right {
           width: 380px;
         }
-
         .card {
           border: 1px solid var(--border);
           border-radius: var(--radius);
@@ -1392,6 +1410,7 @@ export default function Page() {
           color: var(--muted);
         }
 
+        /* MOBILE: stacked layout + larger tap targets + stable column widths */
         @media (max-width: 768px) {
           .app {
             padding: 12px;
@@ -1400,24 +1419,27 @@ export default function Page() {
             flex-direction: column;
             gap: 12px;
           }
-          .columns {
-            min-height: unset;
-          }
-          .col {
-            min-width: 132px;
-          }
-          .cellBtn {
-            padding: 10px;
-          }
-          .right {
-            width: 100%;
-          }
 
           .expGrid {
             grid-template-columns: 1fr;
           }
           .expMeta {
             text-align: left;
+          }
+
+          .columns {
+            grid-auto-columns: minmax(140px, 1fr);
+          }
+          .col {
+            min-width: 140px;
+          }
+          .cellBtn {
+            padding: 10px;
+            min-height: 88px;
+          }
+
+          .right {
+            width: 100%;
           }
 
           .row {
