@@ -3,6 +3,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 
+/**
+ * Assumptions (change only if your DB differs):
+ * - table "cells": id(uuid), code(text), zone(text|null), position(int|null)
+ * - table "items": id(uuid), cell_id(uuid), name(text), qty(numeric/int), unit(text|null),
+ *                 expires_at(date|null), image_url(text|null), aliases(text[]), updated_at(timestamptz)
+ * - Storage bucket: "item-images" (Public bucket, so getPublicUrl works)
+ */
+
 const KITCHEN_LAYOUT = [
   { title: "Column 1", cells: ["K11", "K12", "K13", "K14", "K15", "K16", "K17", "K18"] },
   { title: "Column 2", cells: ["K21", "K2_FRIDGE", "K2_FREEZER"] },
@@ -38,8 +46,10 @@ type Item = {
   name: string;
   qty: number | string | null;
   unit: string | null;
-  note?: string | null;
   expires_at: string | null; // YYYY-MM-DD
+  image_url: string | null;
+  aliases: string[] | null;
+  updated_at: string | null;
 };
 
 type SearchHit = {
@@ -71,6 +81,11 @@ function parseQty(v: Item["qty"]) {
   return Number.isFinite(n) ? n : 1;
 }
 
+function startOfToday(): Date {
+  const now = new Date();
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+}
+
 function toDateOnlyISO(d: Date) {
   const yyyy = d.getFullYear();
   const mm = String(d.getMonth() + 1).padStart(2, "0");
@@ -81,11 +96,6 @@ function toDateOnlyISO(d: Date) {
 function parseDateOnlyISO(s: string): Date {
   const [y, m, d] = s.split("-").map((x) => Number(x));
   return new Date(y, (m ?? 1) - 1, d ?? 1, 0, 0, 0, 0);
-}
-
-function startOfToday(): Date {
-  const now = new Date();
-  return new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
 }
 
 function daysBetween(a: Date, b: Date) {
@@ -103,41 +113,59 @@ function expiryStatus(expiresAt: string | null) {
   return { kind: "ok" as const, days: d };
 }
 
+function csvToAliases(s: string): string[] {
+  return s
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
+}
+
+function aliasesToCsv(a: string[] | null | undefined): string {
+  return (a ?? []).join(", ");
+}
+
 export default function Page() {
   const [cellsByCode, setCellsByCode] = useState<Record<string, Cell>>({});
   const [cellsById, setCellsById] = useState<Record<string, Cell>>({});
   const [selectedCode, setSelectedCode] = useState<string | null>(null);
 
+  const [cellsLoading, setCellsLoading] = useState(true);
+  const [cellsError, setCellsError] = useState<string | null>(null);
+
   const [items, setItems] = useState<Item[]>([]);
+  const [itemsError, setItemsError] = useState<string | null>(null);
 
   const [countByCellId, setCountByCellId] = useState<Record<string, number>>({});
   const [cellLinesByCellId, setCellLinesByCellId] = useState<Record<string, CellLine[]>>({});
+  const [summaryError, setSummaryError] = useState<string | null>(null);
 
   const [exp7, setExp7] = useState<ExpiringHit[]>([]);
   const [exp30, setExp30] = useState<ExpiringHit[]>([]);
   const [expError, setExpError] = useState<string | null>(null);
 
+  // Add form
   const [name, setName] = useState("");
   const [qty, setQty] = useState("1");
   const [unit, setUnit] = useState("");
   const [expiresAt, setExpiresAt] = useState<string>("");
+  const [newImageFile, setNewImageFile] = useState<File | null>(null);
+  const [uploading, setUploading] = useState(false);
 
-  const [cellsLoading, setCellsLoading] = useState(true);
-  const [cellsError, setCellsError] = useState<string | null>(null);
-  const [itemsError, setItemsError] = useState<string | null>(null);
-  const [summaryError, setSummaryError] = useState<string | null>(null);
-
+  // Search
   const [q, setQ] = useState("");
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [hits, setHits] = useState<SearchHit[]>([]);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Edit
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
   const [editQty, setEditQty] = useState("1");
   const [editUnit, setEditUnit] = useState("");
   const [editExpiresAt, setEditExpiresAt] = useState<string>("");
+  const [editAliasesCsv, setEditAliasesCsv] = useState("");
+  const [editImageFile, setEditImageFile] = useState<File | null>(null);
   const [savingEdit, setSavingEdit] = useState(false);
 
   const selectedCell: Cell | null = useMemo(() => {
@@ -155,6 +183,31 @@ export default function Page() {
     setter(toDateOnlyISO(d));
   }
 
+  async function uploadItemImage(itemId: string, file: File) {
+    const MAX_MB = 5;
+    if (file.size > MAX_MB * 1024 * 1024) {
+      throw new Error(`Image too large. Please keep under ${MAX_MB}MB.`);
+    }
+
+    const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+    const ext = safeName.includes(".") ? safeName.split(".").pop() : "jpg";
+    const path = `${itemId}/${Date.now()}.${ext}`;
+
+    const bucket = "item-images";
+    const { error: upErr } = await supabase.storage.from(bucket).upload(path, file, {
+      upsert: true,
+      contentType: file.type || "image/jpeg",
+      cacheControl: "3600",
+    });
+    if (upErr) throw upErr;
+
+    const { data } = supabase.storage.from(bucket).getPublicUrl(path);
+    const publicUrl = data?.publicUrl ?? null;
+    if (!publicUrl) throw new Error("Failed to get public URL for uploaded image.");
+    return publicUrl;
+  }
+
+  // Load cells (by codes in layout)
   useEffect(() => {
     (async () => {
       setCellsLoading(true);
@@ -192,7 +245,7 @@ export default function Page() {
 
     const { data, error } = await supabase
       .from("items")
-      .select("id,cell_id,name,qty,unit,note,expires_at,updated_at")
+      .select("id,cell_id,name,qty,unit,expires_at,image_url,aliases,updated_at")
       .eq("cell_id", cellId)
       .order("updated_at", { ascending: false });
 
@@ -200,6 +253,7 @@ export default function Page() {
       setItemsError(error.message);
       return;
     }
+
     setItems((data as Item[]) ?? []);
   }
 
@@ -307,6 +361,7 @@ export default function Page() {
   useEffect(() => {
     if (!selectedCell) return;
     setEditingId(null);
+    setEditImageFile(null);
     refreshItems(selectedCell.id);
   }, [selectedCell?.id]);
 
@@ -325,23 +380,52 @@ export default function Page() {
     const qtyNumber = Number(qty || "1");
     const safeQty = Number.isFinite(qtyNumber) ? qtyNumber : 1;
 
-    const { error } = await supabase.from("items").insert({
-      cell_id: selectedCell.id,
-      name: trimmed,
-      qty: safeQty,
-      unit: unit.trim(),
-      expires_at: expiresAt ? expiresAt : null,
-    });
+    setItemsError(null);
 
-    if (error) {
-      setItemsError(error.message);
+    const { data: inserted, error: insErr } = await supabase
+      .from("items")
+      .insert({
+        cell_id: selectedCell.id,
+        name: trimmed,
+        qty: safeQty,
+        unit: unit.trim(),
+        expires_at: expiresAt ? expiresAt : null,
+        image_url: null,
+        aliases: [],
+      })
+      .select("id")
+      .single();
+
+    if (insErr) {
+      setItemsError(insErr.message);
       return;
+    }
+
+    const itemId = String((inserted as any)?.id);
+
+    try {
+      if (newImageFile) {
+        setUploading(true);
+        const url = await uploadItemImage(itemId, newImageFile);
+
+        const { error: upErr } = await supabase
+          .from("items")
+          .update({ image_url: url, updated_at: new Date().toISOString() })
+          .eq("id", itemId);
+
+        if (upErr) throw upErr;
+      }
+    } catch (e: any) {
+      setItemsError(e?.message ?? "Image upload failed.");
+    } finally {
+      setUploading(false);
     }
 
     setName("");
     setQty("1");
     setUnit("");
     setExpiresAt("");
+    setNewImageFile(null);
 
     await refreshItems(selectedCell.id);
     await refreshCellSummaries();
@@ -363,51 +447,70 @@ export default function Page() {
   }
 
   async function runSearch(term: string) {
-  const t = term.trim();
-  if (!t) {
-    setHits([]);
+    const t = term.trim();
+    if (!t) {
+      setHits([]);
+      setSearchError(null);
+      return;
+    }
+
+    setSearching(true);
     setSearchError(null);
-    return;
-  }
 
-  setSearching(true);
-  setSearchError(null);
+    const cellIds = Object.values(cellsByCode).map((c) => c.id);
+    if (cellIds.length === 0) {
+      setSearching(false);
+      setHits([]);
+      return;
+    }
 
-  const cellIds = Object.values(cellsByCode).map((c) => c.id);
-  if (cellIds.length === 0) {
-    setSearching(false);
-    setHits([]);
-    return;
-  }
+    // Prefer trigram RPC. If RPC isn't available, fallback to ilike.
+    const rpc = await supabase.rpc("search_items_fuzzy", {
+      term: t,
+      cell_ids: cellIds,
+      lim: 100,
+    });
 
-  // Uses Supabase RPC: public.search_items_fuzzy
-  // Returns: id, name, cell_id, qty, unit, updated_at, score
-  const { data, error } = await supabase.rpc("search_items_fuzzy", {
-    term: t,
-    cell_ids: cellIds,
-    lim: 100,
-  });
+    if (!rpc.error) {
+      const mapped =
+        (rpc.data as any[] | null)?.map((r) => ({
+          id: String(r.id),
+          name: String(r.name ?? ""),
+          cell_id: String(r.cell_id),
+          qty: r.qty ?? null,
+          unit: r.unit ?? null,
+        })) ?? [];
+      setHits(mapped);
+      setSearching(false);
+      return;
+    }
 
-  if (error) {
-    setSearchError(error.message);
-    setHits([]);
-    setSearching(false);
-    return;
-  }
+    // Fallback: ilike
+    const fb = await supabase
+      .from("items")
+      .select("id,name,cell_id,qty,unit,updated_at")
+      .in("cell_id", cellIds)
+      .ilike("name", `%${t}%`)
+      .order("updated_at", { ascending: false })
+      .limit(100);
 
-  const mapped =
-    (data as any[] | null)?.map((r) => ({
+    if (fb.error) {
+      setSearchError(fb.error.message);
+      setHits([]);
+      setSearching(false);
+      return;
+    }
+
+    setHits(((fb.data as any[]) ?? []).map((r) => ({
       id: String(r.id),
       name: String(r.name ?? ""),
       cell_id: String(r.cell_id),
       qty: r.qty ?? null,
       unit: r.unit ?? null,
-    })) ?? [];
+    })));
 
-  setHits(mapped);
-  setSearching(false);
-}
-
+    setSearching(false);
+  }
 
   useEffect(() => {
     const term = q;
@@ -420,6 +523,7 @@ export default function Page() {
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [q, Object.keys(cellsByCode).length]);
 
   function jumpToCell(cellId: string) {
@@ -434,6 +538,8 @@ export default function Page() {
     setEditQty(String(parseQty(it.qty)));
     setEditUnit(it.unit ?? "");
     setEditExpiresAt(it.expires_at ?? "");
+    setEditAliasesCsv(aliasesToCsv(it.aliases));
+    setEditImageFile(null);
   }
 
   function cancelEdit() {
@@ -442,6 +548,8 @@ export default function Page() {
     setEditQty("1");
     setEditUnit("");
     setEditExpiresAt("");
+    setEditAliasesCsv("");
+    setEditImageFile(null);
   }
 
   async function saveEdit(itemId: string) {
@@ -454,31 +562,48 @@ export default function Page() {
     setSavingEdit(true);
     setItemsError(null);
 
-    const { error } = await supabase
-      .from("items")
-      .update({
-        name: trimmed,
-        qty: safeQty,
-        unit: editUnit.trim(),
-        expires_at: editExpiresAt ? editExpiresAt : null,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", itemId);
+    try {
+      const base = await supabase
+        .from("items")
+        .update({
+          name: trimmed,
+          qty: safeQty,
+          unit: editUnit.trim(),
+          expires_at: editExpiresAt ? editExpiresAt : null,
+          aliases: csvToAliases(editAliasesCsv),
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", itemId);
 
-    setSavingEdit(false);
+      if (base.error) throw base.error;
 
-    if (error) {
-      setItemsError(error.message);
-      return;
+      if (editImageFile) {
+        setUploading(true);
+        const url = await uploadItemImage(itemId, editImageFile);
+
+        const up = await supabase
+          .from("items")
+          .update({ image_url: url, updated_at: new Date().toISOString() })
+          .eq("id", itemId);
+
+        if (up.error) throw up.error;
+      }
+
+      if (selectedCell) await refreshItems(selectedCell.id);
+      await refreshCellSummaries();
+      await refreshExpiringGlobal();
+      if (q.trim()) await runSearch(q.trim());
+
+      cancelEdit();
+    } catch (e: any) {
+      setItemsError(e?.message ?? "Save failed.");
+    } finally {
+      setUploading(false);
+      setSavingEdit(false);
     }
-
-    if (selectedCell) await refreshItems(selectedCell.id);
-    await refreshCellSummaries();
-    await refreshExpiringGlobal();
-    if (q.trim()) await runSearch(q.trim());
-
-    cancelEdit();
   }
+
+  const dataError = cellsError || summaryError || itemsError;
 
   return (
     <div className="app">
@@ -487,7 +612,12 @@ export default function Page() {
           <div>
             <div className="title">Kitchen Inventory</div>
             <div className="subtitle">
-              {cellsLoading ? "Loading…" : selectedCell ? `Selected: ${displayCode(selectedCell.code)}` : "Select a cell"}
+              {cellsLoading
+                ? "Loading…"
+                : selectedCell
+                ? `Selected: ${displayCode(selectedCell.code)}`
+                : "Select a cell"}
+              {uploading ? " · Uploading…" : ""}
             </div>
           </div>
         </div>
@@ -554,10 +684,10 @@ export default function Page() {
             className="searchInput"
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="Search item (fuzzy: contains match)…"
+            placeholder="Search item (trigram fuzzy)…"
             inputMode="text"
           />
-          {searching ? <div className="searchStatus">Searching…</div> : <div className="searchStatus">{hits.length ? `${hits.length} found` : ""}</div>}
+          <div className="searchStatus">{searching ? "Searching…" : hits.length ? `${hits.length} found` : ""}</div>
         </div>
 
         {searchError && (
@@ -596,18 +726,20 @@ export default function Page() {
         )}
       </header>
 
-      {(cellsError || summaryError || itemsError) && (
+      {dataError && (
         <div className="errorBox">
           <div className="errorTitle">Data error</div>
           {cellsError && <div className="errorLine">Cells: {cellsError}</div>}
           {summaryError && <div className="errorLine">Summaries: {summaryError}</div>}
           {itemsError && <div className="errorLine">Items: {itemsError}</div>}
-          <div className="errorHint">If Supabase RLS is enabled without policies, reads/updates may fail or return empty.</div>
+          <div className="errorHint">
+            Most common causes: missing RLS policy, wrong table/field names, or Storage bucket not created.
+          </div>
         </div>
       )}
 
       <div className="main">
-        {/* Left */}
+        {/* LEFT: layout */}
         <section className="left">
           <div className="kCols">
             {KITCHEN_LAYOUT.map((col) => (
@@ -619,7 +751,6 @@ export default function Page() {
                     const code = rawCode.toUpperCase();
                     const cell = cellsByCode[code];
 
-                    const isLoading = cellsLoading;
                     const missingAfterLoad = !cellsLoading && !cell;
                     const isSelected = selectedCode?.toUpperCase() === code;
 
@@ -630,16 +761,16 @@ export default function Page() {
                       <button
                         key={code}
                         className={`cellBtn ${isSelected ? "selected" : ""}`}
-                        disabled={isLoading || missingAfterLoad}
+                        disabled={cellsLoading || missingAfterLoad}
                         onClick={() => cell && setSelectedCode(code)}
                         title={missingAfterLoad ? "Missing cell record in DB for this code" : undefined}
                       >
                         <div className="cellTop">
                           <div className="cellCode">{displayCode(code)}</div>
-                          {!isLoading && cell && <div className="badge">{count}</div>}
+                          {!cellsLoading && cell && <div className="badge">{count}</div>}
                         </div>
 
-                        {isLoading ? (
+                        {cellsLoading ? (
                           <div className="cellMeta emptyMeta">Loading…</div>
                         ) : missingAfterLoad ? (
                           <div className="cellMeta emptyMeta">Missing in DB</div>
@@ -652,7 +783,11 @@ export default function Page() {
                               const chipClass =
                                 st.kind === "expired" ? "chip chipExpired" : st.kind === "soon" ? "chip chipSoon" : "chip";
                               return (
-                                <div key={`${ln.name}-${idx}`} className={chipClass} title={ln.expires_at ? `${ln.name} · ${ln.expires_at}` : ln.name}>
+                                <div
+                                  key={`${ln.name}-${idx}`}
+                                  className={chipClass}
+                                  title={ln.expires_at ? `${ln.name} · ${ln.expires_at}` : ln.name}
+                                >
                                   {ln.name}
                                 </div>
                               );
@@ -668,7 +803,7 @@ export default function Page() {
           </div>
         </section>
 
-        {/* Right */}
+        {/* RIGHT: selected cell detail */}
         <aside className="right">
           {!selectedCell ? (
             <div className="empty">{cellsLoading ? "Loading…" : "Select a cell to view and edit items."}</div>
@@ -678,15 +813,43 @@ export default function Page() {
                 <div className="cardTitle">Add item</div>
 
                 <div className="form">
-                  <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Item name" inputMode="text" />
+                  <input
+                    className="input"
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    placeholder="Item name"
+                    inputMode="text"
+                  />
 
                   <div className="row">
-                    <input className="input qty" value={qty} onChange={(e) => setQty(e.target.value)} placeholder="Qty" inputMode="decimal" />
-                    <input className="input" value={unit} onChange={(e) => setUnit(e.target.value)} placeholder="Unit" inputMode="text" />
-                    <button className="primary" onClick={addItem}>
+                    <input
+                      className="input qty"
+                      value={qty}
+                      onChange={(e) => setQty(e.target.value)}
+                      placeholder="Qty"
+                      inputMode="decimal"
+                    />
+                    <input
+                      className="input"
+                      value={unit}
+                      onChange={(e) => setUnit(e.target.value)}
+                      placeholder="Unit"
+                      inputMode="text"
+                    />
+                    <button className="primary" onClick={addItem} disabled={!name.trim() || uploading}>
                       Add
                     </button>
                   </div>
+
+                  <div className="row">
+                    <input
+                      className="input"
+                      type="file"
+                      accept="image/*"
+                      onChange={(e) => setNewImageFile(e.target.files?.[0] ?? null)}
+                    />
+                  </div>
+                  <div className="hint">{newImageFile ? `Selected image: ${newImageFile.name}` : "Optional: upload an item photo"}</div>
 
                   <div className="expiryBlock">
                     <div className="expiryLabel">Expire date</div>
@@ -743,6 +906,12 @@ export default function Page() {
                       <li key={it.id} className={itemClass}>
                         {!isEditing ? (
                           <>
+                            {it.image_url ? (
+                              <img className="thumb" src={it.image_url} alt={it.name} />
+                            ) : (
+                              <div className="thumb placeholder" />
+                            )}
+
                             <div className="itemLeft">
                               <div className="itemName">{it.name}</div>
                               <div className="itemMeta">
@@ -767,6 +936,23 @@ export default function Page() {
                               <input className="input qty" value={editQty} onChange={(e) => setEditQty(e.target.value)} placeholder="Qty" inputMode="decimal" />
                               <input className="input" value={editUnit} onChange={(e) => setEditUnit(e.target.value)} placeholder="Unit" />
                             </div>
+
+                            <input
+                              className="input"
+                              value={editAliasesCsv}
+                              onChange={(e) => setEditAliasesCsv(e.target.value)}
+                              placeholder="Aliases (comma-separated): e.g. 黑胡椒, 胡椒, peppercorn"
+                            />
+
+                            <div className="row">
+                              <input
+                                className="input"
+                                type="file"
+                                accept="image/*"
+                                onChange={(e) => setEditImageFile(e.target.files?.[0] ?? null)}
+                              />
+                            </div>
+                            <div className="hint">{editImageFile ? `Selected image: ${editImageFile.name}` : "Optional: replace item photo"}</div>
 
                             <div className="expiryBlock">
                               <div className="expiryLabel">Expire date</div>
@@ -795,10 +981,14 @@ export default function Page() {
                             </div>
 
                             <div className="editActions">
-                              <button className="neutral" disabled={savingEdit} onClick={cancelEdit}>
+                              <button className="neutral" disabled={savingEdit || uploading} onClick={cancelEdit}>
                                 Cancel
                               </button>
-                              <button className="primary" disabled={savingEdit || !editName.trim()} onClick={() => saveEdit(it.id)}>
+                              <button
+                                className="primary"
+                                disabled={savingEdit || uploading || !editName.trim()}
+                                onClick={() => saveEdit(it.id)}
+                              >
                                 {savingEdit ? "Saving…" : "Save"}
                               </button>
                             </div>
@@ -860,6 +1050,7 @@ export default function Page() {
         .header {
           margin-bottom: 12px;
         }
+
         .headerTop {
           display: flex;
           align-items: center;
@@ -867,11 +1058,13 @@ export default function Page() {
           gap: 12px;
           margin-bottom: 10px;
         }
+
         .title {
           font-size: 20px;
           font-weight: 900;
           line-height: 1.2;
         }
+
         .subtitle {
           margin-top: 4px;
           font-size: 12px;
@@ -887,6 +1080,7 @@ export default function Page() {
           margin-top: 10px;
           margin-bottom: 10px;
         }
+
         .expHeader {
           display: flex;
           align-items: baseline;
@@ -894,30 +1088,37 @@ export default function Page() {
           gap: 12px;
           margin-bottom: 8px;
         }
+
         .expTitle {
           font-weight: 900;
           font-size: 12px;
         }
+
         .expMeta {
           font-size: 12px;
           color: var(--muted);
           text-align: right;
         }
+
         .expError {
           font-size: 12px;
           color: rgba(155, 28, 28, 0.9);
         }
+
         .expGrid {
           display: grid;
           grid-template-columns: 1fr 1fr;
           gap: 12px;
+          min-width: 0;
         }
+
         .expColTitle {
           font-size: 12px;
           font-weight: 900;
           color: rgba(31, 35, 40, 0.75);
           margin-bottom: 6px;
         }
+
         .expTextList {
           list-style: disc;
           padding-left: 18px;
@@ -927,10 +1128,12 @@ export default function Page() {
           display: grid;
           gap: 4px;
         }
+
         .expEmptyLi {
           color: var(--muted);
           font-size: 12px;
         }
+
         .expLink {
           appearance: none;
           border: none;
@@ -943,6 +1146,7 @@ export default function Page() {
           text-align: left;
           line-height: 1.35;
         }
+
         .expLink:hover {
           text-decoration: underline;
           text-decoration-color: rgba(47, 93, 124, 0.55);
@@ -955,6 +1159,7 @@ export default function Page() {
           align-items: center;
           margin-top: 10px;
         }
+
         .searchInput {
           padding: 10px 12px;
           border-radius: var(--radius);
@@ -964,11 +1169,13 @@ export default function Page() {
           width: 100%;
           box-shadow: 0 1px 0 rgba(31, 35, 40, 0.03);
         }
+
         .searchInput:focus {
           outline: none;
           border-color: rgba(47, 93, 124, 0.5);
           box-shadow: 0 0 0 4px rgba(47, 93, 124, 0.12);
         }
+
         .searchStatus {
           font-size: 12px;
           color: var(--muted);
@@ -983,6 +1190,7 @@ export default function Page() {
           background: var(--panel);
           box-shadow: var(--shadow);
         }
+
         .resultsList {
           list-style: none;
           padding: 0;
@@ -990,6 +1198,7 @@ export default function Page() {
           display: grid;
           gap: 6px;
         }
+
         .resultBtn {
           width: 100%;
           border: 1px solid var(--border2);
@@ -1004,30 +1213,36 @@ export default function Page() {
           text-align: left;
           transition: transform 80ms ease, border-color 120ms ease, background 120ms ease;
         }
+
         .resultBtn:hover {
           transform: translateY(-1px);
           border-color: rgba(47, 93, 124, 0.35);
           background: #ffffff;
         }
+
         .resultMain {
           min-width: 0;
         }
+
         .resultName {
           font-weight: 900;
           white-space: nowrap;
           overflow: hidden;
           text-overflow: ellipsis;
         }
+
         .resultMeta {
           font-size: 12px;
           color: var(--muted);
           margin-top: 2px;
         }
+
         .resultGo {
           font-size: 12px;
           font-weight: 900;
           color: var(--blue);
         }
+
         .emptySmall {
           font-size: 12px;
           color: var(--muted);
@@ -1042,15 +1257,18 @@ export default function Page() {
           margin-top: 12px;
           margin-bottom: 12px;
         }
+
         .errorTitle {
           font-weight: 900;
           margin-bottom: 6px;
         }
+
         .errorLine {
           font-size: 12px;
           color: rgba(31, 35, 40, 0.85);
           margin-top: 2px;
         }
+
         .errorHint {
           font-size: 12px;
           color: var(--muted);
@@ -1069,9 +1287,9 @@ export default function Page() {
           overflow-x: auto;
           padding-bottom: 8px;
           isolation: isolate;
+          min-width: 0;
         }
 
-        /* Critical: allow grid items to shrink correctly */
         .kCols {
           display: grid;
           grid-auto-flow: column;
@@ -1080,7 +1298,6 @@ export default function Page() {
           align-items: start;
           justify-content: start;
           padding-bottom: 4px;
-
           min-width: 0;
         }
 
@@ -1088,8 +1305,6 @@ export default function Page() {
           display: grid;
           grid-template-rows: auto 1fr;
           gap: 8px;
-
-          /* Critical */
           min-width: 0;
         }
 
@@ -1103,7 +1318,6 @@ export default function Page() {
           display: grid;
           gap: 10px;
           align-content: start;
-
           min-width: 0;
         }
 
@@ -1125,7 +1339,7 @@ export default function Page() {
 
           min-height: 92px;
 
-          /* Critical: prevent long content from breaking layout */
+          /* Critical anti-overlap */
           min-width: 0;
           overflow: hidden;
           position: relative;
@@ -1137,11 +1351,13 @@ export default function Page() {
           background: #ffffff;
           z-index: 2;
         }
+
         .cellBtn:disabled {
           opacity: 0.55;
           cursor: not-allowed;
           box-shadow: none;
         }
+
         .cellBtn.selected {
           background: var(--blueSoft);
           border-color: rgba(47, 93, 124, 0.35);
@@ -1154,10 +1370,12 @@ export default function Page() {
           gap: 8px;
           min-width: 0;
         }
+
         .cellCode {
           font-weight: 900;
           min-width: 0;
         }
+
         .badge {
           font-size: 12px;
           color: var(--blue);
@@ -1173,6 +1391,7 @@ export default function Page() {
           color: rgba(31, 35, 40, 0.78);
           min-width: 0;
         }
+
         .emptyMeta {
           color: var(--muted);
         }
@@ -1186,11 +1405,10 @@ export default function Page() {
           overflow: auto;
           padding-right: 4px;
 
-          /* Critical */
           min-width: 0;
         }
 
-        /* Root fix: long names never break layout */
+        /* Root fix for long strings: never break layout */
         .chip {
           flex: 1 1 auto;
           min-width: 0;
@@ -1211,10 +1429,12 @@ export default function Page() {
           -webkit-line-clamp: 2;
           overflow: hidden;
         }
+
         .chipSoon {
           background: var(--warnBg);
           border-color: var(--warnBorder);
         }
+
         .chipExpired {
           background: var(--expBg);
           border-color: var(--expBorder);
@@ -1222,7 +1442,7 @@ export default function Page() {
 
         /* RIGHT */
         .right {
-          width: 380px;
+          width: 400px;
           min-width: 0;
         }
 
@@ -1233,6 +1453,7 @@ export default function Page() {
           background: var(--panel);
           box-shadow: var(--shadow);
         }
+
         .cardTitle {
           font-size: 12px;
           font-weight: 900;
@@ -1244,6 +1465,7 @@ export default function Page() {
           gap: 10px;
           min-width: 0;
         }
+
         .row {
           display: flex;
           gap: 8px;
@@ -1260,11 +1482,13 @@ export default function Page() {
           min-width: 0;
           font-size: 14px;
         }
+
         .input:focus {
           outline: none;
           border-color: rgba(47, 93, 124, 0.5);
           box-shadow: 0 0 0 4px rgba(47, 93, 124, 0.12);
         }
+
         .input.qty {
           width: 110px;
           flex: 0 0 auto;
@@ -1280,10 +1504,12 @@ export default function Page() {
           cursor: pointer;
           transition: transform 80ms ease, background 120ms ease;
         }
+
         .primary:hover {
           transform: translateY(-1px);
           background: var(--blue2);
         }
+
         .primary:disabled {
           opacity: 0.6;
           cursor: not-allowed;
@@ -1299,6 +1525,12 @@ export default function Page() {
           background: var(--panel2);
         }
 
+        .hint {
+          font-size: 12px;
+          color: var(--muted);
+          margin-top: -6px;
+        }
+
         .itemsHeader {
           display: flex;
           justify-content: space-between;
@@ -1308,10 +1540,12 @@ export default function Page() {
           margin-bottom: 8px;
           min-width: 0;
         }
+
         .itemsTitle {
           font-size: 12px;
           font-weight: 900;
         }
+
         .itemsCount {
           font-size: 12px;
           color: var(--muted);
@@ -1326,6 +1560,20 @@ export default function Page() {
           min-width: 0;
         }
 
+        .thumb {
+          width: 44px;
+          height: 44px;
+          border-radius: 12px;
+          object-fit: cover;
+          border: 1px solid rgba(31, 35, 40, 0.1);
+          flex: 0 0 auto;
+        }
+
+        .thumb.placeholder {
+          background: rgba(31, 35, 40, 0.06);
+          border: 1px dashed rgba(31, 35, 40, 0.16);
+        }
+
         .item {
           border: 1px solid var(--border);
           border-radius: var(--radius);
@@ -1338,10 +1586,12 @@ export default function Page() {
           box-shadow: 0 1px 0 rgba(31, 35, 40, 0.03);
           min-width: 0;
         }
+
         .item.soon {
           border-color: var(--warnBorder);
           background: var(--warnBg);
         }
+
         .item.expired {
           border-color: var(--expBorder);
           background: var(--expBg);
@@ -1349,13 +1599,16 @@ export default function Page() {
 
         .itemLeft {
           min-width: 0;
+          flex: 1 1 auto;
         }
+
         .itemName {
           font-weight: 900;
           white-space: nowrap;
           overflow: hidden;
           text-overflow: ellipsis;
         }
+
         .itemMeta {
           font-size: 12px;
           color: var(--muted);
@@ -1374,6 +1627,7 @@ export default function Page() {
           gap: 10px;
           min-width: 0;
         }
+
         .editGrid {
           display: grid;
           grid-template-columns: 1fr 110px 1fr;
@@ -1381,6 +1635,7 @@ export default function Page() {
           align-items: center;
           min-width: 0;
         }
+
         .editActions {
           display: flex;
           justify-content: flex-end;
@@ -1395,16 +1650,19 @@ export default function Page() {
           display: grid;
           gap: 8px;
         }
+
         .expiryLabel {
           font-size: 12px;
           font-weight: 900;
           color: rgba(31, 35, 40, 0.78);
         }
+
         .pillRow {
           display: flex;
           flex-wrap: wrap;
           gap: 8px;
         }
+
         .pill {
           padding: 8px 10px;
           border-radius: 999px;
@@ -1415,19 +1673,23 @@ export default function Page() {
           font-size: 12px;
           cursor: pointer;
         }
+
         .pill:hover {
           border-color: rgba(47, 93, 124, 0.35);
           background: rgba(47, 93, 124, 0.12);
         }
+
         .pill.ghost {
           background: transparent;
           border-color: var(--border);
           color: rgba(31, 35, 40, 0.75);
         }
+
         .expiryCustomRow {
           display: grid;
           gap: 6px;
         }
+
         .expiryHint {
           font-size: 12px;
           color: var(--muted);
@@ -1443,6 +1705,7 @@ export default function Page() {
           .app {
             padding: 12px;
           }
+
           .main {
             flex-direction: column;
             gap: 12px;
@@ -1451,6 +1714,7 @@ export default function Page() {
           .expGrid {
             grid-template-columns: 1fr;
           }
+
           .expMeta {
             text-align: left;
           }
@@ -1468,9 +1732,11 @@ export default function Page() {
             grid-template-columns: 1fr 1fr;
             gap: 8px;
           }
+
           .input.qty {
             width: 100%;
           }
+
           .primary {
             grid-column: 1 / -1;
             width: 100%;
@@ -1480,6 +1746,7 @@ export default function Page() {
             grid-template-columns: 1fr;
             gap: 6px;
           }
+
           .searchStatus {
             text-align: right;
           }
@@ -1487,6 +1754,7 @@ export default function Page() {
           .item {
             align-items: flex-start;
           }
+
           .itemActions {
             width: 100%;
             justify-content: flex-end;
@@ -1495,9 +1763,11 @@ export default function Page() {
           .editGrid {
             grid-template-columns: 1fr 1fr;
           }
+
           .editGrid .input:nth-child(1) {
             grid-column: 1 / -1;
           }
+
           .editActions {
             justify-content: space-between;
           }
