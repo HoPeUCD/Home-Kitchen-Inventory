@@ -5,7 +5,7 @@ import { supabase } from "@/lib/supabase";
 
 /**
  * Layout:
- * Column 2 now includes K21 + Fridge + Freezer under it.
+ * Column 2 includes K21 + Fridge + Freezer
  */
 const KITCHEN_LAYOUT = [
   { title: "Column 1", cells: ["K11", "K12", "K13", "K14", "K15", "K16", "K17", "K18"] },
@@ -17,7 +17,6 @@ const KITCHEN_LAYOUT = [
   { title: "Column 7", cells: ["K71", "K72"] },
 ] as const;
 
-/** Pretty labels for special cells */
 const CODE_LABELS: Record<string, string> = {
   K2_FRIDGE: "Fridge",
   K2_FREEZER: "Freezer",
@@ -28,7 +27,9 @@ function displayCode(code: string) {
   return CODE_LABELS[c] ?? c;
 }
 
-const ALL_CODES = Array.from(new Set(KITCHEN_LAYOUT.flatMap((c) => c.cells.map((x) => x.toUpperCase()))));
+const ALL_CODES = Array.from(
+  new Set(KITCHEN_LAYOUT.flatMap((c) => c.cells.map((x) => x.toUpperCase())))
+);
 
 type Cell = {
   id: string;
@@ -43,8 +44,10 @@ type Item = {
   name: string;
   qty: number | string | null;
   unit: string | null;
-  expires_at?: string | null; // NEW: date string like "2026-01-15" or null
   note?: string | null;
+
+  // NEW: expiration date (YYYY-MM-DD) or null
+  expires_at: string | null;
 };
 
 type SearchHit = {
@@ -62,11 +65,12 @@ function parseQty(v: Item["qty"]) {
   return Number.isFinite(n) ? n : 1;
 }
 
-function toISODate(d: Date) {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
+function toDateOnlyISO(d: Date) {
+  // returns YYYY-MM-DD (local date)
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
 }
 
 function addDays(base: Date, days: number) {
@@ -76,8 +80,16 @@ function addDays(base: Date, days: number) {
 }
 
 function addMonths(base: Date, months: number) {
+  // Handles month rollovers reasonably for "expiry date" use
   const d = new Date(base);
+  const day = d.getDate();
   d.setMonth(d.getMonth() + months);
+
+  // If month change caused date to overflow (e.g., Jan 31 + 1 month),
+  // clamp to last day of resulting month.
+  if (d.getDate() < day) {
+    d.setDate(0);
+  }
   return d;
 }
 
@@ -94,30 +106,30 @@ export default function Page() {
 
   const [items, setItems] = useState<Item[]>([]);
 
-  // per-cell summaries
+  // per-cell summary
   const [countByCellId, setCountByCellId] = useState<Record<string, number>>({});
   const [namesByCellId, setNamesByCellId] = useState<Record<string, string[]>>({});
 
-  // add form
+  // Add form
   const [name, setName] = useState("");
   const [qty, setQty] = useState("1");
   const [unit, setUnit] = useState("");
-  const [expiresAt, setExpiresAt] = useState<string>(""); // NEW: "YYYY-MM-DD" or ""
+  const [expiresAt, setExpiresAt] = useState<string>(""); // NEW: YYYY-MM-DD or ""
 
-  // loading + error states
+  // Loading + error
   const [cellsLoading, setCellsLoading] = useState(true);
   const [cellsError, setCellsError] = useState<string | null>(null);
   const [itemsError, setItemsError] = useState<string | null>(null);
   const [summaryError, setSummaryError] = useState<string | null>(null);
 
-  // search state
+  // Search
   const [q, setQ] = useState("");
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [hits, setHits] = useState<SearchHit[]>([]);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // edit state
+  // Edit
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
   const [editQty, setEditQty] = useState("1");
@@ -130,13 +142,16 @@ export default function Page() {
     return cellsByCode[selectedCode.toUpperCase()] ?? null;
   }, [cellsByCode, selectedCode]);
 
-  // Load cells by code list (robust)
+  // Load cells
   useEffect(() => {
     (async () => {
       setCellsLoading(true);
       setCellsError(null);
 
-      const { data, error } = await supabase.from("cells").select("id,code,zone,position").in("code", ALL_CODES);
+      const { data, error } = await supabase
+        .from("cells")
+        .select("id,code,zone,position")
+        .in("code", ALL_CODES);
 
       if (error) {
         setCellsError(error.message);
@@ -155,7 +170,6 @@ export default function Page() {
       setCellsByCode(byCode);
       setCellsById(byId);
 
-      // auto-select first cell existing in DB
       const firstExisting =
         KITCHEN_LAYOUT.flatMap((col) => col.cells.map((x) => x.toUpperCase())).find((code) => byCode[code]) ?? null;
 
@@ -169,7 +183,7 @@ export default function Page() {
 
     const { data, error } = await supabase
       .from("items")
-      .select("id,cell_id,name,qty,unit,expires_at,note,updated_at")
+      .select("id,cell_id,name,qty,unit,note,expires_at,updated_at")
       .eq("cell_id", cellId)
       .order("updated_at", { ascending: false });
 
@@ -180,7 +194,6 @@ export default function Page() {
     setItems((data as Item[]) ?? []);
   }
 
-  // counts + ALL names per cell, restricted to this layout
   async function refreshCellSummaries() {
     setSummaryError(null);
 
@@ -219,43 +232,25 @@ export default function Page() {
     setNamesByCellId(namesMap);
   }
 
-  // when selected cell changes, load items + exit edit mode
   useEffect(() => {
     if (!selectedCell) return;
     setEditingId(null);
     refreshItems(selectedCell.id);
   }, [selectedCell?.id]);
 
-  // when cells loaded, load summaries
   useEffect(() => {
     if (cellsLoading) return;
     refreshCellSummaries();
   }, [cellsLoading, Object.keys(cellsByCode).length]);
 
-  function applyAddExpirePreset(preset: "1y" | "3m" | "1m" | "1w") {
+  function setExpiryPreset(setter: (v: string) => void, preset: "1w" | "1m" | "3m" | "1y") {
     const now = new Date();
-    const d =
-      preset === "1y"
-        ? addYears(now, 1)
-        : preset === "3m"
-        ? addMonths(now, 3)
-        : preset === "1m"
-        ? addMonths(now, 1)
-        : addDays(now, 7);
-    setExpiresAt(toISODate(d));
-  }
-
-  function applyEditExpirePreset(preset: "1y" | "3m" | "1m" | "1w") {
-    const now = new Date();
-    const d =
-      preset === "1y"
-        ? addYears(now, 1)
-        : preset === "3m"
-        ? addMonths(now, 3)
-        : preset === "1m"
-        ? addMonths(now, 1)
-        : addDays(now, 7);
-    setEditExpiresAt(toISODate(d));
+    let d = now;
+    if (preset === "1w") d = addDays(now, 7);
+    if (preset === "1m") d = addMonths(now, 1);
+    if (preset === "3m") d = addMonths(now, 3);
+    if (preset === "1y") d = addYears(now, 1);
+    setter(toDateOnlyISO(d));
   }
 
   async function addItem() {
@@ -267,14 +262,12 @@ export default function Page() {
     const qtyNumber = Number(qty || "1");
     const safeQty = Number.isFinite(qtyNumber) ? qtyNumber : 1;
 
-    const expiresValue = expiresAt.trim() ? expiresAt.trim() : null;
-
     const { error } = await supabase.from("items").insert({
       cell_id: selectedCell.id,
       name: trimmed,
       qty: safeQty,
       unit: unit.trim(),
-      expires_at: expiresValue, // NEW
+      expires_at: expiresAt ? expiresAt : null, // NEW
     });
 
     if (error) {
@@ -285,7 +278,7 @@ export default function Page() {
     setName("");
     setQty("1");
     setUnit("");
-    setExpiresAt(""); // reset
+    setExpiresAt("");
 
     await refreshItems(selectedCell.id);
     await refreshCellSummaries();
@@ -298,13 +291,11 @@ export default function Page() {
       setItemsError(error.message);
       return;
     }
-
     setItems((prev) => prev.filter((x) => x.id !== itemId));
     await refreshCellSummaries();
     if (q.trim()) await runSearch(q.trim());
   }
 
-  // search (fuzzy contains match via ilike)
   async function runSearch(term: string) {
     const t = term.trim();
     if (!t) {
@@ -342,7 +333,6 @@ export default function Page() {
     setSearching(false);
   }
 
-  // debounce search input
   useEffect(() => {
     const term = q;
     if (debounceRef.current) clearTimeout(debounceRef.current);
@@ -362,13 +352,12 @@ export default function Page() {
     setSelectedCode(cell.code.toUpperCase());
   }
 
-  // edit actions
   function startEdit(it: Item) {
     setEditingId(it.id);
     setEditName(it.name ?? "");
     setEditQty(String(parseQty(it.qty)));
     setEditUnit(it.unit ?? "");
-    setEditExpiresAt(it.expires_at ?? "");
+    setEditExpiresAt(it.expires_at ?? ""); // NEW
   }
 
   function cancelEdit() {
@@ -386,8 +375,6 @@ export default function Page() {
     const qtyNumber = Number(editQty || "1");
     const safeQty = Number.isFinite(qtyNumber) ? qtyNumber : 1;
 
-    const expiresValue = editExpiresAt.trim() ? editExpiresAt.trim() : null;
-
     setSavingEdit(true);
     setItemsError(null);
 
@@ -397,7 +384,7 @@ export default function Page() {
         name: trimmed,
         qty: safeQty,
         unit: editUnit.trim(),
-        expires_at: expiresValue, // NEW
+        expires_at: editExpiresAt ? editExpiresAt : null, // NEW
         updated_at: new Date().toISOString(),
       })
       .eq("id", itemId);
@@ -423,7 +410,11 @@ export default function Page() {
           <div>
             <div className="title">Kitchen Inventory</div>
             <div className="subtitle">
-              {cellsLoading ? "Loading…" : selectedCell ? `Selected: ${displayCode(selectedCell.code)}` : "Select a cell"}
+              {cellsLoading
+                ? "Loading…"
+                : selectedCell
+                ? `Selected: ${displayCode(selectedCell.code)}`
+                : "Select a cell"}
             </div>
           </div>
         </div>
@@ -486,7 +477,9 @@ export default function Page() {
           {cellsError && <div className="errorLine">Cells: {cellsError}</div>}
           {summaryError && <div className="errorLine">Summaries: {summaryError}</div>}
           {itemsError && <div className="errorLine">Items: {itemsError}</div>}
-          <div className="errorHint">If Supabase RLS is enabled without policies, reads/updates may fail or return empty.</div>
+          <div className="errorHint">
+            If Supabase RLS is enabled without policies, reads/updates may fail or return empty.
+          </div>
         </div>
       )}
 
@@ -555,6 +548,7 @@ export default function Page() {
             <>
               <div className="card">
                 <div className="cardTitle">Add item</div>
+
                 <div className="form">
                   <input
                     className="input"
@@ -572,40 +566,49 @@ export default function Page() {
                       placeholder="Qty"
                       inputMode="decimal"
                     />
-                    <input className="input" value={unit} onChange={(e) => setUnit(e.target.value)} placeholder="Unit" />
+                    <input
+                      className="input"
+                      value={unit}
+                      onChange={(e) => setUnit(e.target.value)}
+                      placeholder="Unit"
+                      inputMode="text"
+                    />
                     <button className="primary" onClick={addItem}>
                       Add
                     </button>
                   </div>
 
-                  {/* NEW: Expiration controls */}
-                  <div className="expireBlock">
-                    <div className="expireLabel">Expire date</div>
-                    <div className="chipRow">
-                      <button className="chip" type="button" onClick={() => applyAddExpirePreset("1y")}>
+                  {/* NEW: expiry preset + custom date */}
+                  <div className="expiryBlock">
+                    <div className="expiryLabel">Expire date</div>
+                    <div className="pillRow">
+                      <button className="pill" type="button" onClick={() => setExpiryPreset(setExpiresAt, "1y")}>
                         +1 year
                       </button>
-                      <button className="chip" type="button" onClick={() => applyAddExpirePreset("3m")}>
+                      <button className="pill" type="button" onClick={() => setExpiryPreset(setExpiresAt, "3m")}>
                         +3 months
                       </button>
-                      <button className="chip" type="button" onClick={() => applyAddExpirePreset("1m")}>
+                      <button className="pill" type="button" onClick={() => setExpiryPreset(setExpiresAt, "1m")}>
                         +1 month
                       </button>
-                      <button className="chip" type="button" onClick={() => applyAddExpirePreset("1w")}>
+                      <button className="pill" type="button" onClick={() => setExpiryPreset(setExpiresAt, "1w")}>
                         +1 week
                       </button>
-                      <button className="chip ghost" type="button" onClick={() => setExpiresAt("")}>
+                      <button className="pill ghost" type="button" onClick={() => setExpiresAt("")}>
                         Clear
                       </button>
                     </div>
-                    <div className="expireInputRow">
+
+                    <div className="expiryCustomRow">
                       <input
                         className="input"
                         type="date"
                         value={expiresAt}
                         onChange={(e) => setExpiresAt(e.target.value)}
                       />
-                      <div className="hint">Custom date</div>
+                      <div className="expiryHint">
+                        {expiresAt ? `Selected: ${expiresAt}` : "Optional (leave empty if not applicable)"}
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -622,7 +625,6 @@ export default function Page() {
                 <ul className="list">
                   {items.map((it) => {
                     const isEditing = editingId === it.id;
-                    const exp = it.expires_at ? `Expires: ${it.expires_at}` : "No expiry";
 
                     return (
                       <li key={it.id} className="item">
@@ -631,7 +633,8 @@ export default function Page() {
                             <div className="itemLeft">
                               <div className="itemName">{it.name}</div>
                               <div className="itemMeta">
-                                {parseQty(it.qty)} {it.unit ?? ""} · {exp}
+                                {parseQty(it.qty)} {it.unit ?? ""}
+                                {it.expires_at ? ` · Expires: ${it.expires_at}` : ""}
                               </div>
                             </div>
 
@@ -668,34 +671,53 @@ export default function Page() {
                               />
                             </div>
 
-                            {/* NEW: Edit expiration controls */}
-                            <div className="expireBlock">
-                              <div className="expireLabel">Expire date</div>
-                              <div className="chipRow">
-                                <button className="chip" type="button" onClick={() => applyEditExpirePreset("1y")}>
+                            {/* NEW: edit expiry */}
+                            <div className="expiryBlock">
+                              <div className="expiryLabel">Expire date</div>
+                              <div className="pillRow">
+                                <button
+                                  className="pill"
+                                  type="button"
+                                  onClick={() => setExpiryPreset(setEditExpiresAt, "1y")}
+                                >
                                   +1 year
                                 </button>
-                                <button className="chip" type="button" onClick={() => applyEditExpirePreset("3m")}>
+                                <button
+                                  className="pill"
+                                  type="button"
+                                  onClick={() => setExpiryPreset(setEditExpiresAt, "3m")}
+                                >
                                   +3 months
                                 </button>
-                                <button className="chip" type="button" onClick={() => applyEditExpirePreset("1m")}>
+                                <button
+                                  className="pill"
+                                  type="button"
+                                  onClick={() => setExpiryPreset(setEditExpiresAt, "1m")}
+                                >
                                   +1 month
                                 </button>
-                                <button className="chip" type="button" onClick={() => applyEditExpirePreset("1w")}>
+                                <button
+                                  className="pill"
+                                  type="button"
+                                  onClick={() => setExpiryPreset(setEditExpiresAt, "1w")}
+                                >
                                   +1 week
                                 </button>
-                                <button className="chip ghost" type="button" onClick={() => setEditExpiresAt("")}>
+                                <button className="pill ghost" type="button" onClick={() => setEditExpiresAt("")}>
                                   Clear
                                 </button>
                               </div>
-                              <div className="expireInputRow">
+
+                              <div className="expiryCustomRow">
                                 <input
                                   className="input"
                                   type="date"
                                   value={editExpiresAt}
                                   onChange={(e) => setEditExpiresAt(e.target.value)}
                                 />
-                                <div className="hint">Custom date</div>
+                                <div className="expiryHint">
+                                  {editExpiresAt ? `Selected: ${editExpiresAt}` : "Optional"}
+                                </div>
                               </div>
                             </div>
 
@@ -726,7 +748,7 @@ export default function Page() {
       {/* Oat + Blue theme */}
       <style jsx global>{`
         :root {
-          --bg: #fbf7f0;
+          --bg: #fbf7f0; /* oat */
           --panel: #fffaf2;
           --panel2: #fffdf7;
           --text: #1f2328;
@@ -745,7 +767,9 @@ export default function Page() {
           --radius: 14px;
         }
 
-        * { box-sizing: border-box; }
+        * {
+          box-sizing: border-box;
+        }
         body {
           margin: 0;
           font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
@@ -753,11 +777,32 @@ export default function Page() {
           color: var(--text);
         }
 
-        .app { padding: 16px; padding-bottom: max(16px, env(safe-area-inset-bottom)); }
-        .header { margin-bottom: 12px; }
-        .headerTop { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
-        .title { font-size: 20px; font-weight: 900; line-height: 1.2; }
-        .subtitle { margin-top: 4px; font-size: 12px; color: var(--muted); }
+        .app {
+          padding: 16px;
+          padding-bottom: max(16px, env(safe-area-inset-bottom));
+        }
+
+        .header {
+          margin-bottom: 12px;
+        }
+        .headerTop {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          margin-bottom: 10px;
+        }
+
+        .title {
+          font-size: 20px;
+          font-weight: 900;
+          line-height: 1.2;
+        }
+        .subtitle {
+          margin-top: 4px;
+          font-size: 12px;
+          color: var(--muted);
+        }
 
         .searchBar {
           display: grid;
@@ -780,7 +825,11 @@ export default function Page() {
           border-color: rgba(47, 93, 124, 0.5);
           box-shadow: 0 0 0 4px rgba(47, 93, 124, 0.12);
         }
-        .searchStatus { font-size: 12px; color: var(--muted); white-space: nowrap; }
+        .searchStatus {
+          font-size: 12px;
+          color: var(--muted);
+          white-space: nowrap;
+        }
 
         .results {
           margin-top: 10px;
@@ -790,7 +839,13 @@ export default function Page() {
           background: var(--panel);
           box-shadow: var(--shadow);
         }
-        .resultsList { list-style: none; padding: 0; margin: 0; display: grid; gap: 6px; }
+        .resultsList {
+          list-style: none;
+          padding: 0;
+          margin: 0;
+          display: grid;
+          gap: 6px;
+        }
         .resultBtn {
           width: 100%;
           border: 1px solid var(--border2);
@@ -810,11 +865,30 @@ export default function Page() {
           border-color: rgba(47, 93, 124, 0.35);
           background: #ffffff;
         }
-        .resultMain { min-width: 0; }
-        .resultName { font-weight: 900; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .resultMeta { font-size: 12px; color: var(--muted); margin-top: 2px; }
-        .resultGo { font-size: 12px; font-weight: 900; color: var(--blue); }
-        .emptySmall { font-size: 12px; color: var(--muted); padding: 6px 4px; }
+        .resultMain {
+          min-width: 0;
+        }
+        .resultName {
+          font-weight: 900;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+        .resultMeta {
+          font-size: 12px;
+          color: var(--muted);
+          margin-top: 2px;
+        }
+        .resultGo {
+          font-size: 12px;
+          font-weight: 900;
+          color: var(--blue);
+        }
+        .emptySmall {
+          font-size: 12px;
+          color: var(--muted);
+          padding: 6px 4px;
+        }
 
         .errorBox {
           border: 1px solid var(--dangerBorder);
@@ -824,17 +898,51 @@ export default function Page() {
           margin-top: 12px;
           margin-bottom: 12px;
         }
-        .errorTitle { font-weight: 900; margin-bottom: 6px; }
-        .errorLine { font-size: 12px; color: rgba(31, 35, 40, 0.85); margin-top: 2px; }
-        .errorHint { font-size: 12px; color: var(--muted); margin-top: 8px; }
+        .errorTitle {
+          font-weight: 900;
+          margin-bottom: 6px;
+        }
+        .errorLine {
+          font-size: 12px;
+          color: rgba(31, 35, 40, 0.85);
+          margin-top: 2px;
+        }
+        .errorHint {
+          font-size: 12px;
+          color: var(--muted);
+          margin-top: 8px;
+        }
 
-        .main { display: flex; gap: 16px; align-items: flex-start; }
-        .left { flex: 1; overflow-x: auto; padding-bottom: 6px; }
-        .columns { display: flex; gap: 12px; align-items: flex-start; min-height: 420px; }
+        .main {
+          display: flex;
+          gap: 16px;
+          align-items: flex-start;
+        }
+        .left {
+          flex: 1;
+          overflow-x: auto;
+          padding-bottom: 6px;
+        }
+        .columns {
+          display: flex;
+          gap: 12px;
+          align-items: flex-start;
+          min-height: 420px;
+        }
 
-        .col { min-width: 150px; }
-        .colTitle { font-size: 12px; font-weight: 900; color: rgba(31, 35, 40, 0.75); margin-bottom: 8px; }
-        .colCells { display: grid; gap: 8px; }
+        .col {
+          min-width: 150px;
+        }
+        .colTitle {
+          font-size: 12px;
+          font-weight: 900;
+          color: rgba(31, 35, 40, 0.75);
+          margin-bottom: 8px;
+        }
+        .colCells {
+          display: grid;
+          gap: 8px;
+        }
 
         .cellBtn {
           width: 100%;
@@ -852,11 +960,25 @@ export default function Page() {
           border-color: rgba(47, 93, 124, 0.25);
           background: #ffffff;
         }
-        .cellBtn:disabled { opacity: 0.55; cursor: not-allowed; box-shadow: none; }
-        .cellBtn.selected { background: var(--blueSoft); border-color: rgba(47, 93, 124, 0.35); }
+        .cellBtn:disabled {
+          opacity: 0.55;
+          cursor: not-allowed;
+          box-shadow: none;
+        }
+        .cellBtn.selected {
+          background: var(--blueSoft);
+          border-color: rgba(47, 93, 124, 0.35);
+        }
 
-        .cellTop { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
-        .cellCode { font-weight: 900; }
+        .cellTop {
+          display: flex;
+          justify-content: space-between;
+          gap: 8px;
+          align-items: center;
+        }
+        .cellCode {
+          font-weight: 900;
+        }
         .badge {
           font-size: 12px;
           color: var(--blue);
@@ -867,12 +989,29 @@ export default function Page() {
           flex: 0 0 auto;
         }
 
-        .cellMeta { margin-top: 6px; font-size: 12px; color: rgba(31, 35, 40, 0.78); }
-        .emptyMeta { color: var(--muted); }
-        .listMeta { max-height: 96px; overflow: auto; padding-right: 4px; }
-        .cellItemLine { line-height: 1.25; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .cellMeta {
+          margin-top: 6px;
+          font-size: 12px;
+          color: rgba(31, 35, 40, 0.78);
+        }
+        .emptyMeta {
+          color: var(--muted);
+        }
+        .listMeta {
+          max-height: 96px;
+          overflow: auto;
+          padding-right: 4px;
+        }
+        .cellItemLine {
+          line-height: 1.25;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
 
-        .right { width: 380px; }
+        .right {
+          width: 380px;
+        }
 
         .card {
           border: 1px solid var(--border);
@@ -881,10 +1020,21 @@ export default function Page() {
           background: var(--panel);
           box-shadow: var(--shadow);
         }
-        .cardTitle { font-size: 12px; font-weight: 900; margin-bottom: 8px; }
+        .cardTitle {
+          font-size: 12px;
+          font-weight: 900;
+          margin-bottom: 8px;
+        }
 
-        .form { display: grid; gap: 10px; }
-        .row { display: flex; gap: 8px; align-items: center; }
+        .form {
+          display: grid;
+          gap: 10px;
+        }
+        .row {
+          display: flex;
+          gap: 8px;
+          align-items: center;
+        }
 
         .input {
           padding: 10px;
@@ -900,7 +1050,10 @@ export default function Page() {
           border-color: rgba(47, 93, 124, 0.5);
           box-shadow: 0 0 0 4px rgba(47, 93, 124, 0.12);
         }
-        .input.qty { width: 110px; flex: 0 0 auto; }
+        .input.qty {
+          width: 110px;
+          flex: 0 0 auto;
+        }
 
         .primary {
           padding: 10px 12px;
@@ -912,10 +1065,18 @@ export default function Page() {
           cursor: pointer;
           transition: transform 80ms ease, background 120ms ease;
         }
-        .primary:hover { transform: translateY(-1px); background: var(--blue2); }
-        .primary:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
+        .primary:hover {
+          transform: translateY(-1px);
+          background: var(--blue2);
+        }
+        .primary:disabled {
+          opacity: 0.6;
+          cursor: not-allowed;
+          transform: none;
+        }
 
-        .neutral, .danger {
+        .neutral,
+        .danger {
           border: 1px solid var(--border);
           border-radius: 12px;
           padding: 8px 10px;
@@ -931,10 +1092,22 @@ export default function Page() {
           margin-top: 12px;
           margin-bottom: 8px;
         }
-        .itemsTitle { font-size: 12px; font-weight: 900; }
-        .itemsCount { font-size: 12px; color: var(--muted); }
+        .itemsTitle {
+          font-size: 12px;
+          font-weight: 900;
+        }
+        .itemsCount {
+          font-size: 12px;
+          color: var(--muted);
+        }
 
-        .list { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
+        .list {
+          list-style: none;
+          padding: 0;
+          margin: 0;
+          display: grid;
+          gap: 8px;
+        }
 
         .item {
           border: 1px solid var(--border);
@@ -947,66 +1120,158 @@ export default function Page() {
           background: var(--panel);
           box-shadow: 0 1px 0 rgba(31, 35, 40, 0.03);
         }
-        .itemLeft { min-width: 0; }
-        .itemName { font-weight: 900; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .itemMeta { font-size: 12px; color: var(--muted); margin-top: 2px; }
-        .itemActions { display: flex; gap: 8px; flex: 0 0 auto; }
+        .itemLeft {
+          min-width: 0;
+        }
+        .itemName {
+          font-weight: 900;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+        .itemMeta {
+          font-size: 12px;
+          color: var(--muted);
+          margin-top: 2px;
+        }
+        .itemActions {
+          display: flex;
+          gap: 8px;
+          flex: 0 0 auto;
+        }
 
-        .editWrap { width: 100%; display: grid; gap: 10px; }
-        .editGrid { display: grid; grid-template-columns: 1fr 110px 1fr; gap: 8px; align-items: center; }
-        .editActions { display: flex; justify-content: flex-end; gap: 8px; }
+        .editWrap {
+          width: 100%;
+          display: grid;
+          gap: 10px;
+        }
+        .editGrid {
+          display: grid;
+          grid-template-columns: 1fr 110px 1fr;
+          gap: 8px;
+          align-items: center;
+        }
+        .editActions {
+          display: flex;
+          justify-content: flex-end;
+          gap: 8px;
+        }
 
-        /* NEW: expiration UI */
-        .expireBlock { border: 1px solid var(--border2); background: var(--panel2); border-radius: 12px; padding: 10px; }
-        .expireLabel { font-size: 12px; font-weight: 900; margin-bottom: 8px; color: rgba(31, 35, 40, 0.85); }
-        .chipRow { display: flex; gap: 8px; flex-wrap: wrap; }
-        .chip {
+        /* NEW: expiry UI */
+        .expiryBlock {
+          border: 1px solid var(--border2);
+          background: rgba(47, 93, 124, 0.03);
+          border-radius: 12px;
+          padding: 10px;
+          display: grid;
+          gap: 8px;
+        }
+        .expiryLabel {
+          font-size: 12px;
+          font-weight: 900;
+          color: rgba(31, 35, 40, 0.78);
+        }
+        .pillRow {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+        }
+        .pill {
+          padding: 8px 10px;
+          border-radius: 999px;
           border: 1px solid rgba(47, 93, 124, 0.25);
           background: rgba(47, 93, 124, 0.08);
           color: var(--blue);
-          padding: 6px 10px;
-          border-radius: 999px;
-          cursor: pointer;
-          font-weight: 800;
+          font-weight: 900;
           font-size: 12px;
+          cursor: pointer;
         }
-        .chip:hover { background: rgba(47, 93, 124, 0.12); }
-        .chip.ghost {
+        .pill:hover {
+          border-color: rgba(47, 93, 124, 0.35);
+          background: rgba(47, 93, 124, 0.12);
+        }
+        .pill.ghost {
           background: transparent;
-          border: 1px solid var(--border);
-          color: rgba(31, 35, 40, 0.8);
+          border-color: var(--border);
+          color: rgba(31, 35, 40, 0.75);
         }
-        .expireInputRow { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
-        .hint { font-size: 12px; color: var(--muted); white-space: nowrap; }
+        .expiryCustomRow {
+          display: grid;
+          gap: 6px;
+        }
+        .expiryHint {
+          font-size: 12px;
+          color: var(--muted);
+        }
 
-        .empty { font-size: 13px; color: var(--muted); }
+        .empty {
+          font-size: 13px;
+          color: var(--muted);
+        }
 
         @media (max-width: 768px) {
-          .app { padding: 12px; }
-          .main { flex-direction: column; gap: 12px; }
-          .columns { min-height: unset; }
-          .col { min-width: 132px; }
-          .cellBtn { padding: 10px; }
-          .right { width: 100%; }
+          .app {
+            padding: 12px;
+          }
+          .main {
+            flex-direction: column;
+            gap: 12px;
+          }
+          .columns {
+            min-height: unset;
+          }
+          .col {
+            min-width: 132px;
+          }
+          .cellBtn {
+            padding: 10px;
+          }
+          .right {
+            width: 100%;
+          }
 
-          .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-          .input.qty { width: 100%; }
-          .primary { grid-column: 1 / -1; width: 100%; }
+          .row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+          }
+          .input.qty {
+            width: 100%;
+          }
+          .primary {
+            grid-column: 1 / -1;
+            width: 100%;
+          }
 
-          .searchBar { grid-template-columns: 1fr; gap: 6px; }
-          .searchStatus { text-align: right; }
+          .searchBar {
+            grid-template-columns: 1fr;
+            gap: 6px;
+          }
+          .searchStatus {
+            text-align: right;
+          }
 
-          .listMeta { max-height: 88px; }
+          .listMeta {
+            max-height: 88px;
+          }
 
-          .item { align-items: flex-start; }
-          .itemActions { width: 100%; justify-content: flex-end; }
+          .item {
+            align-items: flex-start;
+          }
+          .itemActions {
+            width: 100%;
+            justify-content: flex-end;
+          }
 
-          .editGrid { grid-template-columns: 1fr 1fr; }
-          .editGrid .input:nth-child(1) { grid-column: 1 / -1; }
-          .editActions { justify-content: space-between; }
-
-          .expireInputRow { flex-direction: column; align-items: stretch; }
-          .hint { white-space: normal; }
+          .editGrid {
+            grid-template-columns: 1fr 1fr;
+          }
+          .editGrid .input:nth-child(1) {
+            grid-column: 1 / -1;
+          }
+          .editActions {
+            justify-content: space-between;
+          }
         }
       `}</style>
     </div>
