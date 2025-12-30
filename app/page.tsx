@@ -41,8 +41,12 @@ export default function Page() {
   const [selectedCode, setSelectedCode] = useState<string | null>(null);
 
   const [items, setItems] = useState<Item[]>([]);
-  const [countByCellId, setCountByCellId] = useState<Record<string, number>>({});
 
+  // per-cell summary
+  const [countByCellId, setCountByCellId] = useState<Record<string, number>>({});
+  const [namesByCellId, setNamesByCellId] = useState<Record<string, string[]>>({});
+
+  // add form
   const [name, setName] = useState("");
   const [qty, setQty] = useState("1");
   const [unit, setUnit] = useState("");
@@ -52,6 +56,7 @@ export default function Page() {
     return cellsByCode[selectedCode] ?? null;
   }, [cellsByCode, selectedCode]);
 
+  // Load cells and map by code
   useEffect(() => {
     (async () => {
       const { data, error } = await supabase.from("cells").select("*").eq("zone", "kitchen");
@@ -64,7 +69,8 @@ export default function Page() {
       (data as Cell[] | null)?.forEach((c) => (map[c.code] = c));
       setCellsByCode(map);
 
-      const firstCode = KITCHEN_LAYOUT.flatMap((col) => col.cells).find((code) => map[code]) ?? null;
+      const firstCode =
+        KITCHEN_LAYOUT.flatMap((col) => col.cells).find((code) => map[code]) ?? null;
       setSelectedCode((prev) => prev ?? firstCode);
     })();
   }, []);
@@ -83,18 +89,39 @@ export default function Page() {
     setItems((data as Item[]) ?? []);
   }
 
-  async function refreshCounts() {
-    const { data, error } = await supabase.from("items").select("cell_id");
+  /**
+   * Refresh per-cell summaries:
+   * - countByCellId: total items in each cell
+   * - namesByCellId: ALL item names in each cell (ordered by updated_at desc)
+   */
+  async function refreshCellSummaries() {
+    const { data, error } = await supabase
+      .from("items")
+      .select("cell_id,name,updated_at")
+      .order("updated_at", { ascending: false });
+
     if (error) {
-      console.error("Failed to load item counts:", error.message);
+      console.error("Failed to load cell summaries:", error.message);
       return;
     }
+
     const counts: Record<string, number> = {};
+    const namesMap: Record<string, string[]> = {};
+
     (data ?? []).forEach((row: any) => {
-      const id = row.cell_id as string;
-      counts[id] = (counts[id] ?? 0) + 1;
+      const cellId = row.cell_id as string;
+      const itemName = ((row.name as string) ?? "").trim();
+      if (!itemName) return;
+
+      counts[cellId] = (counts[cellId] ?? 0) + 1;
+
+      if (!namesMap[cellId]) namesMap[cellId] = [];
+      // push ALL names (no limit, no "+N more")
+      namesMap[cellId].push(itemName);
     });
+
     setCountByCellId(counts);
+    setNamesByCellId(namesMap);
   }
 
   useEffect(() => {
@@ -103,7 +130,7 @@ export default function Page() {
   }, [selectedCell?.id]);
 
   useEffect(() => {
-    refreshCounts();
+    refreshCellSummaries();
   }, [Object.keys(cellsByCode).length]);
 
   async function addItem() {
@@ -132,7 +159,7 @@ export default function Page() {
     setUnit("");
 
     await refreshItems(selectedCell.id);
-    await refreshCounts();
+    await refreshCellSummaries();
   }
 
   async function deleteItem(itemId: string) {
@@ -142,7 +169,7 @@ export default function Page() {
       return;
     }
     setItems((prev) => prev.filter((x) => x.id !== itemId));
-    await refreshCounts();
+    await refreshCellSummaries();
   }
 
   return (
@@ -169,7 +196,9 @@ export default function Page() {
                     const cell = cellsByCode[code];
                     const disabled = !cell;
                     const isSelected = selectedCode === code;
+
                     const count = cell ? countByCellId[cell.id] ?? 0 : 0;
+                    const allNames = cell ? namesByCellId[cell.id] ?? [] : [];
 
                     return (
                       <button
@@ -183,7 +212,21 @@ export default function Page() {
                           <div className="cellCode">{code}</div>
                           {!disabled && <div className="badge">{count}</div>}
                         </div>
-                        <div className="cellMeta">Kitchen</div>
+
+                        {/* Show ALL item names in this cell */}
+                        {disabled ? (
+                          <div className="cellMeta">Not in DB</div>
+                        ) : allNames.length === 0 ? (
+                          <div className="cellMeta emptyMeta">Empty</div>
+                        ) : (
+                          <div className="cellMeta listMeta">
+                            {allNames.map((n, idx) => (
+                              <div key={`${n}-${idx}`} className="cellItemLine" title={n}>
+                                {n}
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </button>
                     );
                   })}
@@ -265,9 +308,6 @@ export default function Page() {
       </div>
 
       <style jsx global>{`
-        :root {
-          color-scheme: light;
-        }
         * {
           box-sizing: border-box;
         }
@@ -370,11 +410,30 @@ export default function Page() {
           padding: 2px 8px;
           border-radius: 999px;
           background: #fff;
+          flex: 0 0 auto;
         }
+
         .cellMeta {
-          margin-top: 4px;
+          margin-top: 6px;
           font-size: 12px;
-          opacity: 0.7;
+          opacity: 0.8;
+        }
+        .emptyMeta {
+          opacity: 0.6;
+        }
+
+        /* This makes "show ALL names" practical without exploding card height */
+        .listMeta {
+          max-height: 96px;       /* adjust if you want taller/shorter */
+          overflow: auto;         /* scroll inside the cell */
+          padding-right: 4px;     /* leave room for scrollbar */
+        }
+
+        .cellItemLine {
+          line-height: 1.25;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
         }
 
         .right {
@@ -530,6 +589,10 @@ export default function Page() {
           .primary {
             grid-column: 1 / -1;
             width: 100%;
+          }
+
+          .listMeta {
+            max-height: 88px;
           }
         }
       `}</style>
