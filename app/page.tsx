@@ -316,14 +316,12 @@ export default function Page() {
     setExp30(within30);
   }
 
-  // when selected cell changes, load items + exit edit mode
   useEffect(() => {
     if (!selectedCell) return;
     setEditingId(null);
     refreshItems(selectedCell.id);
   }, [selectedCell?.id]);
 
-  // when cells loaded, load summaries + global expiring view
   useEffect(() => {
     if (cellsLoading) return;
     refreshCellSummaries();
@@ -333,7 +331,6 @@ export default function Page() {
 
   async function addItem() {
     if (!selectedCell) return;
-
     const trimmed = name.trim();
     if (!trimmed) return;
 
@@ -414,7 +411,6 @@ export default function Page() {
     setSearching(false);
   }
 
-  // debounce search input
   useEffect(() => {
     const term = q;
     if (debounceRef.current) clearTimeout(debounceRef.current);
@@ -434,7 +430,6 @@ export default function Page() {
     setSelectedCode(cell.code.toUpperCase());
   }
 
-  // edit actions
   function startEdit(it: Item) {
     setEditingId(it.id);
     setEditName(it.name ?? "");
@@ -499,7 +494,7 @@ export default function Page() {
           </div>
         </div>
 
-        {/* GLOBAL EXPIRING VIEW (compact, text list) */}
+        {/* GLOBAL EXPIRING VIEW (text list) */}
         <div className="expCard">
           <div className="expHeader">
             <div className="expTitle">Expiring soon</div>
@@ -616,12 +611,13 @@ export default function Page() {
       <div className="main">
         {/* Left: layout */}
         <section className="left">
-          <div className="columns">
+          {/* NOTE: renamed to avoid global CSS collision */}
+          <div className="kCols">
             {KITCHEN_LAYOUT.map((col) => (
-              <div key={col.title} className="col">
-                <div className="colTitle">{col.title}</div>
+              <div key={col.title} className="kCol">
+                <div className="kColTitle">{col.title}</div>
 
-                <div className="colCells">
+                <div className="kColCells">
                   {col.cells.map((rawCode) => {
                     const code = rawCode.toUpperCase();
                     const cell = cellsByCode[code];
@@ -699,7 +695,6 @@ export default function Page() {
                     </button>
                   </div>
 
-                  {/* expiry preset + custom date */}
                   <div className="expiryBlock">
                     <div className="expiryLabel">Expire date</div>
                     <div className="pillRow">
@@ -890,7 +885,6 @@ export default function Page() {
           color: var(--muted);
         }
 
-        /* EXPIRING LIST */
         .expCard {
           border: 1px solid var(--border2);
           background: var(--panel);
@@ -961,7 +955,6 @@ export default function Page() {
           text-decoration-color: rgba(47, 93, 124, 0.55);
         }
 
-        /* Search */
         .searchBar {
           display: grid;
           grid-template-columns: 1fr auto;
@@ -1048,7 +1041,6 @@ export default function Page() {
           padding: 6px 4px;
         }
 
-        /* Errors */
         .errorBox {
           border: 1px solid var(--dangerBorder);
           background: var(--dangerBg);
@@ -1072,20 +1064,21 @@ export default function Page() {
           margin-top: 8px;
         }
 
-        /* Main two-panel layout (desktop) */
         .main {
           display: flex;
           gap: 16px;
           align-items: flex-start;
         }
 
-        /* LEFT: robust grid columns, no overlap */
+        /* LEFT: renamed classes to avoid global CSS collision */
         .left {
           flex: 1;
           overflow-x: auto;
           padding-bottom: 8px;
+          isolation: isolate; /* prevents weird stacking from external styles */
         }
-        .columns {
+
+        .kCols {
           display: grid;
           grid-auto-flow: column;
           grid-auto-columns: minmax(160px, 1fr);
@@ -1094,18 +1087,21 @@ export default function Page() {
           justify-content: start;
           padding-bottom: 4px;
         }
-        .col {
+
+        .kCol {
           display: grid;
           grid-template-rows: auto 1fr;
           gap: 8px;
           min-width: 160px;
         }
-        .colTitle {
+
+        .kColTitle {
           font-size: 12px;
           font-weight: 900;
           color: rgba(31, 35, 40, 0.75);
         }
-        .colCells {
+
+        .kColCells {
           display: grid;
           gap: 10px;
           align-content: start;
@@ -1128,11 +1124,13 @@ export default function Page() {
           transition: transform 80ms ease, border-color 120ms ease, background 120ms ease;
 
           min-height: 92px;
+          position: relative;
         }
         .cellBtn:hover {
           transform: translateY(-1px);
           border-color: rgba(47, 93, 124, 0.25);
           background: #ffffff;
+          z-index: 2; /* on hover, float above neighbors */
         }
         .cellBtn:disabled {
           opacity: 0.55;
@@ -1149,6 +1147,7 @@ export default function Page() {
           justify-content: space-between;
           align-items: center;
           gap: 8px;
+          min-width: 0;
         }
         .cellCode {
           font-weight: 900;
@@ -1171,23 +1170,22 @@ export default function Page() {
           color: var(--muted);
         }
 
-        /* Chips in overview (background changes, NOT text color) */
-       .chipWrap {
+        .chipWrap {
           display: flex;
           flex-wrap: wrap;
           gap: 6px;
-
           max-height: 120px;
           overflow: auto;
           padding-right: 4px;
+          min-width: 0;
         }
 
-        /* 关键：允许 chip 在 flex 中缩小 + 限制最大宽度 + 强制省略号 */
+        /* IMPORTANT: fix long names in chips */
         .chip {
-          flex: 0 1 auto;          /* allow shrink */
-          min-width: 0;            /* IMPORTANT: allow ellipsis in flex items */
-          max-width: 100%;         /* never exceed container width */
-          width: fit-content;      /* keep compact when short */
+          flex: 0 1 auto;
+          min-width: 0;
+          max-width: min(90%, 260px);
+          width: fit-content;
 
           background: rgba(31, 35, 40, 0.06);
           border: 1px solid rgba(31, 35, 40, 0.08);
@@ -1199,13 +1197,6 @@ export default function Page() {
           overflow: hidden;
           text-overflow: ellipsis;
         }
-
-        /* 可选：如果你想更“保守”，让每个 chip 最多占 cell 的 90% 宽度 */
-        @supports (width: min(1px, 2px)) {
-          .chip {
-            max-width: min(90%, 260px);
-          }
-        }
         .chipSoon {
           background: var(--warnBg);
           border-color: var(--warnBorder);
@@ -1215,10 +1206,10 @@ export default function Page() {
           border-color: var(--expBorder);
         }
 
-        /* RIGHT panel */
         .right {
           width: 380px;
         }
+
         .card {
           border: 1px solid var(--border);
           border-radius: var(--radius);
@@ -1424,7 +1415,6 @@ export default function Page() {
           color: var(--muted);
         }
 
-        /* MOBILE: stacked layout + larger tap targets + stable column widths */
         @media (max-width: 768px) {
           .app {
             padding: 12px;
@@ -1441,10 +1431,10 @@ export default function Page() {
             text-align: left;
           }
 
-          .columns {
+          .kCols {
             grid-auto-columns: minmax(140px, 1fr);
           }
-          .col {
+          .kCol {
             min-width: 140px;
           }
           .cellBtn {
