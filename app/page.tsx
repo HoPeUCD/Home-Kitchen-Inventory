@@ -3,10 +3,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 
-/**
- * Layout:
- * Column 2 includes K21 + Fridge + Freezer
- */
 const KITCHEN_LAYOUT = [
   { title: "Column 1", cells: ["K11", "K12", "K13", "K14", "K15", "K16", "K17", "K18"] },
   { title: "Column 2", cells: ["K21", "K2_FRIDGE", "K2_FREEZER"] },
@@ -58,7 +54,7 @@ type ExpiringHit = {
   id: string;
   name: string;
   cell_id: string;
-  expires_at: string; // not null
+  expires_at: string;
   qty: number | string | null;
   unit: string | null;
 };
@@ -83,7 +79,6 @@ function toDateOnlyISO(d: Date) {
 }
 
 function parseDateOnlyISO(s: string): Date {
-  // Interpret YYYY-MM-DD as LOCAL date (avoid timezone shift)
   const [y, m, d] = s.split("-").map((x) => Number(x));
   return new Date(y, (m ?? 1) - 1, d ?? 1, 0, 0, 0, 0);
 }
@@ -115,40 +110,34 @@ export default function Page() {
 
   const [items, setItems] = useState<Item[]>([]);
 
-  // per-cell summary
   const [countByCellId, setCountByCellId] = useState<Record<string, number>>({});
   const [cellLinesByCellId, setCellLinesByCellId] = useState<Record<string, CellLine[]>>({});
 
-  // Global expiring view
   const [exp7, setExp7] = useState<ExpiringHit[]>([]);
   const [exp30, setExp30] = useState<ExpiringHit[]>([]);
   const [expError, setExpError] = useState<string | null>(null);
 
-  // Add form
   const [name, setName] = useState("");
   const [qty, setQty] = useState("1");
   const [unit, setUnit] = useState("");
-  const [expiresAt, setExpiresAt] = useState<string>(""); // YYYY-MM-DD or ""
+  const [expiresAt, setExpiresAt] = useState<string>("");
 
-  // Loading + error
   const [cellsLoading, setCellsLoading] = useState(true);
   const [cellsError, setCellsError] = useState<string | null>(null);
   const [itemsError, setItemsError] = useState<string | null>(null);
   const [summaryError, setSummaryError] = useState<string | null>(null);
 
-  // Search
   const [q, setQ] = useState("");
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [hits, setHits] = useState<SearchHit[]>([]);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Edit
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
   const [editQty, setEditQty] = useState("1");
   const [editUnit, setEditUnit] = useState("");
-  const [editExpiresAt, setEditExpiresAt] = useState<string>(""); // YYYY-MM-DD or ""
+  const [editExpiresAt, setEditExpiresAt] = useState<string>("");
   const [savingEdit, setSavingEdit] = useState(false);
 
   const selectedCell: Cell | null = useMemo(() => {
@@ -166,7 +155,6 @@ export default function Page() {
     setter(toDateOnlyISO(d));
   }
 
-  // Load cells
   useEffect(() => {
     (async () => {
       setCellsLoading(true);
@@ -494,7 +482,7 @@ export default function Page() {
           </div>
         </div>
 
-        {/* GLOBAL EXPIRING VIEW (text list) */}
+        {/* Global expiring view */}
         <div className="expCard">
           <div className="expHeader">
             <div className="expTitle">Expiring soon</div>
@@ -609,9 +597,8 @@ export default function Page() {
       )}
 
       <div className="main">
-        {/* Left: layout */}
+        {/* Left */}
         <section className="left">
-          {/* NOTE: renamed to avoid global CSS collision */}
           <div className="kCols">
             {KITCHEN_LAYOUT.map((col) => (
               <div key={col.title} className="kCol">
@@ -655,11 +642,7 @@ export default function Page() {
                               const chipClass =
                                 st.kind === "expired" ? "chip chipExpired" : st.kind === "soon" ? "chip chipSoon" : "chip";
                               return (
-                                <div
-                                  key={`${ln.name}-${idx}`}
-                                  className={chipClass}
-                                  title={ln.expires_at ? `${ln.name} · ${ln.expires_at}` : ln.name}
-                                >
+                                <div key={`${ln.name}-${idx}`} className={chipClass} title={ln.expires_at ? `${ln.name} · ${ln.expires_at}` : ln.name}>
                                   {ln.name}
                                 </div>
                               );
@@ -675,7 +658,7 @@ export default function Page() {
           </div>
         </section>
 
-        {/* Right: details */}
+        {/* Right */}
         <aside className="right">
           {!selectedCell ? (
             <div className="empty">{cellsLoading ? "Loading…" : "Select a cell to view and edit items."}</div>
@@ -851,6 +834,7 @@ export default function Page() {
         * {
           box-sizing: border-box;
         }
+
         body {
           margin: 0;
           font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
@@ -873,7 +857,6 @@ export default function Page() {
           gap: 12px;
           margin-bottom: 10px;
         }
-
         .title {
           font-size: 20px;
           font-weight: 900;
@@ -1070,14 +1053,15 @@ export default function Page() {
           align-items: flex-start;
         }
 
-        /* LEFT: renamed classes to avoid global CSS collision */
+        /* LEFT */
         .left {
           flex: 1;
           overflow-x: auto;
           padding-bottom: 8px;
-          isolation: isolate; /* prevents weird stacking from external styles */
+          isolation: isolate;
         }
 
+        /* Critical: allow grid items to shrink correctly */
         .kCols {
           display: grid;
           grid-auto-flow: column;
@@ -1086,13 +1070,17 @@ export default function Page() {
           align-items: start;
           justify-content: start;
           padding-bottom: 4px;
+
+          min-width: 0;
         }
 
         .kCol {
           display: grid;
           grid-template-rows: auto 1fr;
           gap: 8px;
-          min-width: 160px;
+
+          /* Critical */
+          min-width: 0;
         }
 
         .kColTitle {
@@ -1105,6 +1093,8 @@ export default function Page() {
           display: grid;
           gap: 10px;
           align-content: start;
+
+          min-width: 0;
         }
 
         .cellBtn {
@@ -1124,13 +1114,18 @@ export default function Page() {
           transition: transform 80ms ease, border-color 120ms ease, background 120ms ease;
 
           min-height: 92px;
+
+          /* Critical: prevent long content from breaking layout */
+          min-width: 0;
+          overflow: hidden;
           position: relative;
         }
+
         .cellBtn:hover {
           transform: translateY(-1px);
           border-color: rgba(47, 93, 124, 0.25);
           background: #ffffff;
-          z-index: 2; /* on hover, float above neighbors */
+          z-index: 2;
         }
         .cellBtn:disabled {
           opacity: 0.55;
@@ -1151,6 +1146,7 @@ export default function Page() {
         }
         .cellCode {
           font-weight: 900;
+          min-width: 0;
         }
         .badge {
           font-size: 12px;
@@ -1165,6 +1161,7 @@ export default function Page() {
         .cellMeta {
           font-size: 12px;
           color: rgba(31, 35, 40, 0.78);
+          min-width: 0;
         }
         .emptyMeta {
           color: var(--muted);
@@ -1174,18 +1171,20 @@ export default function Page() {
           display: flex;
           flex-wrap: wrap;
           gap: 6px;
+
           max-height: 120px;
           overflow: auto;
           padding-right: 4px;
+
+          /* Critical */
           min-width: 0;
         }
 
-        /* IMPORTANT: fix long names in chips */
+        /* Root fix: long names never break layout */
         .chip {
-          flex: 0 1 auto;
+          flex: 1 1 auto;
           min-width: 0;
-          max-width: min(90%, 260px);
-          width: fit-content;
+          max-width: 100%;
 
           background: rgba(31, 35, 40, 0.06);
           border: 1px solid rgba(31, 35, 40, 0.08);
@@ -1193,9 +1192,14 @@ export default function Page() {
           padding: 4px 8px;
           line-height: 1.2;
 
-          white-space: nowrap;
+          white-space: normal;
+          overflow-wrap: anywhere;
+          word-break: break-word;
+
+          display: -webkit-box;
+          -webkit-box-orient: vertical;
+          -webkit-line-clamp: 2;
           overflow: hidden;
-          text-overflow: ellipsis;
         }
         .chipSoon {
           background: var(--warnBg);
@@ -1206,8 +1210,10 @@ export default function Page() {
           border-color: var(--expBorder);
         }
 
+        /* RIGHT */
         .right {
           width: 380px;
+          min-width: 0;
         }
 
         .card {
@@ -1226,11 +1232,13 @@ export default function Page() {
         .form {
           display: grid;
           gap: 10px;
+          min-width: 0;
         }
         .row {
           display: flex;
           gap: 8px;
           align-items: center;
+          min-width: 0;
         }
 
         .input {
@@ -1288,6 +1296,7 @@ export default function Page() {
           gap: 12px;
           margin-top: 12px;
           margin-bottom: 8px;
+          min-width: 0;
         }
         .itemsTitle {
           font-size: 12px;
@@ -1304,6 +1313,7 @@ export default function Page() {
           margin: 0;
           display: grid;
           gap: 8px;
+          min-width: 0;
         }
 
         .item {
@@ -1316,6 +1326,7 @@ export default function Page() {
           align-items: center;
           background: var(--panel);
           box-shadow: 0 1px 0 rgba(31, 35, 40, 0.03);
+          min-width: 0;
         }
         .item.soon {
           border-color: var(--warnBorder);
@@ -1351,12 +1362,14 @@ export default function Page() {
           width: 100%;
           display: grid;
           gap: 10px;
+          min-width: 0;
         }
         .editGrid {
           display: grid;
           grid-template-columns: 1fr 110px 1fr;
           gap: 8px;
           align-items: center;
+          min-width: 0;
         }
         .editActions {
           display: flex;
@@ -1415,6 +1428,7 @@ export default function Page() {
           color: var(--muted);
         }
 
+        /* MOBILE */
         @media (max-width: 768px) {
           .app {
             padding: 12px;
@@ -1433,13 +1447,6 @@ export default function Page() {
 
           .kCols {
             grid-auto-columns: minmax(140px, 1fr);
-          }
-          .kCol {
-            min-width: 140px;
-          }
-          .cellBtn {
-            padding: 10px;
-            min-height: 88px;
           }
 
           .right {
