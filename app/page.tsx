@@ -27,9 +27,7 @@ function displayCode(code: string) {
   return CODE_LABELS[c] ?? c;
 }
 
-const ALL_CODES = Array.from(
-  new Set(KITCHEN_LAYOUT.flatMap((c) => c.cells.map((x) => x.toUpperCase())))
-);
+const ALL_CODES = Array.from(new Set(KITCHEN_LAYOUT.flatMap((c) => c.cells.map((x) => x.toUpperCase()))));
 
 type Cell = {
   id: string;
@@ -58,6 +56,15 @@ type SearchHit = {
   unit: string | null;
 };
 
+type ExpiringHit = {
+  id: string;
+  name: string;
+  cell_id: string;
+  expires_at: string; // not null in these lists
+  qty: number | string | null;
+  unit: string | null;
+};
+
 function parseQty(v: Item["qty"]) {
   if (v === null || v === undefined) return 1;
   if (typeof v === "number") return v;
@@ -66,37 +73,38 @@ function parseQty(v: Item["qty"]) {
 }
 
 function toDateOnlyISO(d: Date) {
-  // returns YYYY-MM-DD (local date)
   const yyyy = d.getFullYear();
   const mm = String(d.getMonth() + 1).padStart(2, "0");
   const dd = String(d.getDate()).padStart(2, "0");
   return `${yyyy}-${mm}-${dd}`;
 }
 
-function addDays(base: Date, days: number) {
-  const d = new Date(base);
-  d.setDate(d.getDate() + days);
-  return d;
+function parseDateOnlyISO(s: string): Date {
+  // Interpret YYYY-MM-DD as a LOCAL date (avoid timezone shift)
+  const [y, m, d] = s.split("-").map((x) => Number(x));
+  return new Date(y, (m ?? 1) - 1, d ?? 1, 0, 0, 0, 0);
 }
 
-function addMonths(base: Date, months: number) {
-  // Handles month rollovers reasonably for "expiry date" use
-  const d = new Date(base);
-  const day = d.getDate();
-  d.setMonth(d.getMonth() + months);
-
-  // If month change caused date to overflow (e.g., Jan 31 + 1 month),
-  // clamp to last day of resulting month.
-  if (d.getDate() < day) {
-    d.setDate(0);
-  }
-  return d;
+function startOfToday(): Date {
+  const now = new Date();
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
 }
 
-function addYears(base: Date, years: number) {
-  const d = new Date(base);
-  d.setFullYear(d.getFullYear() + years);
-  return d;
+function daysBetween(a: Date, b: Date) {
+  const MS = 24 * 60 * 60 * 1000;
+  return Math.floor((b.getTime() - a.getTime()) / MS);
+}
+
+function expiryStatus(expiresAt: string | null) {
+  if (!expiresAt) return { kind: "none" as const, days: null as number | null };
+
+  const today = startOfToday();
+  const exp = parseDateOnlyISO(expiresAt);
+  const d = daysBetween(today, exp); // exp - today
+
+  if (d < 0) return { kind: "expired" as const, days: d };
+  if (d <= 30) return { kind: "soon" as const, days: d };
+  return { kind: "ok" as const, days: d };
 }
 
 export default function Page() {
@@ -110,11 +118,16 @@ export default function Page() {
   const [countByCellId, setCountByCellId] = useState<Record<string, number>>({});
   const [namesByCellId, setNamesByCellId] = useState<Record<string, string[]>>({});
 
+  // Global expiring view
+  const [exp7, setExp7] = useState<ExpiringHit[]>([]);
+  const [exp30, setExp30] = useState<ExpiringHit[]>([]);
+  const [expError, setExpError] = useState<string | null>(null);
+
   // Add form
   const [name, setName] = useState("");
   const [qty, setQty] = useState("1");
   const [unit, setUnit] = useState("");
-  const [expiresAt, setExpiresAt] = useState<string>(""); // NEW: YYYY-MM-DD or ""
+  const [expiresAt, setExpiresAt] = useState<string>(""); // YYYY-MM-DD or ""
 
   // Loading + error
   const [cellsLoading, setCellsLoading] = useState(true);
@@ -134,7 +147,7 @@ export default function Page() {
   const [editName, setEditName] = useState("");
   const [editQty, setEditQty] = useState("1");
   const [editUnit, setEditUnit] = useState("");
-  const [editExpiresAt, setEditExpiresAt] = useState<string>(""); // NEW
+  const [editExpiresAt, setEditExpiresAt] = useState<string>(""); // YYYY-MM-DD or ""
   const [savingEdit, setSavingEdit] = useState(false);
 
   const selectedCell: Cell | null = useMemo(() => {
@@ -142,16 +155,23 @@ export default function Page() {
     return cellsByCode[selectedCode.toUpperCase()] ?? null;
   }, [cellsByCode, selectedCode]);
 
+  function setExpiryPreset(setter: (v: string) => void, preset: "1w" | "1m" | "3m" | "1y") {
+    const now = startOfToday();
+    const d = new Date(now);
+    if (preset === "1w") d.setDate(d.getDate() + 7);
+    if (preset === "1m") d.setMonth(d.getMonth() + 1);
+    if (preset === "3m") d.setMonth(d.getMonth() + 3);
+    if (preset === "1y") d.setFullYear(d.getFullYear() + 1);
+    setter(toDateOnlyISO(d));
+  }
+
   // Load cells
   useEffect(() => {
     (async () => {
       setCellsLoading(true);
       setCellsError(null);
 
-      const { data, error } = await supabase
-        .from("cells")
-        .select("id,code,zone,position")
-        .in("code", ALL_CODES);
+      const { data, error } = await supabase.from("cells").select("id,code,zone,position").in("code", ALL_CODES);
 
       if (error) {
         setCellsError(error.message);
@@ -232,26 +252,84 @@ export default function Page() {
     setNamesByCellId(namesMap);
   }
 
+  async function refreshExpiringGlobal() {
+    setExpError(null);
+
+    const cellIds = Object.values(cellsByCode).map((c) => c.id);
+    if (cellIds.length === 0) {
+      setExp7([]);
+      setExp30([]);
+      return;
+    }
+
+    // Pull all items with expires_at not null and qty > 0 from your kitchen cells
+    const { data, error } = await supabase
+      .from("items")
+      .select("id,name,cell_id,expires_at,qty,unit,updated_at")
+      .in("cell_id", cellIds)
+      .not("expires_at", "is", null)
+      .gt("qty", 0)
+      .limit(500);
+
+    if (error) {
+      setExpError(error.message);
+      setExp7([]);
+      setExp30([]);
+      return;
+    }
+
+    const today = startOfToday();
+
+    const normalized: ExpiringHit[] = (data ?? [])
+      .map((r: any) => ({
+        id: String(r.id),
+        name: String(r.name ?? "").trim(),
+        cell_id: String(r.cell_id),
+        expires_at: String(r.expires_at),
+        qty: r.qty ?? null,
+        unit: r.unit ?? null,
+      }))
+      .filter((r) => r.name.length > 0 && r.expires_at.length > 0);
+
+    // Split into <=7 and <=30 (excluding expired; expired will still show in item list in red)
+    const within7: ExpiringHit[] = [];
+    const within30: ExpiringHit[] = [];
+
+    for (const r of normalized) {
+      const exp = parseDateOnlyISO(r.expires_at);
+      const d = daysBetween(today, exp);
+      if (d < 0) continue; // expired: not included in these two “upcoming” buckets
+      if (d <= 7) within7.push(r);
+      if (d <= 30) within30.push(r);
+    }
+
+    // Sort by expires_at then name
+    const sorter = (a: ExpiringHit, b: ExpiringHit) => {
+      if (a.expires_at !== b.expires_at) return a.expires_at.localeCompare(b.expires_at);
+      return a.name.localeCompare(b.name);
+    };
+
+    within7.sort(sorter);
+    within30.sort(sorter);
+
+    setExp7(within7);
+    setExp30(within30);
+  }
+
+  // when selected cell changes, load items + exit edit mode
   useEffect(() => {
     if (!selectedCell) return;
     setEditingId(null);
     refreshItems(selectedCell.id);
   }, [selectedCell?.id]);
 
+  // when cells loaded, load summaries + global expiring view
   useEffect(() => {
     if (cellsLoading) return;
     refreshCellSummaries();
+    refreshExpiringGlobal();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cellsLoading, Object.keys(cellsByCode).length]);
-
-  function setExpiryPreset(setter: (v: string) => void, preset: "1w" | "1m" | "3m" | "1y") {
-    const now = new Date();
-    let d = now;
-    if (preset === "1w") d = addDays(now, 7);
-    if (preset === "1m") d = addMonths(now, 1);
-    if (preset === "3m") d = addMonths(now, 3);
-    if (preset === "1y") d = addYears(now, 1);
-    setter(toDateOnlyISO(d));
-  }
 
   async function addItem() {
     if (!selectedCell) return;
@@ -267,7 +345,7 @@ export default function Page() {
       name: trimmed,
       qty: safeQty,
       unit: unit.trim(),
-      expires_at: expiresAt ? expiresAt : null, // NEW
+      expires_at: expiresAt ? expiresAt : null,
     });
 
     if (error) {
@@ -282,6 +360,7 @@ export default function Page() {
 
     await refreshItems(selectedCell.id);
     await refreshCellSummaries();
+    await refreshExpiringGlobal();
     if (q.trim()) await runSearch(q.trim());
   }
 
@@ -291,8 +370,10 @@ export default function Page() {
       setItemsError(error.message);
       return;
     }
+
     setItems((prev) => prev.filter((x) => x.id !== itemId));
     await refreshCellSummaries();
+    await refreshExpiringGlobal();
     if (q.trim()) await runSearch(q.trim());
   }
 
@@ -333,6 +414,7 @@ export default function Page() {
     setSearching(false);
   }
 
+  // debounce search input
   useEffect(() => {
     const term = q;
     if (debounceRef.current) clearTimeout(debounceRef.current);
@@ -352,12 +434,13 @@ export default function Page() {
     setSelectedCode(cell.code.toUpperCase());
   }
 
+  // edit actions
   function startEdit(it: Item) {
     setEditingId(it.id);
     setEditName(it.name ?? "");
     setEditQty(String(parseQty(it.qty)));
     setEditUnit(it.unit ?? "");
-    setEditExpiresAt(it.expires_at ?? ""); // NEW
+    setEditExpiresAt(it.expires_at ?? "");
   }
 
   function cancelEdit() {
@@ -384,7 +467,7 @@ export default function Page() {
         name: trimmed,
         qty: safeQty,
         unit: editUnit.trim(),
-        expires_at: editExpiresAt ? editExpiresAt : null, // NEW
+        expires_at: editExpiresAt ? editExpiresAt : null,
         updated_at: new Date().toISOString(),
       })
       .eq("id", itemId);
@@ -398,6 +481,7 @@ export default function Page() {
 
     if (selectedCell) await refreshItems(selectedCell.id);
     await refreshCellSummaries();
+    await refreshExpiringGlobal();
     if (q.trim()) await runSearch(q.trim());
 
     cancelEdit();
@@ -410,13 +494,71 @@ export default function Page() {
           <div>
             <div className="title">Kitchen Inventory</div>
             <div className="subtitle">
-              {cellsLoading
-                ? "Loading…"
-                : selectedCell
-                ? `Selected: ${displayCode(selectedCell.code)}`
-                : "Select a cell"}
+              {cellsLoading ? "Loading…" : selectedCell ? `Selected: ${displayCode(selectedCell.code)}` : "Select a cell"}
             </div>
           </div>
+        </div>
+
+        {/* GLOBAL EXPIRING VIEW (compact, top) */}
+        <div className="expCard">
+          <div className="expHeader">
+            <div className="expTitle">Expiring soon</div>
+            <div className="expMeta">Grouped by 7 days / 30 days · click to jump</div>
+          </div>
+
+          {expError ? (
+            <div className="expError">Expiring view error: {expError}</div>
+          ) : (
+            <div className="expGrid">
+              <div className="expCol">
+                <div className="expColTitle">Within 7 days</div>
+                <div className="expList">
+                  {exp7.length === 0 ? (
+                    <div className="expEmpty">None</div>
+                  ) : (
+                    exp7.map((it) => {
+                      const cell = cellsById[it.cell_id];
+                      const where = cell ? displayCode(cell.code) : "Unknown";
+                      return (
+                        <button key={it.id} className="expRow" onClick={() => jumpToCell(it.cell_id)}>
+                          <div className="expRowMain">
+                            <div className="expRowName">{it.name}</div>
+                            <div className="expRowSub">
+                              {where} · {it.expires_at}
+                            </div>
+                          </div>
+                        </button>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+
+              <div className="expCol">
+                <div className="expColTitle">Within 30 days</div>
+                <div className="expList">
+                  {exp30.length === 0 ? (
+                    <div className="expEmpty">None</div>
+                  ) : (
+                    exp30.map((it) => {
+                      const cell = cellsById[it.cell_id];
+                      const where = cell ? displayCode(cell.code) : "Unknown";
+                      return (
+                        <button key={it.id} className="expRow" onClick={() => jumpToCell(it.cell_id)}>
+                          <div className="expRowMain">
+                            <div className="expRowName">{it.name}</div>
+                            <div className="expRowSub">
+                              {where} · {it.expires_at}
+                            </div>
+                          </div>
+                        </button>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Search */}
@@ -428,11 +570,7 @@ export default function Page() {
             placeholder="Search item (fuzzy: contains match)…"
             inputMode="text"
           />
-          {searching ? (
-            <div className="searchStatus">Searching…</div>
-          ) : (
-            <div className="searchStatus">{hits.length ? `${hits.length} found` : ""}</div>
-          )}
+          {searching ? <div className="searchStatus">Searching…</div> : <div className="searchStatus">{hits.length ? `${hits.length} found` : ""}</div>}
         </div>
 
         {searchError && (
@@ -477,9 +615,7 @@ export default function Page() {
           {cellsError && <div className="errorLine">Cells: {cellsError}</div>}
           {summaryError && <div className="errorLine">Summaries: {summaryError}</div>}
           {itemsError && <div className="errorLine">Items: {itemsError}</div>}
-          <div className="errorHint">
-            If Supabase RLS is enabled without policies, reads/updates may fail or return empty.
-          </div>
+          <div className="errorHint">If Supabase RLS is enabled without policies, reads/updates may fail or return empty.</div>
         </div>
       )}
 
@@ -550,35 +686,17 @@ export default function Page() {
                 <div className="cardTitle">Add item</div>
 
                 <div className="form">
-                  <input
-                    className="input"
-                    value={name}
-                    onChange={(e) => setName(e.target.value)}
-                    placeholder="Item name"
-                    inputMode="text"
-                  />
+                  <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Item name" inputMode="text" />
 
                   <div className="row">
-                    <input
-                      className="input qty"
-                      value={qty}
-                      onChange={(e) => setQty(e.target.value)}
-                      placeholder="Qty"
-                      inputMode="decimal"
-                    />
-                    <input
-                      className="input"
-                      value={unit}
-                      onChange={(e) => setUnit(e.target.value)}
-                      placeholder="Unit"
-                      inputMode="text"
-                    />
+                    <input className="input qty" value={qty} onChange={(e) => setQty(e.target.value)} placeholder="Qty" inputMode="decimal" />
+                    <input className="input" value={unit} onChange={(e) => setUnit(e.target.value)} placeholder="Unit" inputMode="text" />
                     <button className="primary" onClick={addItem}>
                       Add
                     </button>
                   </div>
 
-                  {/* NEW: expiry preset + custom date */}
+                  {/* expiry preset + custom date */}
                   <div className="expiryBlock">
                     <div className="expiryLabel">Expire date</div>
                     <div className="pillRow">
@@ -600,15 +718,8 @@ export default function Page() {
                     </div>
 
                     <div className="expiryCustomRow">
-                      <input
-                        className="input"
-                        type="date"
-                        value={expiresAt}
-                        onChange={(e) => setExpiresAt(e.target.value)}
-                      />
-                      <div className="expiryHint">
-                        {expiresAt ? `Selected: ${expiresAt}` : "Optional (leave empty if not applicable)"}
-                      </div>
+                      <input className="input" type="date" value={expiresAt} onChange={(e) => setExpiresAt(e.target.value)} />
+                      <div className="expiryHint">{expiresAt ? `Selected: ${expiresAt}` : "Optional (leave empty if not applicable)"}</div>
                     </div>
                   </div>
                 </div>
@@ -625,16 +736,28 @@ export default function Page() {
                 <ul className="list">
                   {items.map((it) => {
                     const isEditing = editingId === it.id;
+                    const st = expiryStatus(it.expires_at);
+                    const itemClass =
+                      st.kind === "expired" ? "item expired" : st.kind === "soon" ? "item soon" : "item";
+
+                    const expiryText =
+                      it.expires_at && st.days !== null
+                        ? st.kind === "expired"
+                          ? `Expired: ${it.expires_at}`
+                          : st.kind === "soon"
+                          ? `Expires: ${it.expires_at} (${st.days}d)`
+                          : `Expires: ${it.expires_at}`
+                        : "";
 
                     return (
-                      <li key={it.id} className="item">
+                      <li key={it.id} className={itemClass}>
                         {!isEditing ? (
                           <>
                             <div className="itemLeft">
                               <div className="itemName">{it.name}</div>
                               <div className="itemMeta">
                                 {parseQty(it.qty)} {it.unit ?? ""}
-                                {it.expires_at ? ` · Expires: ${it.expires_at}` : ""}
+                                {expiryText ? ` · ${expiryText}` : ""}
                               </div>
                             </div>
 
@@ -650,57 +773,24 @@ export default function Page() {
                         ) : (
                           <div className="editWrap">
                             <div className="editGrid">
-                              <input
-                                className="input"
-                                value={editName}
-                                onChange={(e) => setEditName(e.target.value)}
-                                placeholder="Name"
-                              />
-                              <input
-                                className="input qty"
-                                value={editQty}
-                                onChange={(e) => setEditQty(e.target.value)}
-                                placeholder="Qty"
-                                inputMode="decimal"
-                              />
-                              <input
-                                className="input"
-                                value={editUnit}
-                                onChange={(e) => setEditUnit(e.target.value)}
-                                placeholder="Unit"
-                              />
+                              <input className="input" value={editName} onChange={(e) => setEditName(e.target.value)} placeholder="Name" />
+                              <input className="input qty" value={editQty} onChange={(e) => setEditQty(e.target.value)} placeholder="Qty" inputMode="decimal" />
+                              <input className="input" value={editUnit} onChange={(e) => setEditUnit(e.target.value)} placeholder="Unit" />
                             </div>
 
-                            {/* NEW: edit expiry */}
                             <div className="expiryBlock">
                               <div className="expiryLabel">Expire date</div>
                               <div className="pillRow">
-                                <button
-                                  className="pill"
-                                  type="button"
-                                  onClick={() => setExpiryPreset(setEditExpiresAt, "1y")}
-                                >
+                                <button className="pill" type="button" onClick={() => setExpiryPreset(setEditExpiresAt, "1y")}>
                                   +1 year
                                 </button>
-                                <button
-                                  className="pill"
-                                  type="button"
-                                  onClick={() => setExpiryPreset(setEditExpiresAt, "3m")}
-                                >
+                                <button className="pill" type="button" onClick={() => setExpiryPreset(setEditExpiresAt, "3m")}>
                                   +3 months
                                 </button>
-                                <button
-                                  className="pill"
-                                  type="button"
-                                  onClick={() => setExpiryPreset(setEditExpiresAt, "1m")}
-                                >
+                                <button className="pill" type="button" onClick={() => setExpiryPreset(setEditExpiresAt, "1m")}>
                                   +1 month
                                 </button>
-                                <button
-                                  className="pill"
-                                  type="button"
-                                  onClick={() => setExpiryPreset(setEditExpiresAt, "1w")}
-                                >
+                                <button className="pill" type="button" onClick={() => setExpiryPreset(setEditExpiresAt, "1w")}>
                                   +1 week
                                 </button>
                                 <button className="pill ghost" type="button" onClick={() => setEditExpiresAt("")}>
@@ -709,15 +799,8 @@ export default function Page() {
                               </div>
 
                               <div className="expiryCustomRow">
-                                <input
-                                  className="input"
-                                  type="date"
-                                  value={editExpiresAt}
-                                  onChange={(e) => setEditExpiresAt(e.target.value)}
-                                />
-                                <div className="expiryHint">
-                                  {editExpiresAt ? `Selected: ${editExpiresAt}` : "Optional"}
-                                </div>
+                                <input className="input" type="date" value={editExpiresAt} onChange={(e) => setEditExpiresAt(e.target.value)} />
+                                <div className="expiryHint">{editExpiresAt ? `Selected: ${editExpiresAt}` : "Optional"}</div>
                               </div>
                             </div>
 
@@ -725,11 +808,7 @@ export default function Page() {
                               <button className="neutral" disabled={savingEdit} onClick={cancelEdit}>
                                 Cancel
                               </button>
-                              <button
-                                className="primary"
-                                disabled={savingEdit || !editName.trim()}
-                                onClick={() => saveEdit(it.id)}
-                              >
+                              <button className="primary" disabled={savingEdit || !editName.trim()} onClick={() => saveEdit(it.id)}>
                                 {savingEdit ? "Saving…" : "Save"}
                               </button>
                             </div>
@@ -745,7 +824,7 @@ export default function Page() {
         </aside>
       </div>
 
-      {/* Oat + Blue theme */}
+      {/* Oat + Blue theme + expiry colors */}
       <style jsx global>{`
         :root {
           --bg: #fbf7f0; /* oat */
@@ -759,6 +838,15 @@ export default function Page() {
           --blue: #2f5d7c;
           --blue2: #3f759a;
           --blueSoft: #e7f0f7;
+
+          /* expiry */
+          --warnBg: #fff7d1;
+          --warnBorder: #e8d48a;
+          --warnText: #7a5b00;
+
+          --expBg: #ffecec;
+          --expBorder: #f0b3b3;
+          --expText: #9b1c1c;
 
           --dangerBg: #fff1f1;
           --dangerBorder: #f0caca;
@@ -800,6 +888,90 @@ export default function Page() {
         }
         .subtitle {
           margin-top: 4px;
+          font-size: 12px;
+          color: var(--muted);
+        }
+
+        /* GLOBAL EXPIRING CARD */
+        .expCard {
+          border: 1px solid var(--border2);
+          background: var(--panel);
+          border-radius: var(--radius);
+          box-shadow: var(--shadow);
+          padding: 10px;
+          margin-top: 10px;
+          margin-bottom: 10px;
+        }
+        .expHeader {
+          display: flex;
+          align-items: baseline;
+          justify-content: space-between;
+          gap: 12px;
+          margin-bottom: 8px;
+        }
+        .expTitle {
+          font-weight: 900;
+          font-size: 12px;
+        }
+        .expMeta {
+          font-size: 12px;
+          color: var(--muted);
+          text-align: right;
+        }
+        .expError {
+          font-size: 12px;
+          color: var(--expText);
+        }
+        .expGrid {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 10px;
+        }
+        .expColTitle {
+          font-size: 12px;
+          font-weight: 900;
+          color: rgba(31, 35, 40, 0.75);
+          margin-bottom: 6px;
+        }
+        .expList {
+          border: 1px solid var(--border2);
+          background: var(--panel2);
+          border-radius: 12px;
+          padding: 6px;
+          max-height: 160px; /* compact; scroll if longer */
+          overflow: auto;
+          display: grid;
+          gap: 6px;
+        }
+        .expEmpty {
+          font-size: 12px;
+          color: var(--muted);
+          padding: 6px;
+        }
+        .expRow {
+          width: 100%;
+          border: 1px solid var(--border2);
+          background: #fff;
+          border-radius: 12px;
+          padding: 8px;
+          cursor: pointer;
+          text-align: left;
+          transition: transform 80ms ease, border-color 120ms ease, background 120ms ease;
+        }
+        .expRow:hover {
+          transform: translateY(-1px);
+          border-color: rgba(47, 93, 124, 0.35);
+          background: #ffffff;
+        }
+        .expRowName {
+          font-weight: 900;
+          font-size: 12px;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+        .expRowSub {
+          margin-top: 2px;
           font-size: 12px;
           color: var(--muted);
         }
@@ -1120,6 +1292,16 @@ export default function Page() {
           background: var(--panel);
           box-shadow: 0 1px 0 rgba(31, 35, 40, 0.03);
         }
+        /* NEW: expiry coloring */
+        .item.soon {
+          border-color: var(--warnBorder);
+          background: var(--warnBg);
+        }
+        .item.expired {
+          border-color: var(--expBorder);
+          background: var(--expBg);
+        }
+
         .itemLeft {
           min-width: 0;
         }
@@ -1134,6 +1316,13 @@ export default function Page() {
           color: var(--muted);
           margin-top: 2px;
         }
+        .item.expired .itemMeta {
+          color: var(--expText);
+        }
+        .item.soon .itemMeta {
+          color: var(--warnText);
+        }
+
         .itemActions {
           display: flex;
           gap: 8px;
@@ -1157,7 +1346,7 @@ export default function Page() {
           gap: 8px;
         }
 
-        /* NEW: expiry UI */
+        /* expiry UI */
         .expiryBlock {
           border: 1px solid var(--border2);
           background: rgba(47, 93, 124, 0.03);
@@ -1228,6 +1417,13 @@ export default function Page() {
           }
           .right {
             width: 100%;
+          }
+
+          .expGrid {
+            grid-template-columns: 1fr;
+          }
+          .expMeta {
+            text-align: left;
           }
 
           .row {
