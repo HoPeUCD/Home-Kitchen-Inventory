@@ -43,9 +43,7 @@ type Item = {
   qty: number | string | null;
   unit: string | null;
   note?: string | null;
-
-  // NEW: expiration date (YYYY-MM-DD) or null
-  expires_at: string | null;
+  expires_at: string | null; // YYYY-MM-DD
 };
 
 type SearchHit = {
@@ -65,6 +63,11 @@ type ExpiringHit = {
   unit: string | null;
 };
 
+type CellLine = {
+  name: string;
+  expires_at: string | null;
+};
+
 function parseQty(v: Item["qty"]) {
   if (v === null || v === undefined) return 1;
   if (typeof v === "number") return v;
@@ -80,7 +83,7 @@ function toDateOnlyISO(d: Date) {
 }
 
 function parseDateOnlyISO(s: string): Date {
-  // Interpret YYYY-MM-DD as a LOCAL date (avoid timezone shift)
+  // Interpret YYYY-MM-DD as LOCAL date (avoid timezone shift)
   const [y, m, d] = s.split("-").map((x) => Number(x));
   return new Date(y, (m ?? 1) - 1, d ?? 1, 0, 0, 0, 0);
 }
@@ -97,11 +100,9 @@ function daysBetween(a: Date, b: Date) {
 
 function expiryStatus(expiresAt: string | null) {
   if (!expiresAt) return { kind: "none" as const, days: null as number | null };
-
   const today = startOfToday();
   const exp = parseDateOnlyISO(expiresAt);
   const d = daysBetween(today, exp); // exp - today
-
   if (d < 0) return { kind: "expired" as const, days: d };
   if (d <= 30) return { kind: "soon" as const, days: d };
   return { kind: "ok" as const, days: d };
@@ -116,7 +117,7 @@ export default function Page() {
 
   // per-cell summary
   const [countByCellId, setCountByCellId] = useState<Record<string, number>>({});
-  const [namesByCellId, setNamesByCellId] = useState<Record<string, string[]>>({});
+  const [cellLinesByCellId, setCellLinesByCellId] = useState<Record<string, CellLine[]>>({});
 
   // Global expiring view
   const [exp7, setExp7] = useState<ExpiringHit[]>([]);
@@ -220,15 +221,17 @@ export default function Page() {
     const cellIds = Object.values(cellsByCode).map((c) => c.id);
     if (cellIds.length === 0) {
       setCountByCellId({});
-      setNamesByCellId({});
+      setCellLinesByCellId({});
       return;
     }
 
+    // Pull enough fields to color each line by expires_at
     const { data, error } = await supabase
       .from("items")
-      .select("cell_id,name,updated_at")
+      .select("cell_id,name,expires_at,updated_at")
       .in("cell_id", cellIds)
-      .order("updated_at", { ascending: false });
+      .order("updated_at", { ascending: false })
+      .limit(2000);
 
     if (error) {
       setSummaryError(error.message);
@@ -236,20 +239,21 @@ export default function Page() {
     }
 
     const counts: Record<string, number> = {};
-    const namesMap: Record<string, string[]> = {};
+    const linesMap: Record<string, CellLine[]> = {};
 
     (data ?? []).forEach((row: any) => {
-      const cellId = row.cell_id as string;
-      const itemName = ((row.name as string) ?? "").trim();
+      const cellId = String(row.cell_id);
+      const itemName = String(row.name ?? "").trim();
+      const exp = row.expires_at ? String(row.expires_at) : null;
       if (!itemName) return;
 
       counts[cellId] = (counts[cellId] ?? 0) + 1;
-      if (!namesMap[cellId]) namesMap[cellId] = [];
-      namesMap[cellId].push(itemName);
+      if (!linesMap[cellId]) linesMap[cellId] = [];
+      linesMap[cellId].push({ name: itemName, expires_at: exp });
     });
 
     setCountByCellId(counts);
-    setNamesByCellId(namesMap);
+    setCellLinesByCellId(linesMap);
   }
 
   async function refreshExpiringGlobal() {
@@ -262,7 +266,6 @@ export default function Page() {
       return;
     }
 
-    // Pull all items with expires_at not null and qty > 0 from your kitchen cells
     const { data, error } = await supabase
       .from("items")
       .select("id,name,cell_id,expires_at,qty,unit,updated_at")
@@ -291,19 +294,17 @@ export default function Page() {
       }))
       .filter((r) => r.name.length > 0 && r.expires_at.length > 0);
 
-    // Split into <=7 and <=30 (excluding expired; expired will still show in item list in red)
     const within7: ExpiringHit[] = [];
     const within30: ExpiringHit[] = [];
 
     for (const r of normalized) {
       const exp = parseDateOnlyISO(r.expires_at);
       const d = daysBetween(today, exp);
-      if (d < 0) continue; // expired: not included in these two “upcoming” buckets
+      if (d < 0) continue; // expired not included in these two buckets
       if (d <= 7) within7.push(r);
       if (d <= 30) within30.push(r);
     }
 
-    // Sort by expires_at then name
     const sorter = (a: ExpiringHit, b: ExpiringHit) => {
       if (a.expires_at !== b.expires_at) return a.expires_at.localeCompare(b.expires_at);
       return a.name.localeCompare(b.name);
@@ -499,11 +500,11 @@ export default function Page() {
           </div>
         </div>
 
-        {/* GLOBAL EXPIRING VIEW (compact, top) */}
+        {/* GLOBAL EXPIRING VIEW (compact, text list) */}
         <div className="expCard">
           <div className="expHeader">
             <div className="expTitle">Expiring soon</div>
-            <div className="expMeta">Grouped by 7 days / 30 days · click to jump</div>
+            <div className="expMeta">Text list · click line to jump</div>
           </div>
 
           {expError ? (
@@ -512,50 +513,44 @@ export default function Page() {
             <div className="expGrid">
               <div className="expCol">
                 <div className="expColTitle">Within 7 days</div>
-                <div className="expList">
+                <ul className="expTextList">
                   {exp7.length === 0 ? (
-                    <div className="expEmpty">None</div>
+                    <li className="expEmptyLi">None</li>
                   ) : (
                     exp7.map((it) => {
                       const cell = cellsById[it.cell_id];
                       const where = cell ? displayCode(cell.code) : "Unknown";
                       return (
-                        <button key={it.id} className="expRow" onClick={() => jumpToCell(it.cell_id)}>
-                          <div className="expRowMain">
-                            <div className="expRowName">{it.name}</div>
-                            <div className="expRowSub">
-                              {where} · {it.expires_at}
-                            </div>
-                          </div>
-                        </button>
+                        <li key={it.id}>
+                          <button className="expLink" onClick={() => jumpToCell(it.cell_id)}>
+                            {it.name} — {where} — {it.expires_at}
+                          </button>
+                        </li>
                       );
                     })
                   )}
-                </div>
+                </ul>
               </div>
 
               <div className="expCol">
                 <div className="expColTitle">Within 30 days</div>
-                <div className="expList">
+                <ul className="expTextList">
                   {exp30.length === 0 ? (
-                    <div className="expEmpty">None</div>
+                    <li className="expEmptyLi">None</li>
                   ) : (
                     exp30.map((it) => {
                       const cell = cellsById[it.cell_id];
                       const where = cell ? displayCode(cell.code) : "Unknown";
                       return (
-                        <button key={it.id} className="expRow" onClick={() => jumpToCell(it.cell_id)}>
-                          <div className="expRowMain">
-                            <div className="expRowName">{it.name}</div>
-                            <div className="expRowSub">
-                              {where} · {it.expires_at}
-                            </div>
-                          </div>
-                        </button>
+                        <li key={it.id}>
+                          <button className="expLink" onClick={() => jumpToCell(it.cell_id)}>
+                            {it.name} — {where} — {it.expires_at}
+                          </button>
+                        </li>
                       );
                     })
                   )}
-                </div>
+                </ul>
               </div>
             </div>
           )}
@@ -637,7 +632,7 @@ export default function Page() {
                     const isSelected = selectedCode?.toUpperCase() === code;
 
                     const count = cell ? countByCellId[cell.id] ?? 0 : 0;
-                    const allNames = cell ? namesByCellId[cell.id] ?? [] : [];
+                    const lines = cell ? cellLinesByCellId[cell.id] ?? [] : [];
 
                     return (
                       <button
@@ -656,15 +651,20 @@ export default function Page() {
                           <div className="cellMeta emptyMeta">Loading…</div>
                         ) : missingAfterLoad ? (
                           <div className="cellMeta emptyMeta">Missing in DB</div>
-                        ) : allNames.length === 0 ? (
+                        ) : lines.length === 0 ? (
                           <div className="cellMeta emptyMeta">Empty</div>
                         ) : (
-                          <div className="cellMeta listMeta">
-                            {allNames.map((n, idx) => (
-                              <div key={`${n}-${idx}`} className="cellItemLine" title={n}>
-                                {n}
-                              </div>
-                            ))}
+                          <div className="cellMeta chipWrap">
+                            {lines.map((ln, idx) => {
+                              const st = expiryStatus(ln.expires_at);
+                              const chipClass =
+                                st.kind === "expired" ? "chip chipExpired" : st.kind === "soon" ? "chip chipSoon" : "chip";
+                              return (
+                                <div key={`${ln.name}-${idx}`} className={chipClass} title={ln.expires_at ? `${ln.name} · ${ln.expires_at}` : ln.name}>
+                                  {ln.name}
+                                </div>
+                              );
+                            })}
                           </div>
                         )}
                       </button>
@@ -737,8 +737,7 @@ export default function Page() {
                   {items.map((it) => {
                     const isEditing = editingId === it.id;
                     const st = expiryStatus(it.expires_at);
-                    const itemClass =
-                      st.kind === "expired" ? "item expired" : st.kind === "soon" ? "item soon" : "item";
+                    const itemClass = st.kind === "expired" ? "item expired" : st.kind === "soon" ? "item soon" : "item";
 
                     const expiryText =
                       it.expires_at && st.days !== null
@@ -839,14 +838,12 @@ export default function Page() {
           --blue2: #3f759a;
           --blueSoft: #e7f0f7;
 
-          /* expiry */
+          /* expiry backgrounds */
           --warnBg: #fff7d1;
           --warnBorder: #e8d48a;
-          --warnText: #7a5b00;
 
           --expBg: #ffecec;
           --expBorder: #f0b3b3;
-          --expText: #9b1c1c;
 
           --dangerBg: #fff1f1;
           --dangerBorder: #f0caca;
@@ -892,7 +889,7 @@ export default function Page() {
           color: var(--muted);
         }
 
-        /* GLOBAL EXPIRING CARD */
+        /* GLOBAL EXPIRING CARD (text list) */
         .expCard {
           border: 1px solid var(--border2);
           background: var(--panel);
@@ -920,12 +917,12 @@ export default function Page() {
         }
         .expError {
           font-size: 12px;
-          color: var(--expText);
+          color: rgba(155, 28, 28, 0.9);
         }
         .expGrid {
           display: grid;
           grid-template-columns: 1fr 1fr;
-          gap: 10px;
+          gap: 12px;
         }
         .expColTitle {
           font-size: 12px;
@@ -933,47 +930,34 @@ export default function Page() {
           color: rgba(31, 35, 40, 0.75);
           margin-bottom: 6px;
         }
-        .expList {
-          border: 1px solid var(--border2);
-          background: var(--panel2);
-          border-radius: 12px;
-          padding: 6px;
-          max-height: 160px; /* compact; scroll if longer */
+        .expTextList {
+          list-style: disc;
+          padding-left: 18px;
+          margin: 0;
+          max-height: 160px;
           overflow: auto;
           display: grid;
-          gap: 6px;
+          gap: 4px;
         }
-        .expEmpty {
-          font-size: 12px;
+        .expEmptyLi {
           color: var(--muted);
-          padding: 6px;
+          font-size: 12px;
         }
-        .expRow {
-          width: 100%;
-          border: 1px solid var(--border2);
-          background: #fff;
-          border-radius: 12px;
-          padding: 8px;
+        .expLink {
+          appearance: none;
+          border: none;
+          background: transparent;
+          padding: 0;
+          margin: 0;
+          font: inherit;
+          color: inherit;
           cursor: pointer;
           text-align: left;
-          transition: transform 80ms ease, border-color 120ms ease, background 120ms ease;
+          line-height: 1.35;
         }
-        .expRow:hover {
-          transform: translateY(-1px);
-          border-color: rgba(47, 93, 124, 0.35);
-          background: #ffffff;
-        }
-        .expRowName {
-          font-weight: 900;
-          font-size: 12px;
-          white-space: nowrap;
-          overflow: hidden;
-          text-overflow: ellipsis;
-        }
-        .expRowSub {
-          margin-top: 2px;
-          font-size: 12px;
-          color: var(--muted);
+        .expLink:hover {
+          text-decoration: underline;
+          text-decoration-color: rgba(47, 93, 124, 0.55);
         }
 
         .searchBar {
@@ -1162,23 +1146,41 @@ export default function Page() {
         }
 
         .cellMeta {
-          margin-top: 6px;
+          margin-top: 8px;
           font-size: 12px;
           color: rgba(31, 35, 40, 0.78);
         }
         .emptyMeta {
           color: var(--muted);
         }
-        .listMeta {
-          max-height: 96px;
+
+        /* NEW: chips in overview (background changes, NOT text color) */
+        .chipWrap {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 6px;
+          max-height: 112px;
           overflow: auto;
           padding-right: 4px;
         }
-        .cellItemLine {
-          line-height: 1.25;
+        .chip {
+          background: rgba(31, 35, 40, 0.06);
+          border: 1px solid rgba(31, 35, 40, 0.08);
+          border-radius: 999px;
+          padding: 4px 8px;
+          line-height: 1.2;
           white-space: nowrap;
+          max-width: 100%;
           overflow: hidden;
           text-overflow: ellipsis;
+        }
+        .chipSoon {
+          background: var(--warnBg);
+          border-color: var(--warnBorder);
+        }
+        .chipExpired {
+          background: var(--expBg);
+          border-color: var(--expBorder);
         }
 
         .right {
@@ -1292,7 +1294,6 @@ export default function Page() {
           background: var(--panel);
           box-shadow: 0 1px 0 rgba(31, 35, 40, 0.03);
         }
-        /* NEW: expiry coloring */
         .item.soon {
           border-color: var(--warnBorder);
           background: var(--warnBg);
@@ -1315,12 +1316,6 @@ export default function Page() {
           font-size: 12px;
           color: var(--muted);
           margin-top: 2px;
-        }
-        .item.expired .itemMeta {
-          color: var(--expText);
-        }
-        .item.soon .itemMeta {
-          color: var(--warnText);
         }
 
         .itemActions {
@@ -1346,7 +1341,6 @@ export default function Page() {
           gap: 8px;
         }
 
-        /* expiry UI */
         .expiryBlock {
           border: 1px solid var(--border2);
           background: rgba(47, 93, 124, 0.03);
@@ -1445,10 +1439,6 @@ export default function Page() {
           }
           .searchStatus {
             text-align: right;
-          }
-
-          .listMeta {
-            max-height: 88px;
           }
 
           .item {
