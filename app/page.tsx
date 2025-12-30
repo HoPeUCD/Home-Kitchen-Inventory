@@ -1172,7 +1172,7 @@ export default function Page() {
         }
 
         /* Chips in overview (background changes, NOT text color) */
-        .chipWrap {
+       .chipWrap {
           display: flex;
           flex-wrap: wrap;
           gap: 6px;
@@ -1181,16 +1181,30 @@ export default function Page() {
           overflow: auto;
           padding-right: 4px;
         }
+
+        /* 关键：允许 chip 在 flex 中缩小 + 限制最大宽度 + 强制省略号 */
         .chip {
+          flex: 0 1 auto;          /* allow shrink */
+          min-width: 0;            /* IMPORTANT: allow ellipsis in flex items */
+          max-width: 100%;         /* never exceed container width */
+          width: fit-content;      /* keep compact when short */
+
           background: rgba(31, 35, 40, 0.06);
           border: 1px solid rgba(31, 35, 40, 0.08);
           border-radius: 999px;
           padding: 4px 8px;
           line-height: 1.2;
+
           white-space: nowrap;
-          max-width: 100%;
           overflow: hidden;
           text-overflow: ellipsis;
+        }
+
+        /* 可选：如果你想更“保守”，让每个 chip 最多占 cell 的 90% 宽度 */
+        @supports (width: min(1px, 2px)) {
+          .chip {
+            max-width: min(90%, 260px);
+          }
         }
         .chipSoon {
           background: var(--warnBg);
