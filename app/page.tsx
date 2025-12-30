@@ -52,7 +52,6 @@ export default function Page() {
     return cellsByCode[selectedCode] ?? null;
   }, [cellsByCode, selectedCode]);
 
-  // Step 3: Load cells and map by code
   useEffect(() => {
     (async () => {
       const { data, error } = await supabase.from("cells").select("*").eq("zone", "kitchen");
@@ -62,12 +61,9 @@ export default function Page() {
       }
 
       const map: Record<string, Cell> = {};
-      (data as Cell[] | null)?.forEach((c) => {
-        map[c.code] = c;
-      });
+      (data as Cell[] | null)?.forEach((c) => (map[c.code] = c));
       setCellsByCode(map);
 
-      // Auto-select first available cell in the layout
       const firstCode = KITCHEN_LAYOUT.flatMap((col) => col.cells).find((code) => map[code]) ?? null;
       setSelectedCode((prev) => prev ?? firstCode);
     })();
@@ -150,20 +146,25 @@ export default function Page() {
   }
 
   return (
-    <div style={{ padding: 16, fontFamily: "ui-sans-serif, system-ui" }}>
-      <h1 style={{ fontSize: 20, fontWeight: 800 }}>Kitchen Inventory</h1>
+    <div className="app">
+      <header className="header">
+        <div>
+          <div className="title">Kitchen Inventory</div>
+          <div className="subtitle">
+            {selectedCell ? `Selected: ${selectedCell.code}` : "Select a cell"}
+          </div>
+        </div>
+      </header>
 
-      <div style={{ display: "flex", gap: 16, marginTop: 16, alignItems: "flex-start" }}>
+      <div className="main">
         {/* Left: Cabinet columns */}
-        <div style={{ flex: 1, overflowX: "auto" }}>
-          <div style={{ display: "flex", gap: 12, alignItems: "flex-start", paddingBottom: 8, minHeight: 420 }}>
+        <section className="left">
+          <div className="columns">
             {KITCHEN_LAYOUT.map((col) => (
-              <div key={col.title} style={{ minWidth: 150 }}>
-                <div style={{ fontSize: 12, fontWeight: 800, marginBottom: 8, opacity: 0.8 }}>
-                  {col.title}
-                </div>
+              <div key={col.title} className="col">
+                <div className="colTitle">{col.title}</div>
 
-                <div style={{ display: "grid", gap: 8 }}>
+                <div className="colCells">
                   {col.cells.map((code) => {
                     const cell = cellsByCode[code];
                     const disabled = !cell;
@@ -173,36 +174,16 @@ export default function Page() {
                     return (
                       <button
                         key={code}
+                        className={`cellBtn ${isSelected ? "selected" : ""}`}
                         disabled={disabled}
                         onClick={() => cell && setSelectedCode(code)}
-                        style={{
-                          padding: 12,
-                          borderRadius: 12,
-                          border: "1px solid #ddd",
-                          background: isSelected ? "#f3f3f3" : "white",
-                          textAlign: "left",
-                          cursor: disabled ? "not-allowed" : "pointer",
-                          opacity: disabled ? 0.5 : 1,
-                        }}
                         title={disabled ? "Cell not found in DB (did you insert it?)" : undefined}
                       >
-                        <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
-                          <div style={{ fontWeight: 900 }}>{code}</div>
-                          {!disabled && (
-                            <div
-                              style={{
-                                fontSize: 12,
-                                opacity: 0.75,
-                                border: "1px solid #eee",
-                                padding: "2px 8px",
-                                borderRadius: 999,
-                              }}
-                            >
-                              {count}
-                            </div>
-                          )}
+                        <div className="cellTop">
+                          <div className="cellCode">{code}</div>
+                          {!disabled && <div className="badge">{count}</div>}
                         </div>
-                        <div style={{ fontSize: 12, opacity: 0.7 }}>Kitchen</div>
+                        <div className="cellMeta">Kitchen</div>
                       </button>
                     );
                   })}
@@ -210,101 +191,348 @@ export default function Page() {
               </div>
             ))}
           </div>
-        </div>
+        </section>
 
         {/* Right: Selected cell detail */}
-        <div style={{ width: 380 }}>
-          <div style={{ marginBottom: 8 }}>
-            <div style={{ fontSize: 12, opacity: 0.75 }}>Selected cell</div>
-            <div style={{ fontSize: 16, fontWeight: 900 }}>{selectedCell ? selectedCell.code : "None"}</div>
-          </div>
-
+        <aside className="right">
           {!selectedCell ? (
-            <div style={{ fontSize: 13, opacity: 0.7 }}>Select a cell to view and edit items.</div>
+            <div className="empty">Select a cell to view and edit items.</div>
           ) : (
             <>
               {/* Add form */}
-              <div style={{ border: "1px solid #eee", borderRadius: 12, padding: 12 }}>
-                <div style={{ fontSize: 12, fontWeight: 800, marginBottom: 8 }}>Add item</div>
+              <div className="card">
+                <div className="cardTitle">Add item</div>
 
-                <div style={{ display: "grid", gap: 8 }}>
+                <div className="form">
                   <input
+                    className="input"
                     value={name}
                     onChange={(e) => setName(e.target.value)}
                     placeholder="Item name (e.g. rice, soy sauce)"
-                    style={{ padding: 10, borderRadius: 10, border: "1px solid #ddd" }}
+                    inputMode="text"
                   />
 
-                  <div style={{ display: "flex", gap: 8 }}>
+                  <div className="row">
                     <input
+                      className="input qty"
                       value={qty}
                       onChange={(e) => setQty(e.target.value)}
                       placeholder="Qty"
-                      style={{ width: 110, padding: 10, borderRadius: 10, border: "1px solid #ddd" }}
+                      inputMode="decimal"
                     />
-
                     <input
+                      className="input"
                       value={unit}
                       onChange={(e) => setUnit(e.target.value)}
                       placeholder="Unit (e.g. bag, bottle)"
-                      style={{ flex: 1, padding: 10, borderRadius: 10, border: "1px solid #ddd" }}
+                      inputMode="text"
                     />
-
-                    <button
-                      onClick={addItem}
-                      style={{
-                        padding: "10px 12px",
-                        borderRadius: 10,
-                        border: "1px solid #111",
-                        cursor: "pointer",
-                        fontWeight: 800,
-                      }}
-                    >
+                    <button className="primary" onClick={addItem}>
                       Add
                     </button>
                   </div>
                 </div>
               </div>
 
-              {/* Items list */}
-              <div style={{ marginTop: 12 }}>
-                <div style={{ fontSize: 12, fontWeight: 800, marginBottom: 8 }}>Items in {selectedCell.code}</div>
-
-                {items.length === 0 ? (
-                  <div style={{ fontSize: 13, opacity: 0.7 }}>No items yet.</div>
-                ) : (
-                  <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "grid", gap: 8 }}>
-                    {items.map((it) => (
-                      <li key={it.id} style={{ border: "1px solid #eee", borderRadius: 12, padding: 12 }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
-                          <div>
-                            <div style={{ fontWeight: 900 }}>{it.name}</div>
-                            <div style={{ fontSize: 12, opacity: 0.75 }}>
-                              {parseQty(it.qty)} {it.unit ?? ""}
-                            </div>
-                          </div>
-
-                          <button
-                            onClick={() => deleteItem(it.id)}
-                            style={{
-                              border: "1px solid #ddd",
-                              borderRadius: 10,
-                              padding: "6px 10px",
-                              cursor: "pointer",
-                            }}
-                          >
-                            Delete
-                          </button>
-                        </div>
-                      </li>
-                    ))}
-                  </ul>
-                )}
+              {/* Items */}
+              <div className="itemsHeader">
+                <div className="itemsTitle">Items in {selectedCell.code}</div>
+                <div className="itemsCount">{items.length} total</div>
               </div>
+
+              {items.length === 0 ? (
+                <div className="empty">No items yet.</div>
+              ) : (
+                <ul className="list">
+                  {items.map((it) => (
+                    <li key={it.id} className="item">
+                      <div className="itemLeft">
+                        <div className="itemName">{it.name}</div>
+                        <div className="itemMeta">
+                          {parseQty(it.qty)} {it.unit ?? ""}
+                        </div>
+                      </div>
+                      <button className="danger" onClick={() => deleteItem(it.id)}>
+                        Delete
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </>
           )}
-        </div>
+        </aside>
       </div>
+
+      <style jsx global>{`
+        :root {
+          color-scheme: light;
+        }
+        * {
+          box-sizing: border-box;
+        }
+        body {
+          margin: 0;
+          font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+          background: #fff;
+          color: #111;
+        }
+
+        .app {
+          padding: 16px;
+          padding-bottom: max(16px, env(safe-area-inset-bottom));
+        }
+
+        .header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          margin-bottom: 12px;
+        }
+        .title {
+          font-size: 20px;
+          font-weight: 900;
+          line-height: 1.2;
+        }
+        .subtitle {
+          margin-top: 4px;
+          font-size: 12px;
+          opacity: 0.75;
+        }
+
+        .main {
+          display: flex;
+          gap: 16px;
+          align-items: flex-start;
+        }
+
+        .left {
+          flex: 1;
+          overflow-x: auto;
+          padding-bottom: 6px;
+        }
+
+        .columns {
+          display: flex;
+          gap: 12px;
+          align-items: flex-start;
+          min-height: 420px;
+        }
+
+        .col {
+          min-width: 150px;
+        }
+
+        .colTitle {
+          font-size: 12px;
+          font-weight: 900;
+          opacity: 0.8;
+          margin-bottom: 8px;
+        }
+
+        .colCells {
+          display: grid;
+          gap: 8px;
+        }
+
+        .cellBtn {
+          width: 100%;
+          padding: 12px;
+          border-radius: 12px;
+          border: 1px solid #ddd;
+          background: #fff;
+          text-align: left;
+          cursor: pointer;
+        }
+        .cellBtn:disabled {
+          opacity: 0.45;
+          cursor: not-allowed;
+        }
+        .cellBtn.selected {
+          background: #f3f3f3;
+          border-color: #cfcfcf;
+        }
+
+        .cellTop {
+          display: flex;
+          justify-content: space-between;
+          gap: 8px;
+          align-items: center;
+        }
+        .cellCode {
+          font-weight: 900;
+        }
+        .badge {
+          font-size: 12px;
+          opacity: 0.8;
+          border: 1px solid #eee;
+          padding: 2px 8px;
+          border-radius: 999px;
+          background: #fff;
+        }
+        .cellMeta {
+          margin-top: 4px;
+          font-size: 12px;
+          opacity: 0.7;
+        }
+
+        .right {
+          width: 380px;
+        }
+
+        .card {
+          border: 1px solid #eee;
+          border-radius: 12px;
+          padding: 12px;
+        }
+        .cardTitle {
+          font-size: 12px;
+          font-weight: 900;
+          margin-bottom: 8px;
+        }
+
+        .form {
+          display: grid;
+          gap: 8px;
+        }
+
+        .row {
+          display: flex;
+          gap: 8px;
+          align-items: center;
+        }
+
+        .input {
+          padding: 10px;
+          border-radius: 10px;
+          border: 1px solid #ddd;
+          width: 100%;
+          min-width: 0;
+          font-size: 14px;
+        }
+        .input.qty {
+          width: 110px;
+          flex: 0 0 auto;
+        }
+
+        .primary {
+          padding: 10px 12px;
+          border-radius: 10px;
+          border: 1px solid #111;
+          background: #111;
+          color: #fff;
+          font-weight: 900;
+          cursor: pointer;
+          flex: 0 0 auto;
+        }
+
+        .itemsHeader {
+          display: flex;
+          justify-content: space-between;
+          align-items: baseline;
+          gap: 12px;
+          margin-top: 12px;
+          margin-bottom: 8px;
+        }
+        .itemsTitle {
+          font-size: 12px;
+          font-weight: 900;
+        }
+        .itemsCount {
+          font-size: 12px;
+          opacity: 0.7;
+        }
+
+        .list {
+          list-style: none;
+          padding: 0;
+          margin: 0;
+          display: grid;
+          gap: 8px;
+        }
+
+        .item {
+          border: 1px solid #eee;
+          border-radius: 12px;
+          padding: 12px;
+          display: flex;
+          justify-content: space-between;
+          gap: 10px;
+          align-items: center;
+        }
+        .itemLeft {
+          min-width: 0;
+        }
+        .itemName {
+          font-weight: 900;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+        .itemMeta {
+          font-size: 12px;
+          opacity: 0.75;
+          margin-top: 2px;
+        }
+
+        .danger {
+          border: 1px solid #ddd;
+          border-radius: 10px;
+          padding: 8px 10px;
+          cursor: pointer;
+          background: #fff;
+          flex: 0 0 auto;
+        }
+
+        .empty {
+          font-size: 13px;
+          opacity: 0.7;
+        }
+
+        /* Mobile */
+        @media (max-width: 768px) {
+          .app {
+            padding: 12px;
+          }
+
+          .main {
+            flex-direction: column;
+            gap: 12px;
+          }
+
+          .columns {
+            min-height: unset;
+          }
+
+          .col {
+            min-width: 132px;
+          }
+
+          .cellBtn {
+            padding: 10px;
+          }
+
+          .right {
+            width: 100%;
+          }
+
+          .row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+          }
+
+          .input.qty {
+            width: 100%;
+          }
+
+          .primary {
+            grid-column: 1 / -1;
+            width: 100%;
+          }
+        }
+      `}</style>
     </div>
   );
 }
