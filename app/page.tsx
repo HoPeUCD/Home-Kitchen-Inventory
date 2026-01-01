@@ -49,9 +49,7 @@ type Item = {
 };
 
 type SearchHit = { id: string; name: string; cell_id: string; qty: number | string | null; unit: string | null };
-
 type ExpiringHit = { id: string; name: string; cell_id: string; expires_at: string; qty: number | string | null; unit: string | null };
-
 type CellLine = { name: string; expires_at: string | null; qty: number | string | null };
 
 function parseQty(v: Item["qty"]) {
@@ -99,7 +97,6 @@ function compareByExpiry(a: { expires_at: string | null; name: string }, b: { ex
   const rb = rank(sb.kind);
   if (ra !== rb) return ra - rb;
 
-  // both have date?
   if (a.expires_at && b.expires_at) {
     const c = a.expires_at.localeCompare(b.expires_at);
     if (c !== 0) return c;
@@ -113,7 +110,10 @@ function compareByExpiry(a: { expires_at: string | null; name: string }, b: { ex
 }
 
 function csvToAliases(s: string): string[] {
-  return s.split(",").map((x) => x.trim()).filter(Boolean);
+  return s
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
 }
 function aliasesToCsv(a: string[] | null | undefined) {
   return (a ?? []).join(", ");
@@ -279,7 +279,7 @@ export default function Page() {
   const [items, setItems] = useState<Item[]>([]);
   const [itemsError, setItemsError] = useState<string | null>(null);
 
-  // NEW: preview selected item
+  // Preview selected item
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
 
   const [countByCellId, setCountByCellId] = useState<Record<string, number>>({});
@@ -311,8 +311,12 @@ export default function Page() {
   const [editAliasesCsv, setEditAliasesCsv] = useState("");
   const [editImageFile, setEditImageFile] = useState<File | null>(null);
 
-  // NEW: move location in edit
+  // Move location in edit
   const [editCellId, setEditCellId] = useState<string>("");
+  const [locQuery, setLocQuery] = useState<string>("");
+
+  // Click-map pick mode
+  const [pickMode, setPickMode] = useState(false);
 
   const [savingEdit, setSavingEdit] = useState(false);
 
@@ -350,6 +354,8 @@ export default function Page() {
     setExp30([]);
     setSignedUrlByPath({});
     setSelectedItemId(null);
+    setEditingId(null);
+    setPickMode(false);
   }
 
   async function uploadItemImage(userId: string, itemId: string, file: File) {
@@ -367,7 +373,6 @@ export default function Page() {
       cacheControl: "3600",
     });
     if (up.error) throw up.error;
-
     return path;
   }
 
@@ -391,6 +396,15 @@ export default function Page() {
       return next;
     });
   }
+
+  // ESC to exit pick mode
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") setPickMode(false);
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   // Auth init
   useEffect(() => {
@@ -438,15 +452,12 @@ export default function Page() {
     })();
   }, [user?.id]);
 
-  // Sort items (selected cell list): prioritize expiring
+  // Sort items: prioritize expiring
   function sortItemsForList(rows: Item[]) {
-    // only keep qty > 0 as "in inventory"
     const filtered = rows.filter((r) => parseQty(r.qty) > 0);
     return filtered.sort((a, b) => {
-      // expiry first
       const c = compareByExpiry({ expires_at: a.expires_at, name: a.name }, { expires_at: b.expires_at, name: b.name });
       if (c !== 0) return c;
-      // then updated desc
       const au = a.updated_at ?? "";
       const bu = b.updated_at ?? "";
       return bu.localeCompare(au);
@@ -472,7 +483,6 @@ export default function Page() {
     const rows = sortItemsForList(((data as Item[]) ?? []).map((r) => ({ ...r })));
     setItems(rows);
 
-    // NEW: ensure preview item makes sense
     if (!rows.find((x) => x.id === selectedItemId)) {
       setSelectedItemId(rows[0]?.id ?? null);
     }
@@ -481,7 +491,7 @@ export default function Page() {
     await ensureSignedUrls(paths);
   }
 
-  // Cell summaries: prioritize expiring items inside each cell tile
+  // Cell summaries: prioritize expiring chips
   async function refreshCellSummaries() {
     if (!user) return;
     setSummaryError(null);
@@ -515,14 +525,13 @@ export default function Page() {
       const qv = row.qty ?? null;
 
       if (!itemName) return;
-      if (parseQty(qv) <= 0) return; // only show "at least one" items
+      if (parseQty(qv) <= 0) return;
 
       counts[cellId] = (counts[cellId] ?? 0) + 1;
       if (!linesMap[cellId]) linesMap[cellId] = [];
       linesMap[cellId].push({ name: itemName, expires_at: exp, qty: qv });
     });
 
-    // NEW: sort chips within each cell by expiry priority
     for (const cellId of Object.keys(linesMap)) {
       linesMap[cellId].sort((a, b) => compareByExpiry({ expires_at: a.expires_at, name: a.name }, { expires_at: b.expires_at, name: b.name }));
     }
@@ -592,11 +601,12 @@ export default function Page() {
     setEditingId(null);
     setEditImageFile(null);
     setSelectedItemId(null);
+    setPickMode(false);
     refreshItems(selectedCell.id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id, selectedCell?.id]);
 
-  // Refresh summaries/global expiring when cells loaded
+  // Refresh summaries when cells loaded
   useEffect(() => {
     if (!user) return;
     if (Object.keys(cellsByCode).length === 0) return;
@@ -702,7 +712,6 @@ export default function Page() {
       return;
     }
 
-    // Prefer RPC if exists; fallback to ilike
     const rpc = await supabase.rpc("search_items_fuzzy", { term: t, cell_ids: cellIds, lim: 100 });
 
     if (!rpc.error) {
@@ -777,8 +786,9 @@ export default function Page() {
     setEditAliasesCsv(aliasesToCsv(it.aliases));
     setEditImageFile(null);
 
-    // NEW: edit location
     setEditCellId(it.cell_id);
+    setLocQuery("");
+    setPickMode(false);
   }
   function cancelEdit() {
     setEditingId(null);
@@ -789,6 +799,8 @@ export default function Page() {
     setEditAliasesCsv("");
     setEditImageFile(null);
     setEditCellId("");
+    setLocQuery("");
+    setPickMode(false);
   }
 
   async function saveEdit(itemId: string) {
@@ -816,7 +828,7 @@ export default function Page() {
           unit: editUnit.trim(),
           expires_at: editExpiresAt ? editExpiresAt : null,
           aliases: csvToAliases(editAliasesCsv),
-          cell_id: editCellId, // NEW: move
+          cell_id: editCellId,
           updated_at: new Date().toISOString(),
         })
         .eq("id", itemId)
@@ -838,7 +850,6 @@ export default function Page() {
         await ensureSignedUrls([path]);
       }
 
-      // If moved to another cell, jump there after save
       const movedToCell = editCellId;
 
       cancelEdit();
@@ -860,21 +871,30 @@ export default function Page() {
     }
   }
 
-  // Build dropdown options for moving items (only existing cells)
+  // Build dropdown options for moving items (layout order)
   const cellOptions = useMemo(() => {
-    // Keep layout order, only include codes that exist in DB
-    const opts: { id: string; code: string; label: string }[] = [];
+    const opts: { id: string; code: string; label: string; hay: string }[] = [];
     for (const code of ALL_CODES) {
       const cell = cellsByCode[code];
       if (!cell) continue;
-      opts.push({ id: cell.id, code, label: displayCode(code) });
+      const label = displayCode(code);
+      const hay = `${code} ${label}`.toLowerCase();
+      opts.push({ id: cell.id, code, label, hay });
     }
     return opts;
   }, [cellsByCode]);
 
-  if (!session) return <AuthGate onAuthed={(s) => setSession(s)} />;
+  const filteredCellOptions = useMemo(() => {
+    const t = locQuery.trim().toLowerCase();
+    if (!t) return cellOptions;
+    return cellOptions.filter((o) => o.hay.includes(t));
+  }, [cellOptions, locQuery]);
 
-  const dataError = cellsError || summaryError || itemsError;
+  const currentEditLocationLabel = useMemo(() => {
+    if (!editCellId) return "";
+    const c = cellsById[editCellId];
+    return c ? displayCode(c.code) : "Unknown";
+  }, [editCellId, cellsById]);
 
   const previewImg =
     selectedItem?.image_url && selectedItem.image_url.startsWith("http")
@@ -884,6 +904,21 @@ export default function Page() {
       : null;
 
   const previewExpiry = selectedItem?.expires_at ? expiryStatus(selectedItem.expires_at) : null;
+
+  const dataError = cellsError || summaryError || itemsError;
+
+  // Handle clicking a cell: normal select OR pickMode sets editCellId
+  function onCellClick(codeUpper: string, cell: Cell | undefined) {
+    if (!cell) return;
+    if (pickMode && editingId) {
+      setEditCellId(cell.id);
+      setPickMode(false);
+      return;
+    }
+    setSelectedCode(codeUpper);
+  }
+
+  if (!session) return <AuthGate onAuthed={(s) => setSession(s)} />;
 
   return (
     <div className="app">
@@ -1006,6 +1041,19 @@ export default function Page() {
         </div>
       )}
 
+      {/* Pick mode banner */}
+      {pickMode && editingId && (
+        <div className="pickBanner">
+          <div className="pickBannerLeft">
+            <div className="pickBannerTitle">Pick a location on the map</div>
+            <div className="pickBannerSub">Click any cell on the left to set the item’s location. Press ESC to cancel.</div>
+          </div>
+          <button className="pill ghost" onClick={() => setPickMode(false)}>
+            Cancel pick
+          </button>
+        </div>
+      )}
+
       <div className="main">
         <section className="left">
           <div className="kCols">
@@ -1022,12 +1070,17 @@ export default function Page() {
                     const count = cell ? countByCellId[cell.id] ?? 0 : 0;
                     const lines = cell ? cellLinesByCellId[cell.id] ?? [] : [];
 
+                    const isPickCandidate = pickMode && !!editingId && !!cell;
+                    const isPickSelected = pickMode && !!editingId && !!cell && editCellId === cell.id;
+
                     return (
                       <button
                         key={code}
-                        className={`cellBtn ${isSelected ? "selected" : ""}`}
+                        className={`cellBtn ${isSelected ? "selected" : ""} ${isPickCandidate ? "pickable" : ""} ${
+                          isPickSelected ? "pickSelected" : ""
+                        }`}
                         disabled={cellsLoading || missingAfterLoad}
-                        onClick={() => cell && setSelectedCode(code)}
+                        onClick={() => onCellClick(code, cell)}
                       >
                         <div className="cellTop">
                           <div className="cellCode">{displayCode(code)}</div>
@@ -1119,7 +1172,7 @@ export default function Page() {
                 </div>
               </div>
 
-              {/* NEW: Preview large image */}
+              {/* Preview large image */}
               <div className="previewCard">
                 <div className="previewTop">
                   <div className="previewTitle">Preview</div>
@@ -1188,7 +1241,6 @@ export default function Page() {
                           <>
                             {img ? <img className="thumb" src={img} alt={it.name} /> : <div className="thumb placeholder" />}
 
-                            {/* clicking this selects preview */}
                             <button className="itemMainBtn" onClick={() => setSelectedItemId(it.id)} title="Preview">
                               <div className="itemLeft">
                                 <div className="itemName">{it.name}</div>
@@ -1210,19 +1262,50 @@ export default function Page() {
                           </>
                         ) : (
                           <div className="editWrap">
-                            {/* NEW: move location */}
-                            <div className="moveRow">
-                              <div className="moveLabel">Location</div>
-                              <select className="select" value={editCellId} onChange={(e) => setEditCellId(e.target.value)}>
-                                <option value="" disabled>
-                                  Select…
-                                </option>
-                                {cellOptions.map((o) => (
-                                  <option key={o.id} value={o.id}>
-                                    {o.label}
+                            {/* Location: Searchable dropdown + Pick on map */}
+                            <div className="locCard">
+                              <div className="locHeader">
+                                <div>
+                                  <div className="locTitle">Location</div>
+                                  <div className="locSub">
+                                    Current: <span className="mono">{currentEditLocationLabel || "Unknown"}</span>
+                                  </div>
+                                </div>
+                                <div className="locBtns">
+                                  <button className="pill" type="button" onClick={() => setPickMode((v) => !v)}>
+                                    {pickMode ? "Picking…" : "Pick on map"}
+                                  </button>
+                                  <button className="pill ghost" type="button" onClick={() => setPickMode(false)}>
+                                    Stop
+                                  </button>
+                                </div>
+                              </div>
+
+                              <div className="locGrid">
+                                <input
+                                  className="input"
+                                  value={locQuery}
+                                  onChange={(e) => setLocQuery(e.target.value)}
+                                  placeholder="Search location (e.g., k6 / fridge)…"
+                                />
+
+                                <select className="select" value={editCellId} onChange={(e) => setEditCellId(e.target.value)}>
+                                  <option value="" disabled>
+                                    Select a location…
                                   </option>
-                                ))}
-                              </select>
+                                  {filteredCellOptions.map((o) => (
+                                    <option key={o.id} value={o.id}>
+                                      {o.label}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+
+                              {pickMode && (
+                                <div className="locHint">
+                                  Pick mode is ON. Click a cell on the left to set this item’s location (ESC to cancel).
+                                </div>
+                              )}
                             </div>
 
                             <div className="editGrid">
@@ -1351,6 +1434,28 @@ export default function Page() {
           margin-top: 4px;
           font-size: 12px;
           color: var(--muted);
+        }
+
+        .pickBanner {
+          border: 1px solid rgba(47, 93, 124, 0.25);
+          background: rgba(47, 93, 124, 0.08);
+          border-radius: var(--radius);
+          padding: 12px;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          margin-bottom: 12px;
+          box-shadow: var(--shadow);
+        }
+        .pickBannerTitle {
+          font-weight: 900;
+          font-size: 12px;
+        }
+        .pickBannerSub {
+          font-size: 12px;
+          color: rgba(31, 35, 40, 0.72);
+          margin-top: 2px;
         }
 
         .expCard {
@@ -1599,6 +1704,21 @@ export default function Page() {
           background: var(--blueSoft);
           border-color: rgba(47, 93, 124, 0.35);
         }
+
+        /* Pick mode visuals */
+        .cellBtn.pickable {
+          outline: 2px dashed rgba(47, 93, 124, 0.35);
+          outline-offset: 2px;
+        }
+        .cellBtn.pickable:hover {
+          outline-style: solid;
+          outline-color: rgba(47, 93, 124, 0.5);
+        }
+        .cellBtn.pickSelected {
+          outline: 3px solid rgba(47, 93, 124, 0.75);
+          background: rgba(47, 93, 124, 0.08);
+        }
+
         .cellTop {
           display: flex;
           justify-content: space-between;
@@ -1760,7 +1880,6 @@ export default function Page() {
           color: var(--muted);
         }
 
-        /* NEW: preview card */
         .previewCard {
           margin-top: 12px;
           border: 1px solid var(--border);
@@ -1927,17 +2046,45 @@ export default function Page() {
           min-width: 0;
         }
 
-        .moveRow {
+        .locCard {
+          border: 1px solid var(--border2);
+          background: rgba(47, 93, 124, 0.03);
+          border-radius: 12px;
+          padding: 10px;
           display: grid;
-          grid-template-columns: 90px 1fr;
           gap: 10px;
-          align-items: center;
         }
-        .moveLabel {
+        .locHeader {
+          display: flex;
+          align-items: flex-start;
+          justify-content: space-between;
+          gap: 10px;
+        }
+        .locTitle {
           font-size: 12px;
           font-weight: 900;
-          color: rgba(31, 35, 40, 0.78);
         }
+        .locSub {
+          font-size: 12px;
+          color: rgba(31, 35, 40, 0.75);
+          margin-top: 2px;
+        }
+        .locBtns {
+          display: flex;
+          gap: 8px;
+          flex-wrap: wrap;
+          justify-content: flex-end;
+        }
+        .locGrid {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 8px;
+        }
+        .locHint {
+          font-size: 12px;
+          color: rgba(31, 35, 40, 0.72);
+        }
+
         .select {
           width: 100%;
           padding: 10px;
@@ -2042,12 +2189,16 @@ export default function Page() {
           .editActions {
             justify-content: space-between;
           }
-          .moveRow {
-            grid-template-columns: 1fr;
-          }
           .previewImg,
           .previewEmpty {
             height: 220px;
+          }
+          .locGrid {
+            grid-template-columns: 1fr;
+          }
+          .pickBanner {
+            flex-direction: column;
+            align-items: flex-start;
           }
         }
       `}</style>
