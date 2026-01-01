@@ -4,14 +4,21 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import type { Session, User } from "@supabase/supabase-js";
 
+/**
+ * UPDATED LAYOUT:
+ * - Column 5: K51..K57 (added K57 under K56)
+ * - Column 6: K61..K65 (added K65 under K64)
+ * - New standalone: K81 (Column 8)
+ */
 const KITCHEN_LAYOUT = [
   { title: "Column 1", cells: ["K11", "K12", "K13", "K14", "K15", "K16", "K17", "K18"] },
   { title: "Column 2", cells: ["K21", "K2_FRIDGE", "K2_FREEZER"] },
   { title: "Column 3", cells: ["K31", "K32", "K33", "K34", "K35", "K36"] },
   { title: "Column 4", cells: ["K41", "K42", "K43", "K44", "K45"] },
-  { title: "Column 5", cells: ["K51", "K52", "K53", "K54", "K55", "K56"] },
-  { title: "Column 6", cells: ["K61", "K62", "K63", "K64"] },
+  { title: "Column 5", cells: ["K51", "K52", "K53", "K54", "K55", "K56", "K57"] },
+  { title: "Column 6", cells: ["K61", "K62", "K63", "K64", "K65"] },
   { title: "Column 7", cells: ["K71", "K72"] },
+  { title: "Column 8", cells: ["K81"] },
 ] as const;
 
 const CODE_LABELS: Record<string, string> = {
@@ -102,8 +109,6 @@ function AuthGate(props: { onAuthed: (session: Session) => void }) {
     const { data, error } = await supabase.auth.signUp({ email, password: pw });
     setBusy(false);
     if (error) { setErr(error.message); return; }
-    // Depending on your Supabase email confirmation settings:
-    // - If confirmation required, session may be null and user must confirm email.
     if (data.session) props.onAuthed(data.session);
     else setErr("Sign-up successful. Please check your email to confirm, then sign in.");
   }
@@ -197,7 +202,6 @@ export default function Page() {
   const [editImageFile, setEditImageFile] = useState<File | null>(null);
   const [savingEdit, setSavingEdit] = useState(false);
 
-  // Signed image cache: key = path, val = signedUrl
   const [signedUrlByPath, setSignedUrlByPath] = useState<Record<string, string>>({});
 
   const selectedCell: Cell | null = useMemo(() => {
@@ -218,7 +222,6 @@ export default function Page() {
   async function signOut() {
     await supabase.auth.signOut();
     setSession(null);
-    // clear local state
     setCellsByCode({}); setCellsById({}); setSelectedCode(null);
     setItems([]); setHits([]); setExp7([]); setExp30([]);
     setSignedUrlByPath({});
@@ -240,7 +243,7 @@ export default function Page() {
     });
     if (up.error) throw up.error;
 
-    return path; // private path, NOT a public URL
+    return path;
   }
 
   async function ensureSignedUrls(paths: string[]) {
@@ -266,7 +269,6 @@ export default function Page() {
     });
   }
 
-  // 1) Get session on mount + subscribe changes
   useEffect(() => {
     (async () => {
       const { data } = await supabase.auth.getSession();
@@ -282,7 +284,6 @@ export default function Page() {
     };
   }, []);
 
-  // 2) After login, load cells
   useEffect(() => {
     if (!user) return;
 
@@ -333,7 +334,6 @@ export default function Page() {
     const rows = (data as Item[]) ?? [];
     setItems(rows);
 
-    // hydrate signed urls for private paths
     const paths = rows.map((r) => r.image_path).filter(Boolean) as string[];
     await ensureSignedUrls(paths);
   }
@@ -419,7 +419,6 @@ export default function Page() {
     setExp30(within30);
   }
 
-  // Refresh items on selected cell change
   useEffect(() => {
     if (!user || !selectedCell) return;
     setEditingId(null);
@@ -428,7 +427,6 @@ export default function Page() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id, selectedCell?.id]);
 
-  // Refresh summaries when cells loaded
   useEffect(() => {
     if (!user) return;
     if (Object.keys(cellsByCode).length === 0) return;
@@ -515,7 +513,7 @@ export default function Page() {
     const cellIds = Object.values(cellsByCode).map((c) => c.id);
     if (cellIds.length === 0) { setSearching(false); setHits([]); return; }
 
-    // RPC uses RLS so only your rows are visible, but still we filter with user_id fallback.
+    // Prefer RPC if you have it; fallback to ilike
     const rpc = await supabase.rpc("search_items_fuzzy", { term: t, cell_ids: cellIds, lim: 100 });
 
     if (!rpc.error) {
@@ -532,7 +530,6 @@ export default function Page() {
       return;
     }
 
-    // fallback
     const fb = await supabase
       .from("items")
       .select("id,name,cell_id,qty,unit,updated_at")
@@ -639,7 +636,6 @@ export default function Page() {
     }
   }
 
-  // Not logged in
   if (!session) {
     return <AuthGate onAuthed={(s) => setSession(s)} />;
   }
@@ -760,9 +756,6 @@ export default function Page() {
           {cellsError && <div className="errorLine">Cells: {cellsError}</div>}
           {summaryError && <div className="errorLine">Summaries: {summaryError}</div>}
           {itemsError && <div className="errorLine">Items: {itemsError}</div>}
-          <div className="errorHint">
-            If you just enabled RLS, confirm you ran the SQL policies and created bucket “item-images” as Private.
-          </div>
         </div>
       )}
 
@@ -976,7 +969,6 @@ export default function Page() {
           --border2: #efe6d9;
 
           --blue: #2f5d7c;
-          --blue2: #3f759a;
           --blueSoft: #e7f0f7;
 
           --warnBg: #fff7d1;
@@ -1031,7 +1023,6 @@ export default function Page() {
         .errorBox { border:1px solid var(--dangerBorder); background: var(--dangerBg); border-radius: var(--radius); padding: 12px; margin-top: 12px; margin-bottom: 12px; }
         .errorTitle { font-weight: 900; margin-bottom: 6px; }
         .errorLine { font-size:12px; color: rgba(31,35,40,0.85); margin-top: 2px; }
-        .errorHint { font-size:12px; color: var(--muted); margin-top: 8px; }
 
         .main { display:flex; gap:16px; align-items:flex-start; }
         .left { flex:1; overflow-x:auto; padding-bottom: 8px; min-width:0; }
