@@ -5,10 +5,10 @@ import { supabase } from "@/lib/supabase";
 import type { Session, User } from "@supabase/supabase-js";
 
 /**
- * UPDATED LAYOUT:
- * - Column 5: K51..K57 (added K57 under K56)
- * - Column 6: K61..K65 (added K65 under K64)
- * - New standalone: K81 (Column 8)
+ * Layout (your latest setup)
+ * - Column 5: K51..K57
+ * - Column 6: K61..K65
+ * - Column 8: K81
  */
 const KITCHEN_LAYOUT = [
   { title: "Column 1", cells: ["K11", "K12", "K13", "K14", "K15", "K16", "K17", "K18"] },
@@ -29,9 +29,11 @@ function displayCode(code: string) {
   const c = code.toUpperCase();
   return CODE_LABELS[c] ?? c;
 }
+
 const ALL_CODES = Array.from(new Set(KITCHEN_LAYOUT.flatMap((c) => c.cells.map((x) => x.toUpperCase()))));
 
 type Cell = { id: string; code: string; zone: string | null; position: number | null };
+
 type Item = {
   id: string;
   user_id: string | null;
@@ -41,13 +43,16 @@ type Item = {
   unit: string | null;
   expires_at: string | null; // YYYY-MM-DD
   aliases: string[] | null;
-  image_url: string | null;  // legacy public url
+  image_url: string | null; // legacy public url
   image_path: string | null; // private storage path
   updated_at: string | null;
 };
+
 type SearchHit = { id: string; name: string; cell_id: string; qty: number | string | null; unit: string | null };
+
 type ExpiringHit = { id: string; name: string; cell_id: string; expires_at: string; qty: number | string | null; unit: string | null };
-type CellLine = { name: string; expires_at: string | null };
+
+type CellLine = { name: string; expires_at: string | null; qty: number | string | null };
 
 function parseQty(v: Item["qty"]) {
   if (v === null || v === undefined) return 1;
@@ -55,6 +60,7 @@ function parseQty(v: Item["qty"]) {
   const n = Number(v);
   return Number.isFinite(n) ? n : 1;
 }
+
 function startOfToday() {
   const now = new Date();
   return new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
@@ -82,6 +88,30 @@ function expiryStatus(expiresAt: string | null) {
   if (d <= 30) return { kind: "soon" as const, days: d };
   return { kind: "ok" as const, days: d };
 }
+
+/** Sort helper: expired first, then soon(<=30d), then ok, then none; within, earlier expires first */
+function compareByExpiry(a: { expires_at: string | null; name: string }, b: { expires_at: string | null; name: string }) {
+  const sa = expiryStatus(a.expires_at);
+  const sb = expiryStatus(b.expires_at);
+
+  const rank = (k: typeof sa.kind) => (k === "expired" ? 0 : k === "soon" ? 1 : k === "ok" ? 2 : 3);
+  const ra = rank(sa.kind);
+  const rb = rank(sb.kind);
+  if (ra !== rb) return ra - rb;
+
+  // both have date?
+  if (a.expires_at && b.expires_at) {
+    const c = a.expires_at.localeCompare(b.expires_at);
+    if (c !== 0) return c;
+  } else if (a.expires_at && !b.expires_at) {
+    return -1;
+  } else if (!a.expires_at && b.expires_at) {
+    return 1;
+  }
+
+  return a.name.localeCompare(b.name);
+}
+
 function csvToAliases(s: string): string[] {
   return s.split(",").map((x) => x.trim()).filter(Boolean);
 }
@@ -97,18 +127,20 @@ function AuthGate(props: { onAuthed: (session: Session) => void }) {
   const [busy, setBusy] = useState(false);
 
   async function signIn() {
-    setErr(null); setBusy(true);
+    setErr(null);
+    setBusy(true);
     const { data, error } = await supabase.auth.signInWithPassword({ email, password: pw });
     setBusy(false);
-    if (error) { setErr(error.message); return; }
+    if (error) return setErr(error.message);
     if (data.session) props.onAuthed(data.session);
   }
 
   async function signUp() {
-    setErr(null); setBusy(true);
+    setErr(null);
+    setBusy(true);
     const { data, error } = await supabase.auth.signUp({ email, password: pw });
     setBusy(false);
-    if (error) { setErr(error.message); return; }
+    if (error) return setErr(error.message);
     if (data.session) props.onAuthed(data.session);
     else setErr("Sign-up successful. Please check your email to confirm, then sign in.");
   }
@@ -120,8 +152,12 @@ function AuthGate(props: { onAuthed: (session: Session) => void }) {
         <div className="authSub">Sign in required (secure mode)</div>
 
         <div className="authTabs">
-          <button className={`authTab ${mode === "signin" ? "on" : ""}`} onClick={() => setMode("signin")}>Sign in</button>
-          <button className={`authTab ${mode === "signup" ? "on" : ""}`} onClick={() => setMode("signup")}>Sign up</button>
+          <button className={`authTab ${mode === "signin" ? "on" : ""}`} onClick={() => setMode("signin")}>
+            Sign in
+          </button>
+          <button className={`authTab ${mode === "signup" ? "on" : ""}`} onClick={() => setMode("signup")}>
+            Sign up
+          </button>
         </div>
 
         <input className="input" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email" inputMode="email" />
@@ -133,26 +169,98 @@ function AuthGate(props: { onAuthed: (session: Session) => void }) {
           {busy ? "Please wait…" : mode === "signin" ? "Sign in" : "Create account"}
         </button>
 
-        <div className="authHint">
-          If you enabled “email confirmation” in Supabase Auth, sign-up requires confirming the email first.
-        </div>
+        <div className="authHint">If you enabled email confirmation, sign-up requires confirming the email first.</div>
       </div>
 
       <style jsx global>{`
-        body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; }
-        .authWrap { min-height: 100vh; display:flex; align-items:center; justify-content:center; padding: 16px; background: #fbf7f0; }
-        .authCard { width: min(420px, 100%); background:#fffaf2; border:1px solid #efe6d9; border-radius: 14px; padding: 16px; box-shadow: 0 10px 24px rgba(31,35,40,0.06); display:grid; gap: 10px; }
-        .authTitle { font-weight: 900; font-size: 18px; }
-        .authSub { font-size: 12px; color:#6b6f76; margin-top:-6px; }
-        .authTabs { display:flex; gap: 8px; }
-        .authTab { flex:1; padding: 8px 10px; border-radius: 999px; border:1px solid #e7ddcf; background:#fffdf7; cursor:pointer; font-weight: 800; font-size: 12px; }
-        .authTab.on { border-color: rgba(47,93,124,0.35); background: rgba(47,93,124,0.08); color:#2f5d7c; }
-        .input { padding: 10px; border-radius: 12px; border: 1px solid #e7ddcf; background:#fffdf7; width:100%; font-size:14px; }
-        .input:focus { outline:none; border-color: rgba(47,93,124,0.5); box-shadow:0 0 0 4px rgba(47,93,124,0.12); }
-        .primary { padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(47,93,124,0.35); background:#2f5d7c; color:#fff; font-weight: 900; cursor:pointer; }
-        .primary:disabled { opacity:0.6; cursor:not-allowed; }
-        .authErr { font-size:12px; color: rgba(155,28,28,0.95); background:#fff1f1; border:1px solid #f0caca; padding: 10px; border-radius: 12px; }
-        .authHint { font-size:12px; color:#6b6f76; }
+        body {
+          margin: 0;
+          font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+        }
+        .authWrap {
+          min-height: 100vh;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 16px;
+          background: #fbf7f0;
+        }
+        .authCard {
+          width: min(420px, 100%);
+          background: #fffaf2;
+          border: 1px solid #efe6d9;
+          border-radius: 14px;
+          padding: 16px;
+          box-shadow: 0 10px 24px rgba(31, 35, 40, 0.06);
+          display: grid;
+          gap: 10px;
+        }
+        .authTitle {
+          font-weight: 900;
+          font-size: 18px;
+        }
+        .authSub {
+          font-size: 12px;
+          color: #6b6f76;
+          margin-top: -6px;
+        }
+        .authTabs {
+          display: flex;
+          gap: 8px;
+        }
+        .authTab {
+          flex: 1;
+          padding: 8px 10px;
+          border-radius: 999px;
+          border: 1px solid #e7ddcf;
+          background: #fffdf7;
+          cursor: pointer;
+          font-weight: 800;
+          font-size: 12px;
+        }
+        .authTab.on {
+          border-color: rgba(47, 93, 124, 0.35);
+          background: rgba(47, 93, 124, 0.08);
+          color: #2f5d7c;
+        }
+        .input {
+          padding: 10px;
+          border-radius: 12px;
+          border: 1px solid #e7ddcf;
+          background: #fffdf7;
+          width: 100%;
+          font-size: 14px;
+        }
+        .input:focus {
+          outline: none;
+          border-color: rgba(47, 93, 124, 0.5);
+          box-shadow: 0 0 0 4px rgba(47, 93, 124, 0.12);
+        }
+        .primary {
+          padding: 10px 12px;
+          border-radius: 12px;
+          border: 1px solid rgba(47, 93, 124, 0.35);
+          background: #2f5d7c;
+          color: #fff;
+          font-weight: 900;
+          cursor: pointer;
+        }
+        .primary:disabled {
+          opacity: 0.6;
+          cursor: not-allowed;
+        }
+        .authErr {
+          font-size: 12px;
+          color: rgba(155, 28, 28, 0.95);
+          background: #fff1f1;
+          border: 1px solid #f0caca;
+          padding: 10px;
+          border-radius: 12px;
+        }
+        .authHint {
+          font-size: 12px;
+          color: #6b6f76;
+        }
       `}</style>
     </div>
   );
@@ -165,12 +273,14 @@ export default function Page() {
   const [cellsByCode, setCellsByCode] = useState<Record<string, Cell>>({});
   const [cellsById, setCellsById] = useState<Record<string, Cell>>({});
   const [selectedCode, setSelectedCode] = useState<string | null>(null);
-
   const [cellsLoading, setCellsLoading] = useState(false);
   const [cellsError, setCellsError] = useState<string | null>(null);
 
   const [items, setItems] = useState<Item[]>([]);
   const [itemsError, setItemsError] = useState<string | null>(null);
+
+  // NEW: preview selected item
+  const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
 
   const [countByCellId, setCountByCellId] = useState<Record<string, number>>({});
   const [cellLinesByCellId, setCellLinesByCellId] = useState<Record<string, CellLine[]>>({});
@@ -200,6 +310,10 @@ export default function Page() {
   const [editExpiresAt, setEditExpiresAt] = useState<string>("");
   const [editAliasesCsv, setEditAliasesCsv] = useState("");
   const [editImageFile, setEditImageFile] = useState<File | null>(null);
+
+  // NEW: move location in edit
+  const [editCellId, setEditCellId] = useState<string>("");
+
   const [savingEdit, setSavingEdit] = useState(false);
 
   const [signedUrlByPath, setSignedUrlByPath] = useState<Record<string, string>>({});
@@ -208,6 +322,11 @@ export default function Page() {
     if (!selectedCode) return null;
     return cellsByCode[selectedCode.toUpperCase()] ?? null;
   }, [cellsByCode, selectedCode]);
+
+  const selectedItem: Item | null = useMemo(() => {
+    if (!selectedItemId) return null;
+    return items.find((x) => x.id === selectedItemId) ?? null;
+  }, [items, selectedItemId]);
 
   function setExpiryPreset(setter: (v: string) => void, preset: "1w" | "1m" | "3m" | "1y") {
     const now = startOfToday();
@@ -222,9 +341,15 @@ export default function Page() {
   async function signOut() {
     await supabase.auth.signOut();
     setSession(null);
-    setCellsByCode({}); setCellsById({}); setSelectedCode(null);
-    setItems([]); setHits([]); setExp7([]); setExp30([]);
+    setCellsByCode({});
+    setCellsById({});
+    setSelectedCode(null);
+    setItems([]);
+    setHits([]);
+    setExp7([]);
+    setExp30([]);
     setSignedUrlByPath({});
+    setSelectedItemId(null);
   }
 
   async function uploadItemImage(userId: string, itemId: string, file: File) {
@@ -262,28 +387,23 @@ export default function Page() {
 
     setSignedUrlByPath((prev) => {
       const next = { ...prev };
-      for (const [p, url] of results) {
-        if (url) next[p] = url;
-      }
+      for (const [p, url] of results) if (url) next[p] = url;
       return next;
     });
   }
 
+  // Auth init
   useEffect(() => {
     (async () => {
       const { data } = await supabase.auth.getSession();
       if (data.session) setSession(data.session);
     })();
 
-    const { data: sub } = supabase.auth.onAuthStateChange((_evt, s) => {
-      setSession(s);
-    });
-
-    return () => {
-      sub.subscription.unsubscribe();
-    };
+    const { data: sub } = supabase.auth.onAuthStateChange((_evt, s) => setSession(s));
+    return () => sub.subscription.unsubscribe();
   }, []);
 
+  // Load cells
   useEffect(() => {
     if (!user) return;
 
@@ -318,6 +438,21 @@ export default function Page() {
     })();
   }, [user?.id]);
 
+  // Sort items (selected cell list): prioritize expiring
+  function sortItemsForList(rows: Item[]) {
+    // only keep qty > 0 as "in inventory"
+    const filtered = rows.filter((r) => parseQty(r.qty) > 0);
+    return filtered.sort((a, b) => {
+      // expiry first
+      const c = compareByExpiry({ expires_at: a.expires_at, name: a.name }, { expires_at: b.expires_at, name: b.name });
+      if (c !== 0) return c;
+      // then updated desc
+      const au = a.updated_at ?? "";
+      const bu = b.updated_at ?? "";
+      return bu.localeCompare(au);
+    });
+  }
+
   async function refreshItems(cellId: string) {
     if (!user) return;
     setItemsError(null);
@@ -327,33 +462,48 @@ export default function Page() {
       .select("id,user_id,cell_id,name,qty,unit,expires_at,aliases,image_url,image_path,updated_at")
       .eq("cell_id", cellId)
       .eq("user_id", user.id)
-      .order("updated_at", { ascending: false });
+      .limit(1000);
 
-    if (error) { setItemsError(error.message); return; }
+    if (error) {
+      setItemsError(error.message);
+      return;
+    }
 
-    const rows = (data as Item[]) ?? [];
+    const rows = sortItemsForList(((data as Item[]) ?? []).map((r) => ({ ...r })));
     setItems(rows);
+
+    // NEW: ensure preview item makes sense
+    if (!rows.find((x) => x.id === selectedItemId)) {
+      setSelectedItemId(rows[0]?.id ?? null);
+    }
 
     const paths = rows.map((r) => r.image_path).filter(Boolean) as string[];
     await ensureSignedUrls(paths);
   }
 
+  // Cell summaries: prioritize expiring items inside each cell tile
   async function refreshCellSummaries() {
     if (!user) return;
     setSummaryError(null);
 
     const cellIds = Object.values(cellsByCode).map((c) => c.id);
-    if (cellIds.length === 0) { setCountByCellId({}); setCellLinesByCellId({}); return; }
+    if (cellIds.length === 0) {
+      setCountByCellId({});
+      setCellLinesByCellId({});
+      return;
+    }
 
     const { data, error } = await supabase
       .from("items")
-      .select("cell_id,name,expires_at,updated_at")
+      .select("cell_id,name,expires_at,qty,updated_at")
       .in("cell_id", cellIds)
       .eq("user_id", user.id)
-      .order("updated_at", { ascending: false })
-      .limit(2000);
+      .limit(4000);
 
-    if (error) { setSummaryError(error.message); return; }
+    if (error) {
+      setSummaryError(error.message);
+      return;
+    }
 
     const counts: Record<string, number> = {};
     const linesMap: Record<string, CellLine[]> = {};
@@ -362,12 +512,20 @@ export default function Page() {
       const cellId = String(row.cell_id);
       const itemName = String(row.name ?? "").trim();
       const exp = row.expires_at ? String(row.expires_at) : null;
+      const qv = row.qty ?? null;
+
       if (!itemName) return;
+      if (parseQty(qv) <= 0) return; // only show "at least one" items
 
       counts[cellId] = (counts[cellId] ?? 0) + 1;
       if (!linesMap[cellId]) linesMap[cellId] = [];
-      linesMap[cellId].push({ name: itemName, expires_at: exp });
+      linesMap[cellId].push({ name: itemName, expires_at: exp, qty: qv });
     });
+
+    // NEW: sort chips within each cell by expiry priority
+    for (const cellId of Object.keys(linesMap)) {
+      linesMap[cellId].sort((a, b) => compareByExpiry({ expires_at: a.expires_at, name: a.name }, { expires_at: b.expires_at, name: b.name }));
+    }
 
     setCountByCellId(counts);
     setCellLinesByCellId(linesMap);
@@ -378,7 +536,11 @@ export default function Page() {
     setExpError(null);
 
     const cellIds = Object.values(cellsByCode).map((c) => c.id);
-    if (cellIds.length === 0) { setExp7([]); setExp30([]); return; }
+    if (cellIds.length === 0) {
+      setExp7([]);
+      setExp30([]);
+      return;
+    }
 
     const { data, error } = await supabase
       .from("items")
@@ -389,7 +551,12 @@ export default function Page() {
       .gt("qty", 0)
       .limit(500);
 
-    if (error) { setExpError(error.message); setExp7([]); setExp30([]); return; }
+    if (error) {
+      setExpError(error.message);
+      setExp7([]);
+      setExp30([]);
+      return;
+    }
 
     const today = startOfToday();
     const normalized: ExpiringHit[] = (data ?? [])
@@ -412,21 +579,24 @@ export default function Page() {
       if (d <= 7) within7.push(r);
       if (d <= 30) within30.push(r);
     }
-    within7.sort((a,b)=> a.expires_at.localeCompare(b.expires_at) || a.name.localeCompare(b.name));
-    within30.sort((a,b)=> a.expires_at.localeCompare(b.expires_at) || a.name.localeCompare(b.name));
+    within7.sort((a, b) => a.expires_at.localeCompare(b.expires_at) || a.name.localeCompare(b.name));
+    within30.sort((a, b) => a.expires_at.localeCompare(b.expires_at) || a.name.localeCompare(b.name));
 
     setExp7(within7);
     setExp30(within30);
   }
 
+  // Refresh items when selected cell changes
   useEffect(() => {
     if (!user || !selectedCell) return;
     setEditingId(null);
     setEditImageFile(null);
+    setSelectedItemId(null);
     refreshItems(selectedCell.id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id, selectedCell?.id]);
 
+  // Refresh summaries/global expiring when cells loaded
   useEffect(() => {
     if (!user) return;
     if (Object.keys(cellsByCode).length === 0) return;
@@ -460,7 +630,10 @@ export default function Page() {
       .select("id")
       .single();
 
-    if (ins.error) { setItemsError(ins.error.message); return; }
+    if (ins.error) {
+      setItemsError(ins.error.message);
+      return;
+    }
 
     const itemId = String((ins.data as any)?.id);
 
@@ -484,7 +657,11 @@ export default function Page() {
       setUploading(false);
     }
 
-    setName(""); setQty("1"); setUnit(""); setExpiresAt(""); setNewImageFile(null);
+    setName("");
+    setQty("1");
+    setUnit("");
+    setExpiresAt("");
+    setNewImageFile(null);
 
     await refreshItems(selectedCell.id);
     await refreshCellSummaries();
@@ -495,8 +672,12 @@ export default function Page() {
   async function deleteItem(itemId: string) {
     if (!user) return;
     const { error } = await supabase.from("items").delete().eq("id", itemId).eq("user_id", user.id);
-    if (error) { setItemsError(error.message); return; }
+    if (error) {
+      setItemsError(error.message);
+      return;
+    }
     setItems((prev) => prev.filter((x) => x.id !== itemId));
+    if (selectedItemId === itemId) setSelectedItemId(null);
     await refreshCellSummaries();
     await refreshExpiringGlobal();
     if (q.trim()) await runSearch(q.trim());
@@ -505,15 +686,23 @@ export default function Page() {
   async function runSearch(term: string) {
     if (!user) return;
     const t = term.trim();
-    if (!t) { setHits([]); setSearchError(null); return; }
+    if (!t) {
+      setHits([]);
+      setSearchError(null);
+      return;
+    }
 
     setSearching(true);
     setSearchError(null);
 
     const cellIds = Object.values(cellsByCode).map((c) => c.id);
-    if (cellIds.length === 0) { setSearching(false); setHits([]); return; }
+    if (cellIds.length === 0) {
+      setSearching(false);
+      setHits([]);
+      return;
+    }
 
-    // Prefer RPC if you have it; fallback to ilike
+    // Prefer RPC if exists; fallback to ilike
     const rpc = await supabase.rpc("search_items_fuzzy", { term: t, cell_ids: cellIds, lim: 100 });
 
     if (!rpc.error) {
@@ -535,28 +724,41 @@ export default function Page() {
       .select("id,name,cell_id,qty,unit,updated_at")
       .eq("user_id", user.id)
       .in("cell_id", cellIds)
+      .gt("qty", 0)
       .ilike("name", `%${t}%`)
       .order("updated_at", { ascending: false })
       .limit(100);
 
-    if (fb.error) { setSearchError(fb.error.message); setHits([]); setSearching(false); return; }
+    if (fb.error) {
+      setSearchError(fb.error.message);
+      setHits([]);
+      setSearching(false);
+      return;
+    }
 
-    setHits(((fb.data as any[]) ?? []).map((r) => ({
-      id: String(r.id),
-      name: String(r.name ?? ""),
-      cell_id: String(r.cell_id),
-      qty: r.qty ?? null,
-      unit: r.unit ?? null,
-    })));
+    setHits(
+      ((fb.data as any[]) ?? []).map((r) => ({
+        id: String(r.id),
+        name: String(r.name ?? ""),
+        cell_id: String(r.cell_id),
+        qty: r.qty ?? null,
+        unit: r.unit ?? null,
+      }))
+    );
     setSearching(false);
   }
 
+  // Debounced search
   useEffect(() => {
     if (!user) return;
     const term = q;
     if (debounceRef.current) clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(() => { runSearch(term); }, 250);
-    return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
+    debounceRef.current = setTimeout(() => {
+      runSearch(term);
+    }, 250);
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [q, user?.id, Object.keys(cellsByCode).length]);
 
@@ -574,11 +776,19 @@ export default function Page() {
     setEditExpiresAt(it.expires_at ?? "");
     setEditAliasesCsv(aliasesToCsv(it.aliases));
     setEditImageFile(null);
+
+    // NEW: edit location
+    setEditCellId(it.cell_id);
   }
   function cancelEdit() {
     setEditingId(null);
-    setEditName(""); setEditQty("1"); setEditUnit(""); setEditExpiresAt(""); setEditAliasesCsv("");
+    setEditName("");
+    setEditQty("1");
+    setEditUnit("");
+    setEditExpiresAt("");
+    setEditAliasesCsv("");
     setEditImageFile(null);
+    setEditCellId("");
   }
 
   async function saveEdit(itemId: string) {
@@ -588,6 +798,11 @@ export default function Page() {
 
     const qtyNumber = Number(editQty || "1");
     const safeQty = Number.isFinite(qtyNumber) ? qtyNumber : 1;
+
+    if (!editCellId) {
+      setItemsError("Location is required.");
+      return;
+    }
 
     setSavingEdit(true);
     setItemsError(null);
@@ -601,6 +816,7 @@ export default function Page() {
           unit: editUnit.trim(),
           expires_at: editExpiresAt ? editExpiresAt : null,
           aliases: csvToAliases(editAliasesCsv),
+          cell_id: editCellId, // NEW: move
           updated_at: new Date().toISOString(),
         })
         .eq("id", itemId)
@@ -622,12 +838,20 @@ export default function Page() {
         await ensureSignedUrls([path]);
       }
 
-      if (selectedCell) await refreshItems(selectedCell.id);
-      await refreshCellSummaries();
-      await refreshExpiringGlobal();
-      if (q.trim()) await runSearch(q.trim());
+      // If moved to another cell, jump there after save
+      const movedToCell = editCellId;
 
       cancelEdit();
+      await refreshCellSummaries();
+      await refreshExpiringGlobal();
+
+      if (selectedCell && selectedCell.id === movedToCell) {
+        await refreshItems(selectedCell.id);
+      } else {
+        jumpToCell(movedToCell);
+      }
+
+      if (q.trim()) await runSearch(q.trim());
     } catch (e: any) {
       setItemsError(e?.message ?? "Save failed.");
     } finally {
@@ -636,11 +860,30 @@ export default function Page() {
     }
   }
 
-  if (!session) {
-    return <AuthGate onAuthed={(s) => setSession(s)} />;
-  }
+  // Build dropdown options for moving items (only existing cells)
+  const cellOptions = useMemo(() => {
+    // Keep layout order, only include codes that exist in DB
+    const opts: { id: string; code: string; label: string }[] = [];
+    for (const code of ALL_CODES) {
+      const cell = cellsByCode[code];
+      if (!cell) continue;
+      opts.push({ id: cell.id, code, label: displayCode(code) });
+    }
+    return opts;
+  }, [cellsByCode]);
+
+  if (!session) return <AuthGate onAuthed={(s) => setSession(s)} />;
 
   const dataError = cellsError || summaryError || itemsError;
+
+  const previewImg =
+    selectedItem?.image_url && selectedItem.image_url.startsWith("http")
+      ? selectedItem.image_url
+      : selectedItem?.image_path
+      ? signedUrlByPath[selectedItem.image_path] ?? null
+      : null;
+
+  const previewExpiry = selectedItem?.expires_at ? expiryStatus(selectedItem.expires_at) : null;
 
   return (
     <div className="app">
@@ -653,7 +896,9 @@ export default function Page() {
               {uploading ? " · Uploading…" : ""}
             </div>
           </div>
-          <button className="pill ghost" onClick={signOut}>Sign out</button>
+          <button className="pill ghost" onClick={signOut}>
+            Sign out
+          </button>
         </div>
 
         <div className="expCard">
@@ -737,7 +982,9 @@ export default function Page() {
                       <button className="resultBtn" onClick={() => jumpToCell(h.cell_id)}>
                         <div className="resultMain">
                           <div className="resultName">{h.name}</div>
-                          <div className="resultMeta">{where} · {parseQty(h.qty)} {h.unit ?? ""}</div>
+                          <div className="resultMeta">
+                            {where} · {parseQty(h.qty)} {h.unit ?? ""}
+                          </div>
                         </div>
                         <div className="resultGo">Go</div>
                       </button>
@@ -800,7 +1047,11 @@ export default function Page() {
                               const chipClass =
                                 st.kind === "expired" ? "chip chipExpired" : st.kind === "soon" ? "chip chipSoon" : "chip";
                               return (
-                                <div key={`${ln.name}-${idx}`} className={chipClass} title={ln.expires_at ? `${ln.name} · ${ln.expires_at}` : ln.name}>
+                                <div
+                                  key={`${ln.name}-${idx}`}
+                                  className={chipClass}
+                                  title={ln.expires_at ? `${ln.name} · ${ln.expires_at}` : ln.name}
+                                >
                                   {ln.name}
                                 </div>
                               );
@@ -830,7 +1081,9 @@ export default function Page() {
                   <div className="row">
                     <input className="input qty" value={qty} onChange={(e) => setQty(e.target.value)} placeholder="Qty" inputMode="decimal" />
                     <input className="input" value={unit} onChange={(e) => setUnit(e.target.value)} placeholder="Unit" />
-                    <button className="primary" onClick={addItem} disabled={!name.trim() || uploading}>Add</button>
+                    <button className="primary" onClick={addItem} disabled={!name.trim() || uploading}>
+                      Add
+                    </button>
                   </div>
 
                   <div className="row">
@@ -841,11 +1094,21 @@ export default function Page() {
                   <div className="expiryBlock">
                     <div className="expiryLabel">Expire date</div>
                     <div className="pillRow">
-                      <button className="pill" type="button" onClick={() => setExpiryPreset(setExpiresAt, "1y")}>+1 year</button>
-                      <button className="pill" type="button" onClick={() => setExpiryPreset(setExpiresAt, "3m")}>+3 months</button>
-                      <button className="pill" type="button" onClick={() => setExpiryPreset(setExpiresAt, "1m")}>+1 month</button>
-                      <button className="pill" type="button" onClick={() => setExpiryPreset(setExpiresAt, "1w")}>+1 week</button>
-                      <button className="pill ghost" type="button" onClick={() => setExpiresAt("")}>Clear</button>
+                      <button className="pill" type="button" onClick={() => setExpiryPreset(setExpiresAt, "1y")}>
+                        +1 year
+                      </button>
+                      <button className="pill" type="button" onClick={() => setExpiryPreset(setExpiresAt, "3m")}>
+                        +3 months
+                      </button>
+                      <button className="pill" type="button" onClick={() => setExpiryPreset(setExpiresAt, "1m")}>
+                        +1 month
+                      </button>
+                      <button className="pill" type="button" onClick={() => setExpiryPreset(setExpiresAt, "1w")}>
+                        +1 week
+                      </button>
+                      <button className="pill ghost" type="button" onClick={() => setExpiresAt("")}>
+                        Clear
+                      </button>
                     </div>
 
                     <div className="expiryCustomRow">
@@ -853,6 +1116,38 @@ export default function Page() {
                       <div className="expiryHint">{expiresAt ? `Selected: ${expiresAt}` : "Optional"}</div>
                     </div>
                   </div>
+                </div>
+              </div>
+
+              {/* NEW: Preview large image */}
+              <div className="previewCard">
+                <div className="previewTop">
+                  <div className="previewTitle">Preview</div>
+                  {selectedItem ? (
+                    <div className="previewMeta">
+                      <span className="previewName">{selectedItem.name}</span>
+                      {selectedItem.expires_at && (
+                        <span className={`previewPill ${previewExpiry?.kind === "expired" ? "pExp" : previewExpiry?.kind === "soon" ? "pSoon" : ""}`}>
+                          {previewExpiry?.kind === "expired" ? "Expired" : previewExpiry?.kind === "soon" ? "Soon" : "OK"} ·{" "}
+                          {selectedItem.expires_at}
+                        </span>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="previewMeta dim">Tap an item to preview</div>
+                  )}
+                </div>
+
+                <div className="previewBody">
+                  {selectedItem ? (
+                    previewImg ? (
+                      <img className="previewImg" src={previewImg} alt={selectedItem.name} />
+                    ) : (
+                      <div className="previewEmpty">No image</div>
+                    )
+                  ) : (
+                    <div className="previewEmpty">No selection</div>
+                  )}
                 </div>
               </div>
 
@@ -869,6 +1164,8 @@ export default function Page() {
                     const isEditing = editingId === it.id;
                     const st = expiryStatus(it.expires_at);
                     const itemClass = st.kind === "expired" ? "item expired" : st.kind === "soon" ? "item soon" : "item";
+                    const isSelectedItem = selectedItemId === it.id;
+
                     const expiryText =
                       it.expires_at && st.days !== null
                         ? st.kind === "expired"
@@ -886,26 +1183,48 @@ export default function Page() {
                         : null;
 
                     return (
-                      <li key={it.id} className={itemClass}>
+                      <li key={it.id} className={`${itemClass} ${isSelectedItem ? "active" : ""}`}>
                         {!isEditing ? (
                           <>
                             {img ? <img className="thumb" src={img} alt={it.name} /> : <div className="thumb placeholder" />}
 
-                            <div className="itemLeft">
-                              <div className="itemName">{it.name}</div>
-                              <div className="itemMeta">
-                                {parseQty(it.qty)} {it.unit ?? ""}
-                                {expiryText ? ` · ${expiryText}` : ""}
+                            {/* clicking this selects preview */}
+                            <button className="itemMainBtn" onClick={() => setSelectedItemId(it.id)} title="Preview">
+                              <div className="itemLeft">
+                                <div className="itemName">{it.name}</div>
+                                <div className="itemMeta">
+                                  {parseQty(it.qty)} {it.unit ?? ""}
+                                  {expiryText ? ` · ${expiryText}` : ""}
+                                </div>
                               </div>
-                            </div>
+                            </button>
 
                             <div className="itemActions">
-                              <button className="neutral" onClick={() => startEdit(it)}>Edit</button>
-                              <button className="danger" onClick={() => deleteItem(it.id)}>Delete</button>
+                              <button className="neutral" onClick={() => startEdit(it)}>
+                                Edit
+                              </button>
+                              <button className="danger" onClick={() => deleteItem(it.id)}>
+                                Delete
+                              </button>
                             </div>
                           </>
                         ) : (
                           <div className="editWrap">
+                            {/* NEW: move location */}
+                            <div className="moveRow">
+                              <div className="moveLabel">Location</div>
+                              <select className="select" value={editCellId} onChange={(e) => setEditCellId(e.target.value)}>
+                                <option value="" disabled>
+                                  Select…
+                                </option>
+                                {cellOptions.map((o) => (
+                                  <option key={o.id} value={o.id}>
+                                    {o.label}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+
                             <div className="editGrid">
                               <input className="input" value={editName} onChange={(e) => setEditName(e.target.value)} placeholder="Name" />
                               <input className="input qty" value={editQty} onChange={(e) => setEditQty(e.target.value)} placeholder="Qty" inputMode="decimal" />
@@ -927,11 +1246,21 @@ export default function Page() {
                             <div className="expiryBlock">
                               <div className="expiryLabel">Expire date</div>
                               <div className="pillRow">
-                                <button className="pill" type="button" onClick={() => setExpiryPreset(setEditExpiresAt, "1y")}>+1 year</button>
-                                <button className="pill" type="button" onClick={() => setExpiryPreset(setEditExpiresAt, "3m")}>+3 months</button>
-                                <button className="pill" type="button" onClick={() => setExpiryPreset(setEditExpiresAt, "1m")}>+1 month</button>
-                                <button className="pill" type="button" onClick={() => setExpiryPreset(setEditExpiresAt, "1w")}>+1 week</button>
-                                <button className="pill ghost" type="button" onClick={() => setEditExpiresAt("")}>Clear</button>
+                                <button className="pill" type="button" onClick={() => setExpiryPreset(setEditExpiresAt, "1y")}>
+                                  +1 year
+                                </button>
+                                <button className="pill" type="button" onClick={() => setExpiryPreset(setEditExpiresAt, "3m")}>
+                                  +3 months
+                                </button>
+                                <button className="pill" type="button" onClick={() => setExpiryPreset(setEditExpiresAt, "1m")}>
+                                  +1 month
+                                </button>
+                                <button className="pill" type="button" onClick={() => setExpiryPreset(setEditExpiresAt, "1w")}>
+                                  +1 week
+                                </button>
+                                <button className="pill ghost" type="button" onClick={() => setEditExpiresAt("")}>
+                                  Clear
+                                </button>
                               </div>
 
                               <div className="expiryCustomRow">
@@ -941,7 +1270,9 @@ export default function Page() {
                             </div>
 
                             <div className="editActions">
-                              <button className="neutral" disabled={savingEdit || uploading} onClick={cancelEdit}>Cancel</button>
+                              <button className="neutral" disabled={savingEdit || uploading} onClick={cancelEdit}>
+                                Cancel
+                              </button>
                               <button className="primary" disabled={savingEdit || uploading || !editName.trim()} onClick={() => saveEdit(it.id)}>
                                 {savingEdit ? "Saving…" : "Save"}
                               </button>
@@ -983,147 +1314,741 @@ export default function Page() {
           --shadow: 0 10px 24px rgba(31, 35, 40, 0.06);
           --radius: 14px;
         }
-        * { box-sizing: border-box; }
-        body { margin: 0; background: var(--bg); color: var(--text); font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; }
-        .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 12px; }
+        * {
+          box-sizing: border-box;
+        }
+        body {
+          margin: 0;
+          background: var(--bg);
+          color: var(--text);
+          font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+        }
+        .mono {
+          font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+          font-size: 12px;
+        }
 
-        .app { padding: 16px; padding-bottom: max(16px, env(safe-area-inset-bottom)); }
-        .header { margin-bottom: 12px; }
-        .headerTop { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom: 10px; }
-        .title { font-size: 20px; font-weight: 900; line-height: 1.2; }
-        .subtitle { margin-top: 4px; font-size: 12px; color: var(--muted); }
+        .app {
+          padding: 16px;
+          padding-bottom: max(16px, env(safe-area-inset-bottom));
+        }
+        .header {
+          margin-bottom: 12px;
+        }
+        .headerTop {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          margin-bottom: 10px;
+        }
+        .title {
+          font-size: 20px;
+          font-weight: 900;
+          line-height: 1.2;
+        }
+        .subtitle {
+          margin-top: 4px;
+          font-size: 12px;
+          color: var(--muted);
+        }
 
-        .expCard { border: 1px solid var(--border2); background: var(--panel); border-radius: var(--radius); box-shadow: var(--shadow); padding: 10px; margin-top: 10px; margin-bottom: 10px; }
-        .expHeader { display:flex; align-items:baseline; justify-content:space-between; gap:12px; margin-bottom: 8px; }
-        .expTitle { font-weight: 900; font-size: 12px; }
-        .expMeta { font-size: 12px; color: var(--muted); text-align:right; }
-        .expError { font-size: 12px; color: rgba(155,28,28,0.9); }
-        .expGrid { display:grid; grid-template-columns: 1fr 1fr; gap: 12px; min-width:0; }
-        .expColTitle { font-size: 12px; font-weight: 900; color: rgba(31,35,40,0.75); margin-bottom: 6px; }
-        .expTextList { list-style: disc; padding-left: 18px; margin: 0; max-height: 160px; overflow: auto; display:grid; gap: 4px; }
-        .expEmptyLi { color: var(--muted); font-size: 12px; }
-        .expLink { appearance:none; border:none; background:transparent; padding:0; margin:0; font:inherit; color:inherit; cursor:pointer; text-align:left; line-height:1.35; }
-        .expLink:hover { text-decoration: underline; text-decoration-color: rgba(47,93,124,0.55); }
+        .expCard {
+          border: 1px solid var(--border2);
+          background: var(--panel);
+          border-radius: var(--radius);
+          box-shadow: var(--shadow);
+          padding: 10px;
+          margin-top: 10px;
+          margin-bottom: 10px;
+        }
+        .expHeader {
+          display: flex;
+          align-items: baseline;
+          justify-content: space-between;
+          gap: 12px;
+          margin-bottom: 8px;
+        }
+        .expTitle {
+          font-weight: 900;
+          font-size: 12px;
+        }
+        .expMeta {
+          font-size: 12px;
+          color: var(--muted);
+          text-align: right;
+        }
+        .expError {
+          font-size: 12px;
+          color: rgba(155, 28, 28, 0.9);
+        }
+        .expGrid {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 12px;
+          min-width: 0;
+        }
+        .expColTitle {
+          font-size: 12px;
+          font-weight: 900;
+          color: rgba(31, 35, 40, 0.75);
+          margin-bottom: 6px;
+        }
+        .expTextList {
+          list-style: disc;
+          padding-left: 18px;
+          margin: 0;
+          max-height: 160px;
+          overflow: auto;
+          display: grid;
+          gap: 4px;
+        }
+        .expEmptyLi {
+          color: var(--muted);
+          font-size: 12px;
+        }
+        .expLink {
+          appearance: none;
+          border: none;
+          background: transparent;
+          padding: 0;
+          margin: 0;
+          font: inherit;
+          color: inherit;
+          cursor: pointer;
+          text-align: left;
+          line-height: 1.35;
+        }
+        .expLink:hover {
+          text-decoration: underline;
+          text-decoration-color: rgba(47, 93, 124, 0.55);
+        }
 
-        .searchBar { display:grid; grid-template-columns: 1fr auto; gap:10px; align-items:center; margin-top: 10px; }
-        .searchInput { padding: 10px 12px; border-radius: var(--radius); border:1px solid var(--border); background: var(--panel2); font-size: 14px; width:100%; box-shadow: 0 1px 0 rgba(31,35,40,0.03); }
-        .searchInput:focus { outline:none; border-color: rgba(47,93,124,0.5); box-shadow: 0 0 0 4px rgba(47,93,124,0.12); }
-        .searchStatus { font-size:12px; color: var(--muted); white-space:nowrap; }
+        .searchBar {
+          display: grid;
+          grid-template-columns: 1fr auto;
+          gap: 10px;
+          align-items: center;
+          margin-top: 10px;
+        }
+        .searchInput {
+          padding: 10px 12px;
+          border-radius: var(--radius);
+          border: 1px solid var(--border);
+          background: var(--panel2);
+          font-size: 14px;
+          width: 100%;
+          box-shadow: 0 1px 0 rgba(31, 35, 40, 0.03);
+        }
+        .searchInput:focus {
+          outline: none;
+          border-color: rgba(47, 93, 124, 0.5);
+          box-shadow: 0 0 0 4px rgba(47, 93, 124, 0.12);
+        }
+        .searchStatus {
+          font-size: 12px;
+          color: var(--muted);
+          white-space: nowrap;
+        }
 
-        .results { margin-top:10px; border:1px solid var(--border2); border-radius: var(--radius); padding: 8px; background: var(--panel); box-shadow: var(--shadow); }
-        .resultsList { list-style:none; padding:0; margin:0; display:grid; gap:6px; }
-        .resultBtn { width:100%; border:1px solid var(--border2); border-radius: var(--radius); padding:10px; background: var(--panel2); cursor:pointer; display:flex; align-items:center; justify-content:space-between; gap:12px; text-align:left; transition: transform 80ms ease, border-color 120ms ease, background 120ms ease; }
-        .resultBtn:hover { transform: translateY(-1px); border-color: rgba(47,93,124,0.35); background:#ffffff; }
-        .resultMain { min-width:0; }
-        .resultName { font-weight: 900; white-space: nowrap; overflow:hidden; text-overflow: ellipsis; }
-        .resultMeta { font-size:12px; color: var(--muted); margin-top:2px; }
-        .resultGo { font-size:12px; font-weight: 900; color: var(--blue); }
-        .emptySmall { font-size:12px; color: var(--muted); padding:6px 4px; }
-
-        .errorBox { border:1px solid var(--dangerBorder); background: var(--dangerBg); border-radius: var(--radius); padding: 12px; margin-top: 12px; margin-bottom: 12px; }
-        .errorTitle { font-weight: 900; margin-bottom: 6px; }
-        .errorLine { font-size:12px; color: rgba(31,35,40,0.85); margin-top: 2px; }
-
-        .main { display:flex; gap:16px; align-items:flex-start; }
-        .left { flex:1; overflow-x:auto; padding-bottom: 8px; min-width:0; }
-        .kCols { display:grid; grid-auto-flow: column; grid-auto-columns: minmax(160px, 1fr); gap:12px; align-items:start; justify-content:start; padding-bottom: 4px; min-width:0; }
-        .kCol { display:grid; grid-template-rows: auto 1fr; gap:8px; min-width:0; }
-        .kColTitle { font-size:12px; font-weight:900; color: rgba(31,35,40,0.75); }
-        .kColCells { display:grid; gap:10px; align-content:start; min-width:0; }
-
-        .cellBtn {
-          width:100%;
-          display:flex; flex-direction:column; align-items:stretch; gap:8px;
-          padding:12px; border-radius: var(--radius);
-          border:1px solid var(--border); background: var(--panel);
-          text-align:left; cursor:pointer;
-          min-height: 92px;
-          min-width:0; overflow:hidden; position:relative;
+        .results {
+          margin-top: 10px;
+          border: 1px solid var(--border2);
+          border-radius: var(--radius);
+          padding: 8px;
+          background: var(--panel);
+          box-shadow: var(--shadow);
+        }
+        .resultsList {
+          list-style: none;
+          padding: 0;
+          margin: 0;
+          display: grid;
+          gap: 6px;
+        }
+        .resultBtn {
+          width: 100%;
+          border: 1px solid var(--border2);
+          border-radius: var(--radius);
+          padding: 10px;
+          background: var(--panel2);
+          cursor: pointer;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          text-align: left;
           transition: transform 80ms ease, border-color 120ms ease, background 120ms ease;
         }
-        .cellBtn:hover { transform: translateY(-1px); border-color: rgba(47,93,124,0.25); background:#ffffff; z-index:2; }
-        .cellBtn:disabled { opacity:0.55; cursor:not-allowed; }
-        .cellBtn.selected { background: var(--blueSoft); border-color: rgba(47,93,124,0.35); }
-        .cellTop { display:flex; justify-content:space-between; align-items:center; gap:8px; min-width:0; }
-        .cellCode { font-weight: 900; min-width:0; }
-        .badge { font-size:12px; color: var(--blue); border:1px solid rgba(47,93,124,0.25); padding: 2px 8px; border-radius: 999px; background: rgba(47,93,124,0.08); flex:0 0 auto; }
-        .cellMeta { font-size:12px; color: rgba(31,35,40,0.78); min-width:0; }
-        .emptyMeta { color: var(--muted); }
-        .chipWrap { display:flex; flex-wrap:wrap; gap:6px; max-height:120px; overflow:auto; padding-right:4px; min-width:0; }
-        .chip {
-          flex: 1 1 auto; min-width:0; max-width:100%;
-          background: rgba(31,35,40,0.06);
-          border:1px solid rgba(31,35,40,0.08);
+        .resultBtn:hover {
+          transform: translateY(-1px);
+          border-color: rgba(47, 93, 124, 0.35);
+          background: #ffffff;
+        }
+        .resultMain {
+          min-width: 0;
+        }
+        .resultName {
+          font-weight: 900;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+        .resultMeta {
+          font-size: 12px;
+          color: var(--muted);
+          margin-top: 2px;
+        }
+        .resultGo {
+          font-size: 12px;
+          font-weight: 900;
+          color: var(--blue);
+        }
+        .emptySmall {
+          font-size: 12px;
+          color: var(--muted);
+          padding: 6px 4px;
+        }
+
+        .errorBox {
+          border: 1px solid var(--dangerBorder);
+          background: var(--dangerBg);
+          border-radius: var(--radius);
+          padding: 12px;
+          margin-top: 12px;
+          margin-bottom: 12px;
+        }
+        .errorTitle {
+          font-weight: 900;
+          margin-bottom: 6px;
+        }
+        .errorLine {
+          font-size: 12px;
+          color: rgba(31, 35, 40, 0.85);
+          margin-top: 2px;
+        }
+
+        .main {
+          display: flex;
+          gap: 16px;
+          align-items: flex-start;
+        }
+        .left {
+          flex: 1;
+          overflow-x: auto;
+          padding-bottom: 8px;
+          min-width: 0;
+        }
+        .kCols {
+          display: grid;
+          grid-auto-flow: column;
+          grid-auto-columns: minmax(160px, 1fr);
+          gap: 12px;
+          align-items: start;
+          justify-content: start;
+          padding-bottom: 4px;
+          min-width: 0;
+        }
+        .kCol {
+          display: grid;
+          grid-template-rows: auto 1fr;
+          gap: 8px;
+          min-width: 0;
+        }
+        .kColTitle {
+          font-size: 12px;
+          font-weight: 900;
+          color: rgba(31, 35, 40, 0.75);
+        }
+        .kColCells {
+          display: grid;
+          gap: 10px;
+          align-content: start;
+          min-width: 0;
+        }
+
+        .cellBtn {
+          width: 100%;
+          display: flex;
+          flex-direction: column;
+          align-items: stretch;
+          gap: 8px;
+          padding: 12px;
+          border-radius: var(--radius);
+          border: 1px solid var(--border);
+          background: var(--panel);
+          text-align: left;
+          cursor: pointer;
+          min-height: 92px;
+          min-width: 0;
+          overflow: hidden;
+          position: relative;
+          transition: transform 80ms ease, border-color 120ms ease, background 120ms ease;
+        }
+        .cellBtn:hover {
+          transform: translateY(-1px);
+          border-color: rgba(47, 93, 124, 0.25);
+          background: #ffffff;
+          z-index: 2;
+        }
+        .cellBtn:disabled {
+          opacity: 0.55;
+          cursor: not-allowed;
+        }
+        .cellBtn.selected {
+          background: var(--blueSoft);
+          border-color: rgba(47, 93, 124, 0.35);
+        }
+        .cellTop {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          gap: 8px;
+          min-width: 0;
+        }
+        .cellCode {
+          font-weight: 900;
+          min-width: 0;
+        }
+        .badge {
+          font-size: 12px;
+          color: var(--blue);
+          border: 1px solid rgba(47, 93, 124, 0.25);
+          padding: 2px 8px;
           border-radius: 999px;
-          padding:4px 8px;
-          line-height:1.2;
+          background: rgba(47, 93, 124, 0.08);
+          flex: 0 0 auto;
+        }
+        .cellMeta {
+          font-size: 12px;
+          color: rgba(31, 35, 40, 0.78);
+          min-width: 0;
+        }
+        .emptyMeta {
+          color: var(--muted);
+        }
+        .chipWrap {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 6px;
+          max-height: 120px;
+          overflow: auto;
+          padding-right: 4px;
+          min-width: 0;
+        }
+        .chip {
+          flex: 1 1 auto;
+          min-width: 0;
+          max-width: 100%;
+          background: rgba(31, 35, 40, 0.06);
+          border: 1px solid rgba(31, 35, 40, 0.08);
+          border-radius: 999px;
+          padding: 4px 8px;
+          line-height: 1.2;
           white-space: normal;
-          overflow-wrap:anywhere;
+          overflow-wrap: anywhere;
           word-break: break-word;
-          display:-webkit-box;
+          display: -webkit-box;
           -webkit-box-orient: vertical;
           -webkit-line-clamp: 2;
-          overflow:hidden;
+          overflow: hidden;
         }
-        .chipSoon { background: var(--warnBg); border-color: var(--warnBorder); }
-        .chipExpired { background: var(--expBg); border-color: var(--expBorder); }
+        .chipSoon {
+          background: var(--warnBg);
+          border-color: var(--warnBorder);
+        }
+        .chipExpired {
+          background: var(--expBg);
+          border-color: var(--expBorder);
+        }
 
-        .right { width: 420px; min-width:0; }
-        .card { border:1px solid var(--border); border-radius: var(--radius); padding:12px; background: var(--panel); box-shadow: var(--shadow); }
-        .cardTitle { font-size:12px; font-weight:900; margin-bottom:8px; }
-        .form { display:grid; gap:10px; min-width:0; }
-        .row { display:flex; gap:8px; align-items:center; min-width:0; }
-        .input { padding:10px; border-radius:12px; border:1px solid var(--border); background: var(--panel2); width:100%; min-width:0; font-size:14px; }
-        .input:focus { outline:none; border-color: rgba(47,93,124,0.5); box-shadow: 0 0 0 4px rgba(47,93,124,0.12); }
-        .input.qty { width:110px; flex: 0 0 auto; }
+        .right {
+          width: 420px;
+          min-width: 0;
+        }
+        .card {
+          border: 1px solid var(--border);
+          border-radius: var(--radius);
+          padding: 12px;
+          background: var(--panel);
+          box-shadow: var(--shadow);
+        }
+        .cardTitle {
+          font-size: 12px;
+          font-weight: 900;
+          margin-bottom: 8px;
+        }
+        .form {
+          display: grid;
+          gap: 10px;
+          min-width: 0;
+        }
+        .row {
+          display: flex;
+          gap: 8px;
+          align-items: center;
+          min-width: 0;
+        }
+        .input {
+          padding: 10px;
+          border-radius: 12px;
+          border: 1px solid var(--border);
+          background: var(--panel2);
+          width: 100%;
+          min-width: 0;
+          font-size: 14px;
+        }
+        .input:focus {
+          outline: none;
+          border-color: rgba(47, 93, 124, 0.5);
+          box-shadow: 0 0 0 4px rgba(47, 93, 124, 0.12);
+        }
+        .input.qty {
+          width: 110px;
+          flex: 0 0 auto;
+        }
 
-        .primary { padding:10px 12px; border-radius:12px; border:1px solid rgba(47,93,124,0.35); background: var(--blue); color:#fff; font-weight:900; cursor:pointer; }
-        .primary:disabled { opacity:0.6; cursor:not-allowed; }
+        .primary {
+          padding: 10px 12px;
+          border-radius: 12px;
+          border: 1px solid rgba(47, 93, 124, 0.35);
+          background: var(--blue);
+          color: #fff;
+          font-weight: 900;
+          cursor: pointer;
+        }
+        .primary:disabled {
+          opacity: 0.6;
+          cursor: not-allowed;
+        }
 
-        .pill { padding:8px 10px; border-radius:999px; border:1px solid rgba(47,93,124,0.25); background: rgba(47,93,124,0.08); color: var(--blue); font-weight:900; font-size:12px; cursor:pointer; }
-        .pill.ghost { background: transparent; border-color: var(--border); color: rgba(31,35,40,0.75); }
+        .pill {
+          padding: 8px 10px;
+          border-radius: 999px;
+          border: 1px solid rgba(47, 93, 124, 0.25);
+          background: rgba(47, 93, 124, 0.08);
+          color: var(--blue);
+          font-weight: 900;
+          font-size: 12px;
+          cursor: pointer;
+        }
+        .pill.ghost {
+          background: transparent;
+          border-color: var(--border);
+          color: rgba(31, 35, 40, 0.75);
+        }
 
-        .hint { font-size:12px; color: var(--muted); margin-top:-6px; }
-        .itemsHeader { display:flex; justify-content:space-between; align-items:baseline; gap:12px; margin-top:12px; margin-bottom:8px; }
-        .itemsTitle { font-size:12px; font-weight:900; }
-        .itemsCount { font-size:12px; color: var(--muted); }
+        .hint {
+          font-size: 12px;
+          color: var(--muted);
+          margin-top: -6px;
+        }
+        .itemsHeader {
+          display: flex;
+          justify-content: space-between;
+          align-items: baseline;
+          gap: 12px;
+          margin-top: 12px;
+          margin-bottom: 8px;
+        }
+        .itemsTitle {
+          font-size: 12px;
+          font-weight: 900;
+        }
+        .itemsCount {
+          font-size: 12px;
+          color: var(--muted);
+        }
 
-        .list { list-style:none; padding:0; margin:0; display:grid; gap:8px; min-width:0; }
-        .thumb { width:44px; height:44px; border-radius:12px; object-fit:cover; border:1px solid rgba(31,35,40,0.1); flex:0 0 auto; }
-        .thumb.placeholder { background: rgba(31,35,40,0.06); border:1px dashed rgba(31,35,40,0.16); }
+        /* NEW: preview card */
+        .previewCard {
+          margin-top: 12px;
+          border: 1px solid var(--border);
+          border-radius: var(--radius);
+          background: var(--panel);
+          box-shadow: var(--shadow);
+          overflow: hidden;
+        }
+        .previewTop {
+          padding: 10px 12px;
+          border-bottom: 1px solid var(--border2);
+          display: grid;
+          gap: 6px;
+        }
+        .previewTitle {
+          font-size: 12px;
+          font-weight: 900;
+        }
+        .previewMeta {
+          display: flex;
+          gap: 8px;
+          align-items: center;
+          flex-wrap: wrap;
+          min-width: 0;
+        }
+        .previewMeta.dim {
+          color: var(--muted);
+          font-size: 12px;
+        }
+        .previewName {
+          font-size: 12px;
+          font-weight: 900;
+          max-width: 100%;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .previewPill {
+          font-size: 12px;
+          font-weight: 900;
+          border-radius: 999px;
+          padding: 2px 8px;
+          border: 1px solid rgba(31, 35, 40, 0.12);
+          background: rgba(31, 35, 40, 0.06);
+        }
+        .previewPill.pSoon {
+          background: var(--warnBg);
+          border-color: var(--warnBorder);
+        }
+        .previewPill.pExp {
+          background: var(--expBg);
+          border-color: var(--expBorder);
+        }
+        .previewBody {
+          padding: 10px 12px;
+        }
+        .previewImg {
+          width: 100%;
+          height: 260px;
+          object-fit: contain;
+          border-radius: 12px;
+          border: 1px solid rgba(31, 35, 40, 0.1);
+          background: var(--panel2);
+        }
+        .previewEmpty {
+          height: 260px;
+          border-radius: 12px;
+          border: 1px dashed rgba(31, 35, 40, 0.18);
+          background: rgba(31, 35, 40, 0.04);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          color: var(--muted);
+          font-size: 12px;
+        }
 
-        .item { border:1px solid var(--border); border-radius: var(--radius); padding:12px; display:flex; justify-content:space-between; gap:10px; align-items:center; background: var(--panel); min-width:0; }
-        .item.soon { border-color: var(--warnBorder); background: var(--warnBg); }
-        .item.expired { border-color: var(--expBorder); background: var(--expBg); }
-        .itemLeft { min-width:0; flex:1 1 auto; }
-        .itemName { font-weight:900; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-        .itemMeta { font-size:12px; color: var(--muted); margin-top:2px; }
-        .itemActions { display:flex; gap:8px; flex:0 0 auto; }
-        .neutral,.danger { border:1px solid var(--border); border-radius:12px; padding:8px 10px; cursor:pointer; background: var(--panel2); }
-        .editWrap { width:100%; display:grid; gap:10px; min-width:0; }
-        .editGrid { display:grid; grid-template-columns: 1fr 110px 1fr; gap:8px; align-items:center; min-width:0; }
-        .editActions { display:flex; justify-content:flex-end; gap:8px; }
-        .expiryBlock { border:1px solid var(--border2); background: rgba(47,93,124,0.03); border-radius:12px; padding:10px; display:grid; gap:8px; }
-        .expiryLabel { font-size:12px; font-weight:900; color: rgba(31,35,40,0.78); }
-        .pillRow { display:flex; flex-wrap:wrap; gap:8px; }
-        .expiryCustomRow { display:grid; gap:6px; }
-        .expiryHint { font-size:12px; color: var(--muted); }
-        .empty { font-size:13px; color: var(--muted); }
+        .list {
+          list-style: none;
+          padding: 0;
+          margin: 0;
+          display: grid;
+          gap: 8px;
+          min-width: 0;
+        }
+        .thumb {
+          width: 44px;
+          height: 44px;
+          border-radius: 12px;
+          object-fit: cover;
+          border: 1px solid rgba(31, 35, 40, 0.1);
+          flex: 0 0 auto;
+        }
+        .thumb.placeholder {
+          background: rgba(31, 35, 40, 0.06);
+          border: 1px dashed rgba(31, 35, 40, 0.16);
+        }
+
+        .item {
+          border: 1px solid var(--border);
+          border-radius: var(--radius);
+          padding: 12px;
+          display: flex;
+          justify-content: space-between;
+          gap: 10px;
+          align-items: center;
+          background: var(--panel);
+          min-width: 0;
+        }
+        .item.active {
+          border-color: rgba(47, 93, 124, 0.45);
+          box-shadow: 0 0 0 4px rgba(47, 93, 124, 0.12);
+        }
+        .item.soon {
+          border-color: var(--warnBorder);
+          background: var(--warnBg);
+        }
+        .item.expired {
+          border-color: var(--expBorder);
+          background: var(--expBg);
+        }
+
+        .itemMainBtn {
+          flex: 1 1 auto;
+          min-width: 0;
+          border: none;
+          background: transparent;
+          padding: 0;
+          margin: 0;
+          cursor: pointer;
+          text-align: left;
+        }
+        .itemLeft {
+          min-width: 0;
+        }
+        .itemName {
+          font-weight: 900;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+        .itemMeta {
+          font-size: 12px;
+          color: var(--muted);
+          margin-top: 2px;
+        }
+        .itemActions {
+          display: flex;
+          gap: 8px;
+          flex: 0 0 auto;
+        }
+        .neutral,
+        .danger {
+          border: 1px solid var(--border);
+          border-radius: 12px;
+          padding: 8px 10px;
+          cursor: pointer;
+          background: var(--panel2);
+        }
+
+        .editWrap {
+          width: 100%;
+          display: grid;
+          gap: 10px;
+          min-width: 0;
+        }
+
+        .moveRow {
+          display: grid;
+          grid-template-columns: 90px 1fr;
+          gap: 10px;
+          align-items: center;
+        }
+        .moveLabel {
+          font-size: 12px;
+          font-weight: 900;
+          color: rgba(31, 35, 40, 0.78);
+        }
+        .select {
+          width: 100%;
+          padding: 10px;
+          border-radius: 12px;
+          border: 1px solid var(--border);
+          background: var(--panel2);
+          font-size: 14px;
+        }
+        .select:focus {
+          outline: none;
+          border-color: rgba(47, 93, 124, 0.5);
+          box-shadow: 0 0 0 4px rgba(47, 93, 124, 0.12);
+        }
+
+        .editGrid {
+          display: grid;
+          grid-template-columns: 1fr 110px 1fr;
+          gap: 8px;
+          align-items: center;
+          min-width: 0;
+        }
+        .editActions {
+          display: flex;
+          justify-content: flex-end;
+          gap: 8px;
+        }
+
+        .expiryBlock {
+          border: 1px solid var(--border2);
+          background: rgba(47, 93, 124, 0.03);
+          border-radius: 12px;
+          padding: 10px;
+          display: grid;
+          gap: 8px;
+        }
+        .expiryLabel {
+          font-size: 12px;
+          font-weight: 900;
+          color: rgba(31, 35, 40, 0.78);
+        }
+        .pillRow {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+        }
+        .expiryCustomRow {
+          display: grid;
+          gap: 6px;
+        }
+        .expiryHint {
+          font-size: 12px;
+          color: var(--muted);
+        }
+
+        .empty {
+          font-size: 13px;
+          color: var(--muted);
+        }
 
         @media (max-width: 768px) {
-          .app { padding:12px; }
-          .main { flex-direction:column; gap:12px; }
-          .expGrid { grid-template-columns: 1fr; }
-          .right { width:100%; }
-          .kCols { grid-auto-columns: minmax(140px, 1fr); }
-          .row { display:grid; grid-template-columns: 1fr 1fr; gap:8px; }
-          .input.qty { width:100%; }
-          .primary { grid-column: 1 / -1; width:100%; }
-          .searchBar { grid-template-columns: 1fr; gap:6px; }
-          .searchStatus { text-align:right; }
-          .editGrid { grid-template-columns: 1fr 1fr; }
-          .editGrid .input:nth-child(1) { grid-column: 1 / -1; }
-          .editActions { justify-content:space-between; }
+          .app {
+            padding: 12px;
+          }
+          .main {
+            flex-direction: column;
+            gap: 12px;
+          }
+          .expGrid {
+            grid-template-columns: 1fr;
+          }
+          .right {
+            width: 100%;
+          }
+          .kCols {
+            grid-auto-columns: minmax(140px, 1fr);
+          }
+          .row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+          }
+          .input.qty {
+            width: 100%;
+          }
+          .primary {
+            grid-column: 1 / -1;
+            width: 100%;
+          }
+          .searchBar {
+            grid-template-columns: 1fr;
+            gap: 6px;
+          }
+          .searchStatus {
+            text-align: right;
+          }
+          .editGrid {
+            grid-template-columns: 1fr 1fr;
+          }
+          .editGrid .input:nth-child(1) {
+            grid-column: 1 / -1;
+          }
+          .editActions {
+            justify-content: space-between;
+          }
+          .moveRow {
+            grid-template-columns: 1fr;
+          }
+          .previewImg,
+          .previewEmpty {
+            height: 220px;
+          }
         }
       `}</style>
     </div>
