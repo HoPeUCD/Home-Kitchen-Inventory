@@ -2,13 +2,17 @@
 
 import { useEffect, useState } from "react";
 import { supabase } from "@/src/lib/supabase";
-import { useRouter } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import AuthGate from "@/src/components/AuthGate";
 
-export default function Home() {
+export default function InviteAcceptPage() {
   const router = useRouter();
+  const params = useParams();
+  const token = (params as any)?.token as string;
+
   const [session, setSession] = useState<any>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [status, setStatus] = useState<string>("Preparing…");
 
   useEffect(() => {
     (async () => {
@@ -21,36 +25,31 @@ export default function Home() {
 
   useEffect(() => {
     if (!session?.user?.id) return;
+    if (!token) return;
 
     (async () => {
       setErr(null);
+      setStatus("Accepting invite…");
 
-      const { data: profile, error } = await supabase
-        .from("profiles")
-        .select("default_household_id")
-        .eq("user_id", session.user.id)
-        .maybeSingle();
+      const { data, error } = await supabase.rpc("accept_household_invite", { p_token: token });
 
       if (error) {
         setErr(error.message);
+        setStatus("Failed");
         return;
       }
 
-      if (!profile?.default_household_id) {
-        router.replace("/onboarding");
-        return;
-      }
-
-      // 你可以选择跳 rooms 列表 或者直接跳某个 room
+      setStatus("Accepted. Redirecting…");
       router.replace("/rooms");
     })();
-  }, [session?.user?.id, router]);
+  }, [session?.user?.id, token, router]);
 
   if (!session) return <AuthGate onAuthed={(s) => setSession(s)} />;
 
   return (
     <div style={{ padding: 16 }}>
-      {err ? <div style={{ color: "crimson" }}>{err}</div> : <div>Redirecting…</div>}
+      <div style={{ fontWeight: 900, marginBottom: 8 }}>{status}</div>
+      {err && <div style={{ color: "crimson" }}>{err}</div>}
     </div>
   );
 }
