@@ -35,6 +35,8 @@ type Item = {
   updated_at: string | null;
 };
 
+type MapItem = { name: string; expires_at: string | null };
+
 function startOfToday() {
   const now = new Date();
   return new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
@@ -71,18 +73,37 @@ function expiryStatus(expiresAt: string | null) {
   if (d <= 30) return { kind: "soon" as const, days: d };
   return { kind: "ok" as const, days: d };
 }
-function compareByExpiry(a: Item, b: Item) {
+function compareMapItemsByExpiryThenName(a: MapItem, b: MapItem) {
   const sa = expiryStatus(a.expires_at);
   const sb = expiryStatus(b.expires_at);
   const rank = (k: typeof sa.kind) => (k === "expired" ? 0 : k === "soon" ? 1 : k === "ok" ? 2 : 3);
   const ra = rank(sa.kind);
   const rb = rank(sb.kind);
   if (ra !== rb) return ra - rb;
+
   if (a.expires_at && b.expires_at) {
     const c = a.expires_at.localeCompare(b.expires_at);
     if (c !== 0) return c;
   } else if (a.expires_at && !b.expires_at) return -1;
   else if (!a.expires_at && b.expires_at) return 1;
+
+  return a.name.localeCompare(b.name);
+}
+function compareItemsForList(a: Item, b: Item) {
+  // same priority rules for the right-side item list
+  const sa = expiryStatus(a.expires_at);
+  const sb = expiryStatus(b.expires_at);
+  const rank = (k: typeof sa.kind) => (k === "expired" ? 0 : k === "soon" ? 1 : k === "ok" ? 2 : 3);
+  const ra = rank(sa.kind);
+  const rb = rank(sb.kind);
+  if (ra !== rb) return ra - rb;
+
+  if (a.expires_at && b.expires_at) {
+    const c = a.expires_at.localeCompare(b.expires_at);
+    if (c !== 0) return c;
+  } else if (a.expires_at && !b.expires_at) return -1;
+  else if (!a.expires_at && b.expires_at) return 1;
+
   return a.name.localeCompare(b.name);
 }
 
@@ -105,13 +126,19 @@ export default function RoomPage() {
   const [cellsByCol, setCellsByCol] = useState<Record<string, Cell[]>>({});
   const [selectedCellId, setSelectedCellId] = useState<string | null>(null);
 
+  // right panel items in selected cell
   const [items, setItems] = useState<Item[]>([]);
   const [err, setErr] = useState<string | null>(null);
 
+  // used for global location dropdown
   const [cellsFull, setCellsFull] = useState<CellFull[]>([]);
   const [locQuery, setLocQuery] = useState("");
 
+  // signed urls for thumbnails
   const [signedUrlByPath, setSignedUrlByPath] = useState<Record<string, string>>({});
+
+  // NEW: map preview items shown inside each cell button
+  const [cellItemsMap, setCellItemsMap] = useState<Record<string, MapItem[]>>({});
 
   // Add form
   const [name, setName] = useState("");
@@ -190,7 +217,11 @@ export default function RoomPage() {
   }
 
   async function loadRooms(hid: string) {
-    const r = await supabase.from("rooms").select("id,household_id,name,position").eq("household_id", hid).order("position", { ascending: true });
+    const r = await supabase
+      .from("rooms")
+      .select("id,household_id,name,position")
+      .eq("household_id", hid)
+      .order("position", { ascending: true });
     if (r.error) throw new Error(`Rooms load failed: ${r.error.message}`);
     setRooms((r.data as Room[]) ?? []);
   }
@@ -202,7 +233,11 @@ export default function RoomPage() {
   }
 
   async function loadLayout(roomId: string) {
-    const c = await supabase.from("room_columns").select("id,room_id,name,position").eq("room_id", roomId).order("position", { ascending: true });
+    const c = await supabase
+      .from("room_columns")
+      .select("id,room_id,name,position")
+      .eq("room_id", roomId)
+      .order("position", { ascending: true });
     if (c.error) throw new Error(`Columns load failed: ${c.error.message}`);
     const colsData = (c.data as Col[]) ?? [];
     setCols(colsData);
@@ -213,7 +248,11 @@ export default function RoomPage() {
     }
 
     const colIds = colsData.map((x) => x.id);
-    const rc = await supabase.from("room_cells").select("id,column_id,code,name,position").in("column_id", colIds).order("position", { ascending: true });
+    const rc = await supabase
+      .from("room_cells")
+      .select("id,column_id,code,name,position")
+      .in("column_id", colIds)
+      .order("position", { ascending: true });
     if (rc.error) throw new Error(`Cells load failed: ${rc.error.message}`);
 
     const by: Record<string, Cell[]> = {};
@@ -228,7 +267,9 @@ export default function RoomPage() {
   async function loadCellsFull(hid: string) {
     const q = await supabase
       .from("v_room_cells_full")
-      .select("cell_id,cell_code,cell_name,cell_position,column_id,column_name,column_position,room_id,room_name,room_position,household_id")
+      .select(
+        "cell_id,cell_code,cell_name,cell_position,column_id,column_name,column_position,room_id,room_name,room_position,household_id"
+      )
       .eq("household_id", hid)
       .order("room_position", { ascending: true })
       .order("column_position", { ascending: true })
@@ -259,17 +300,57 @@ export default function RoomPage() {
     });
   }
 
+  const roomCellIds = useMemo(() => {
+    const ids: string[] = [];
+    for (const colId of Object.keys(cellsByCol)) {
+      for (const cell of (cellsByCol[colId] ?? [])) ids.push(cell.id);
+    }
+    return ids;
+  }, [cellsByCol]);
+
+  async function refreshMapItems(cellIds: string[]) {
+    if (!cellIds.length) {
+      setCellItemsMap({});
+      return;
+    }
+
+    const q = await supabase
+      .from("items_v2")
+      .select("cell_id,name,expires_at,qty")
+      .in("cell_id", cellIds)
+      .gt("qty", 0)
+      .limit(5000);
+
+    if (q.error) throw new Error(`Map items load failed: ${q.error.message}`);
+
+    const by: Record<string, MapItem[]> = {};
+    for (const row of (q.data as any[] ?? [])) {
+      const cid = String(row.cell_id);
+      by[cid] ||= [];
+      by[cid].push({ name: String(row.name ?? ""), expires_at: row.expires_at ?? null });
+    }
+
+    for (const cid of Object.keys(by)) {
+      by[cid] = by[cid]
+        .filter((x) => x.name && x.name.trim())
+        .slice()
+        .sort(compareMapItemsByExpiryThenName);
+    }
+
+    setCellItemsMap(by);
+  }
+
   async function refreshItems(cellId: string) {
     const q = await supabase
       .from("items_v2")
       .select("id,cell_id,name,qty,unit,expires_at,aliases,image_path,updated_at")
       .eq("cell_id", cellId)
       .gt("qty", 0)
-      .limit(1000);
+      .limit(2000);
 
     if (q.error) throw new Error(`Items load failed: ${q.error.message}`);
 
-    const rows = ((q.data as Item[]) ?? []).slice().sort(compareByExpiry);
+    const rows = ((q.data as Item[]) ?? []).slice().sort(compareItemsForList);
     setItems(rows);
 
     const paths = rows.map((r) => r.image_path).filter(Boolean) as string[];
@@ -292,6 +373,19 @@ export default function RoomPage() {
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id, roomId]);
+
+  useEffect(() => {
+    // refresh cell map preview whenever cells change
+    (async () => {
+      try {
+        setErr(null);
+        await refreshMapItems(roomCellIds);
+      } catch (e: any) {
+        setErr(e?.message ?? "Load map items failed.");
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roomCellIds.join(",")]);
 
   useEffect(() => {
     if (!selectedCellId) {
@@ -431,23 +525,47 @@ export default function RoomPage() {
   }
 
   async function deleteCell(cellId: string) {
-    const check = await supabase.from("items_v2").select("id").eq("cell_id", cellId).gt("qty", 0).limit(1);
-    if (!check.error && (check.data ?? []).length > 0) {
-      alert("This cell has items. Move items out before deleting.");
-      return;
+    const ok = confirm("Delete this cell AND delete all items inside it?");
+    if (!ok) return;
+
+    try {
+      setErr(null);
+
+      // 1) delete items inside (no further confirmation)
+      const di = await supabase.from("items_v2").delete().eq("cell_id", cellId);
+      if (di.error) throw di.error;
+
+      // 2) delete the cell
+      const del = await supabase.from("room_cells").delete().eq("id", cellId);
+      if (del.error) throw del.error;
+
+      // update local states
+      setCellsByCol((prev) => {
+        const next = { ...prev };
+        for (const k of Object.keys(next)) next[k] = (next[k] ?? []).filter((c) => c.id !== cellId);
+        return next;
+      });
+
+      setCellItemsMap((prev) => {
+        const next = { ...prev };
+        delete next[cellId];
+        return next;
+      });
+
+      if (selectedCellId === cellId) {
+        setSelectedCellId(null);
+        setItems([]);
+      }
+
+      if (editingId && editCellId === cellId) {
+        // if currently editing and the target location is deleted, cancel edit
+        cancelEdit();
+      }
+
+      if (household) await loadCellsFull(household.id);
+    } catch (e: any) {
+      setErr(e?.message ?? "Delete cell failed.");
     }
-    if (!confirm("Delete this cell?")) return;
-
-    const del = await supabase.from("room_cells").delete().eq("id", cellId);
-    if (del.error) return setErr(del.error.message);
-
-    setCellsByCol((prev) => {
-      const next = { ...prev };
-      for (const k of Object.keys(next)) next[k] = (next[k] ?? []).filter((c) => c.id !== cellId);
-      return next;
-    });
-    if (selectedCellId === cellId) setSelectedCellId(null);
-    if (household) await loadCellsFull(household.id);
   }
 
   async function uploadItemImage(hid: string, itemId: string, file: File) {
@@ -513,6 +631,7 @@ export default function RoomPage() {
       setNewImageFile(null);
 
       await refreshItems(selectedCellId);
+      await refreshMapItems(roomCellIds);
     } catch (e: any) {
       setErr(e?.message ?? "Add item failed.");
     } finally {
@@ -591,6 +710,7 @@ export default function RoomPage() {
       }
 
       if (selectedCellId) await refreshItems(selectedCellId);
+      await refreshMapItems(roomCellIds);
     } catch (e: any) {
       setErr(e?.message ?? "Save failed.");
     } finally {
@@ -600,11 +720,15 @@ export default function RoomPage() {
   }
 
   async function deleteItem(itemId: string) {
-    if (!confirm("Delete this item?")) return;
+    // CHANGE #2: no confirmation
     const del = await supabase.from("items_v2").delete().eq("id", itemId);
     if (del.error) return setErr(del.error.message);
+
     setItems((prev) => prev.filter((x) => x.id !== itemId));
     if (editingId === itemId) cancelEdit();
+
+    // keep left map chips up to date
+    await refreshMapItems(roomCellIds);
   }
 
   function onCellClick(cellId: string) {
@@ -621,6 +745,29 @@ export default function RoomPage() {
   const selectedLabel = selectedCellFull ? fmtCellLabel(selectedCellFull) : "Select a cell";
   const pickBannerOn = pickMode && !!editingId;
 
+  function chipStyle(expires_at: string | null): React.CSSProperties {
+    const st = expiryStatus(expires_at);
+    const base: React.CSSProperties = {
+      display: "inline-flex",
+      alignItems: "center",
+      maxWidth: "100%",
+      padding: "4px 8px",
+      borderRadius: 10,
+      border: "1px solid rgba(31,35,40,.12)",
+      background: "transparent",
+      fontSize: 12,
+      fontWeight: 900,
+      overflow: "hidden",
+      textOverflow: "ellipsis",
+      whiteSpace: "nowrap",
+      minWidth: 0,
+    };
+
+    if (st.kind === "expired") return { ...base, background: "var(--expBg)", borderColor: "var(--expBorder)" };
+    if (st.kind === "soon") return { ...base, background: "var(--warnBg)", borderColor: "var(--warnBorder)" };
+    return { ...base, background: "rgba(47,93,124,.08)", borderColor: "rgba(47,93,124,.22)", color: "var(--blue)" };
+  }
+
   return (
     <div className="wrap">
       <div className="header">
@@ -632,12 +779,7 @@ export default function RoomPage() {
         </div>
 
         <div className="headerOps">
-          <select
-            className="select"
-            value={roomId}
-            onChange={(e) => router.push(`/rooms/${e.target.value}`)}
-            style={{ width: 220 }}
-          >
+          <select className="select" value={roomId} onChange={(e) => router.push(`/rooms/${e.target.value}`)} style={{ width: 220 }}>
             {rooms.map((r) => (
               <option key={r.id} value={r.id}>
                 {r.name}
@@ -645,12 +787,20 @@ export default function RoomPage() {
             ))}
           </select>
 
-          <button className="pill ghost" onClick={() => router.push("/rooms")}>Rooms</button>
-          <button className="pill ghost" onClick={signOut}>Sign out</button>
+          <button className="pill ghost" onClick={() => router.push("/rooms")}>
+            Rooms
+          </button>
+          <button className="pill ghost" onClick={signOut}>
+            Sign out
+          </button>
         </div>
       </div>
 
-      {err && <div className="alert" style={{ marginBottom: 12 }}>{err}</div>}
+      {err && (
+        <div className="alert" style={{ marginBottom: 12 }}>
+          {err}
+        </div>
+      )}
 
       {pickBannerOn && (
         <div className="card" style={{ marginBottom: 12, background: "var(--blueSoft)" }}>
@@ -659,7 +809,9 @@ export default function RoomPage() {
               <div className="h2">Pick a cell on the map</div>
               <div className="muted">Click a cell (left) to set location. Press ESC to cancel.</div>
             </div>
-            <button className="pill ghost" onClick={() => setPickMode(false)}>Cancel</button>
+            <button className="pill ghost" onClick={() => setPickMode(false)}>
+              Cancel
+            </button>
           </div>
         </div>
       )}
@@ -669,28 +821,32 @@ export default function RoomPage() {
         <section className="left">
           <div className="row" style={{ justifyContent: "space-between", marginBottom: 12 }}>
             <div className="h2">Layout</div>
-            <button className="pill" onClick={addColumn}>+ Column</button>
+            <button className="pill" onClick={addColumn}>
+              + Column
+            </button>
           </div>
 
-          <div className="cols">
+          {/* CHANGE #5: ensure columns align to top */}
+          <div className="cols" style={{ alignItems: "start" }}>
             {cols.length === 0 && <div className="muted">No columns yet. Click “+ Column”.</div>}
 
             {cols.map((col) => {
               const cells = cellsByCol[col.id] ?? [];
               return (
-                <div key={col.id} className="card colCard">
+                <div key={col.id} className="card colCard" style={{ alignContent: "start" }}>
                   <div className="colHead">
                     <div className="colTitle">{col.name}</div>
                     <div className="row" style={{ gap: 8, justifyContent: "flex-end", flexWrap: "wrap" }}>
-                      <button className="pill" onClick={() => renameColumn(col.id, col.name)}>Rename</button>
-                      <button className="pill ghost" onClick={() => deleteColumn(col.id)}>Delete</button>
+                      <button className="pill" onClick={() => renameColumn(col.id, col.name)}>
+                        Rename
+                      </button>
+                      <button className="pill ghost" onClick={() => deleteColumn(col.id)}>
+                        Delete
+                      </button>
                     </div>
                   </div>
 
-                  <div className="row" style={{ justifyContent: "flex-start" }}>
-                    <button className="pill" onClick={() => addCell(col.id)}>+ Cell</button>
-                  </div>
-
+                  {/* Cells list */}
                   <div className="cells">
                     {cells.length === 0 ? (
                       <div className="muted">No cells yet.</div>
@@ -700,20 +856,67 @@ export default function RoomPage() {
                         const nm = (cell.name ?? "").trim();
                         const selected = selectedCellId === cell.id;
 
+                        const previewItems = (cellItemsMap[cell.id] ?? []).slice().sort(compareMapItemsByExpiryThenName);
+
                         return (
                           <button key={cell.id} className={`cellBtn ${selected ? "selected" : ""}`} onClick={() => onCellClick(cell.id)}>
                             <div className="cellTop">
                               <div className="cellCode">{code}</div>
                               <div className="row" style={{ gap: 6, flex: "0 0 auto" }}>
-                                <button className="tiny" onClick={(e) => { e.stopPropagation(); editCell(cell); }}>Edit</button>
-                                <button className="tiny danger" onClick={(e) => { e.stopPropagation(); deleteCell(cell.id); }}>Del</button>
+                                <button
+                                  className="tiny"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    editCell(cell);
+                                  }}
+                                >
+                                  Edit
+                                </button>
+                                {/* CHANGE #1: delete cell allowed; will delete items inside after confirm */}
+                                <button
+                                  className="tiny danger"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    deleteCell(cell.id);
+                                  }}
+                                >
+                                  Del
+                                </button>
                               </div>
                             </div>
+
                             <div className="cellName">{nm || "—"}</div>
+
+                            {/* CHANGE #3: show all item names inside cell, sorted by expiry priority */}
+                            {previewItems.length > 0 && (
+                              <div
+                                style={{
+                                  marginTop: 8,
+                                  display: "flex",
+                                  flexWrap: "wrap",
+                                  gap: 6,
+                                  alignItems: "flex-start",
+                                  minWidth: 0,
+                                }}
+                              >
+                                {previewItems.map((pi, idx) => (
+                                  <span key={`${cell.id}-${idx}-${pi.name}`} style={chipStyle(pi.expires_at)} title={pi.name}>
+                                    {pi.name}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
                           </button>
                         );
                       })
                     )}
+                  </div>
+
+                  {/* CHANGE #4: Add cell button at the very bottom of the column */}
+                  <div style={{ marginTop: 10 }}>
+                    <button className="pill" onClick={() => addCell(col.id)} style={{ width: "100%", justifyContent: "center" } as any}>
+                      + Cell
+                    </button>
                   </div>
                 </div>
               );
@@ -724,7 +927,9 @@ export default function RoomPage() {
         {/* Right */}
         <aside className="right">
           <div className="card" style={{ marginBottom: 12 }}>
-            <div className="h2" style={{ marginBottom: 6 }}>Selected</div>
+            <div className="h2" style={{ marginBottom: 6 }}>
+              Selected
+            </div>
             <div className="muted">{selectedLabel}</div>
           </div>
 
@@ -733,7 +938,9 @@ export default function RoomPage() {
           ) : (
             <>
               <div className="card" style={{ marginBottom: 12 }}>
-                <div className="h2" style={{ marginBottom: 8 }}>Add item</div>
+                <div className="h2" style={{ marginBottom: 8 }}>
+                  Add item
+                </div>
 
                 <div style={{ display: "grid", gap: 10 }}>
                   <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Item name" />
@@ -743,16 +950,31 @@ export default function RoomPage() {
                     <input className="input" value={unit} onChange={(e) => setUnit(e.target.value)} placeholder="Unit" />
                   </div>
 
-                  <input className="input" value={aliasesCsv} onChange={(e) => setAliasesCsv(e.target.value)} placeholder="Aliases (comma-separated): e.g. 黑胡椒, peppercorn" />
+                  <input
+                    className="input"
+                    value={aliasesCsv}
+                    onChange={(e) => setAliasesCsv(e.target.value)}
+                    placeholder="Aliases (comma-separated): e.g. 黑胡椒, peppercorn"
+                  />
 
                   <div style={{ display: "grid", gap: 8 }}>
                     <div className="muted">Expire date</div>
                     <div className="row" style={{ flexWrap: "wrap" }}>
-                      <button className="pill" type="button" onClick={() => setExpiryPreset(setExpiresAt, "1y")}>+1 year</button>
-                      <button className="pill" type="button" onClick={() => setExpiryPreset(setExpiresAt, "3m")}>+3 months</button>
-                      <button className="pill" type="button" onClick={() => setExpiryPreset(setExpiresAt, "1m")}>+1 month</button>
-                      <button className="pill" type="button" onClick={() => setExpiryPreset(setExpiresAt, "1w")}>+1 week</button>
-                      <button className="pill ghost" type="button" onClick={() => setExpiresAt("")}>Clear</button>
+                      <button className="pill" type="button" onClick={() => setExpiryPreset(setExpiresAt, "1y")}>
+                        +1 year
+                      </button>
+                      <button className="pill" type="button" onClick={() => setExpiryPreset(setExpiresAt, "3m")}>
+                        +3 months
+                      </button>
+                      <button className="pill" type="button" onClick={() => setExpiryPreset(setExpiresAt, "1m")}>
+                        +1 month
+                      </button>
+                      <button className="pill" type="button" onClick={() => setExpiryPreset(setExpiresAt, "1w")}>
+                        +1 week
+                      </button>
+                      <button className="pill ghost" type="button" onClick={() => setExpiresAt("")}>
+                        Clear
+                      </button>
                     </div>
                     <input className="input" type="date" value={expiresAt} onChange={(e) => setExpiresAt(e.target.value)} />
                   </div>
@@ -788,12 +1010,18 @@ export default function RoomPage() {
                             <div className="itemLeft">
                               <div className="itemName">{it.name}</div>
                               <div className="itemMeta">
-                                {it.qty} {it.unit ?? ""}{it.expires_at ? ` · ${it.expires_at}` : ""}
+                                {it.qty} {it.unit ?? ""}
+                                {it.expires_at ? ` · ${it.expires_at}` : ""}
                               </div>
                             </div>
                             <div className="itemOps">
-                              <button className="pill" onClick={() => startEdit(it)}>Edit</button>
-                              <button className="pill ghost" onClick={() => deleteItem(it.id)}>Delete</button>
+                              <button className="pill" onClick={() => startEdit(it)}>
+                                Edit
+                              </button>
+                              {/* CHANGE #2: delete immediately, no confirm */}
+                              <button className="pill ghost" onClick={() => deleteItem(it.id)}>
+                                Delete
+                              </button>
                             </div>
                           </>
                         ) : (
@@ -808,16 +1036,22 @@ export default function RoomPage() {
                                   <button className="pill" type="button" onClick={() => setPickMode((v) => !v)}>
                                     {pickMode ? "Picking…" : "Pick on map"}
                                   </button>
-                                  <button className="pill ghost" type="button" onClick={() => setPickMode(false)}>Stop</button>
+                                  <button className="pill ghost" type="button" onClick={() => setPickMode(false)}>
+                                    Stop
+                                  </button>
                                 </div>
                               </div>
 
                               <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
                                 <input className="input" value={locQuery} onChange={(e) => setLocQuery(e.target.value)} placeholder="Search location (room / column / code / name)…" />
                                 <select className="select" value={editCellId} onChange={(e) => setEditCellId(e.target.value)}>
-                                  <option value="" disabled>Select a location…</option>
+                                  <option value="" disabled>
+                                    Select a location…
+                                  </option>
                                   {locationOptions.map((o) => (
-                                    <option key={o.id} value={o.id}>{o.label}</option>
+                                    <option key={o.id} value={o.id}>
+                                      {o.label}
+                                    </option>
                                   ))}
                                 </select>
                                 {pickMode && <div className="muted">Pick mode ON: click a cell on the left (ESC to cancel).</div>}
@@ -835,11 +1069,21 @@ export default function RoomPage() {
                             <div style={{ display: "grid", gap: 8 }}>
                               <div className="muted">Expire date</div>
                               <div className="row" style={{ flexWrap: "wrap" }}>
-                                <button className="pill" type="button" onClick={() => setExpiryPreset(setEditExpiresAt, "1y")}>+1 year</button>
-                                <button className="pill" type="button" onClick={() => setExpiryPreset(setEditExpiresAt, "3m")}>+3 months</button>
-                                <button className="pill" type="button" onClick={() => setExpiryPreset(setEditExpiresAt, "1m")}>+1 month</button>
-                                <button className="pill" type="button" onClick={() => setExpiryPreset(setEditExpiresAt, "1w")}>+1 week</button>
-                                <button className="pill ghost" type="button" onClick={() => setEditExpiresAt("")}>Clear</button>
+                                <button className="pill" type="button" onClick={() => setExpiryPreset(setEditExpiresAt, "1y")}>
+                                  +1 year
+                                </button>
+                                <button className="pill" type="button" onClick={() => setExpiryPreset(setEditExpiresAt, "3m")}>
+                                  +3 months
+                                </button>
+                                <button className="pill" type="button" onClick={() => setExpiryPreset(setEditExpiresAt, "1m")}>
+                                  +1 month
+                                </button>
+                                <button className="pill" type="button" onClick={() => setExpiryPreset(setEditExpiresAt, "1w")}>
+                                  +1 week
+                                </button>
+                                <button className="pill ghost" type="button" onClick={() => setEditExpiresAt("")}>
+                                  Clear
+                                </button>
                               </div>
                               <input className="input" type="date" value={editExpiresAt} onChange={(e) => setEditExpiresAt(e.target.value)} />
                             </div>
@@ -847,7 +1091,9 @@ export default function RoomPage() {
                             <input className="input" type="file" accept="image/*" onChange={(e) => setEditImageFile(e.target.files?.[0] ?? null)} />
 
                             <div className="row" style={{ justifyContent: "flex-end", flexWrap: "wrap" }}>
-                              <button className="pill ghost" onClick={cancelEdit} disabled={saving || uploading}>Cancel</button>
+                              <button className="pill ghost" onClick={cancelEdit} disabled={saving || uploading}>
+                                Cancel
+                              </button>
                               <button className="btn primary" onClick={() => saveEdit(it.id)} disabled={saving || uploading || !editName.trim()}>
                                 {saving ? "Saving…" : "Save"}
                               </button>
