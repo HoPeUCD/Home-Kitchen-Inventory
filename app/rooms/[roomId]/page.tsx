@@ -25,6 +25,7 @@ type CellFull = {
 };
 type Item = {
   id: string;
+  household_id?: string; // may exist
   cell_id: string;
   name: string;
   qty: number;
@@ -36,6 +37,16 @@ type Item = {
 };
 
 type MapItem = { name: string; expires_at: string | null };
+
+type IndexItem = {
+  id: string;
+  cell_id: string;
+  name: string;
+  qty: number;
+  unit: string | null;
+  expires_at: string | null;
+  aliases: string[] | null;
+};
 
 function startOfToday() {
   const now = new Date();
@@ -90,7 +101,6 @@ function compareMapItemsByExpiryThenName(a: MapItem, b: MapItem) {
   return a.name.localeCompare(b.name);
 }
 function compareItemsForList(a: Item, b: Item) {
-  // same priority rules for the right-side item list
   const sa = expiryStatus(a.expires_at);
   const sb = expiryStatus(b.expires_at);
   const rank = (k: typeof sa.kind) => (k === "expired" ? 0 : k === "soon" ? 1 : k === "ok" ? 2 : 3);
@@ -105,6 +115,36 @@ function compareItemsForList(a: Item, b: Item) {
   else if (!a.expires_at && b.expires_at) return 1;
 
   return a.name.localeCompare(b.name);
+}
+
+// ---- fuzzy search helpers (client-side) ----
+function norm(s: string) {
+  return (s || "")
+    .toLowerCase()
+    .normalize("NFKC")
+    .replace(/[\s\-_.,/\\|()[\]{}'"`~!@#$%^&*+=:;?<>]/g, "");
+}
+function isSubsequence(q: string, t: string) {
+  let i = 0;
+  for (let j = 0; j < t.length && i < q.length; j++) {
+    if (q[i] === t[j]) i++;
+  }
+  return i === q.length;
+}
+function fuzzyScore(qRaw: string, targetRaw: string) {
+  const q = norm(qRaw);
+  const t = norm(targetRaw);
+  if (!q || !t) return 0;
+
+  if (t === q) return 1000;
+  if (t.startsWith(q)) return 900 - (t.length - q.length);
+  const idx = t.indexOf(q);
+  if (idx >= 0) return 800 - idx - (t.length - q.length);
+
+  // subsequence match: weaker but helps for small typos / missing chars
+  if (q.length >= 2 && isSubsequence(q, t)) return 500 - (t.length - q.length);
+
+  return 0;
 }
 
 export default function RoomPage() {
@@ -137,8 +177,13 @@ export default function RoomPage() {
   // signed urls for thumbnails
   const [signedUrlByPath, setSignedUrlByPath] = useState<Record<string, string>>({});
 
-  // NEW: map preview items shown inside each cell button
+  // map preview items shown inside each cell button
   const [cellItemsMap, setCellItemsMap] = useState<Record<string, MapItem[]>>({});
+
+  // household-wide index (for fuzzy search + compact expiry lists)
+  const [indexItems, setIndexItems] = useState<IndexItem[]>([]);
+  const [searchQ, setSearchQ] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
 
   // Add form
   const [name, setName] = useState("");
@@ -179,7 +224,10 @@ export default function RoomPage() {
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
-      if (e.key === "Escape") setPickMode(false);
+      if (e.key === "Escape") {
+        setPickMode(false);
+        setSearchOpen(false);
+      }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
@@ -191,7 +239,10 @@ export default function RoomPage() {
   }
 
   function csvToAliases(s: string): string[] {
-    return s.split(",").map((x) => x.trim()).filter(Boolean);
+    return s
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean);
   }
   function aliasesToCsv(a: string[] | null | undefined) {
     return (a ?? []).join(", ");
@@ -217,11 +268,7 @@ export default function RoomPage() {
   }
 
   async function loadRooms(hid: string) {
-    const r = await supabase
-      .from("rooms")
-      .select("id,household_id,name,position")
-      .eq("household_id", hid)
-      .order("position", { ascending: true });
+    const r = await supabase.from("rooms").select("id,household_id,name,position").eq("household_id", hid).order("position", { ascending: true });
     if (r.error) throw new Error(`Rooms load failed: ${r.error.message}`);
     setRooms((r.data as Room[]) ?? []);
   }
@@ -233,11 +280,7 @@ export default function RoomPage() {
   }
 
   async function loadLayout(roomId: string) {
-    const c = await supabase
-      .from("room_columns")
-      .select("id,room_id,name,position")
-      .eq("room_id", roomId)
-      .order("position", { ascending: true });
+    const c = await supabase.from("room_columns").select("id,room_id,name,position").eq("room_id", roomId).order("position", { ascending: true });
     if (c.error) throw new Error(`Columns load failed: ${c.error.message}`);
     const colsData = (c.data as Col[]) ?? [];
     setCols(colsData);
@@ -248,11 +291,7 @@ export default function RoomPage() {
     }
 
     const colIds = colsData.map((x) => x.id);
-    const rc = await supabase
-      .from("room_cells")
-      .select("id,column_id,code,name,position")
-      .in("column_id", colIds)
-      .order("position", { ascending: true });
+    const rc = await supabase.from("room_cells").select("id,column_id,code,name,position").in("column_id", colIds).order("position", { ascending: true });
     if (rc.error) throw new Error(`Cells load failed: ${rc.error.message}`);
 
     const by: Record<string, Cell[]> = {};
@@ -267,9 +306,7 @@ export default function RoomPage() {
   async function loadCellsFull(hid: string) {
     const q = await supabase
       .from("v_room_cells_full")
-      .select(
-        "cell_id,cell_code,cell_name,cell_position,column_id,column_name,column_position,room_id,room_name,room_position,household_id"
-      )
+      .select("cell_id,cell_code,cell_name,cell_position,column_id,column_name,column_position,room_id,room_name,room_position,household_id")
       .eq("household_id", hid)
       .order("room_position", { ascending: true })
       .order("column_position", { ascending: true })
@@ -303,7 +340,7 @@ export default function RoomPage() {
   const roomCellIds = useMemo(() => {
     const ids: string[] = [];
     for (const colId of Object.keys(cellsByCol)) {
-      for (const cell of (cellsByCol[colId] ?? [])) ids.push(cell.id);
+      for (const cell of cellsByCol[colId] ?? []) ids.push(cell.id);
     }
     return ids;
   }, [cellsByCol]);
@@ -314,13 +351,7 @@ export default function RoomPage() {
       return;
     }
 
-    const q = await supabase
-      .from("items_v2")
-      .select("cell_id,name,expires_at,qty")
-      .in("cell_id", cellIds)
-      .gt("qty", 0)
-      .limit(5000);
-
+    const q = await supabase.from("items_v2").select("cell_id,name,expires_at,qty").in("cell_id", cellIds).gt("qty", 0).limit(5000);
     if (q.error) throw new Error(`Map items load failed: ${q.error.message}`);
 
     const by: Record<string, MapItem[]> = {};
@@ -331,10 +362,7 @@ export default function RoomPage() {
     }
 
     for (const cid of Object.keys(by)) {
-      by[cid] = by[cid]
-        .filter((x) => x.name && x.name.trim())
-        .slice()
-        .sort(compareMapItemsByExpiryThenName);
+      by[cid] = by[cid].filter((x) => x.name && x.name.trim()).slice().sort(compareMapItemsByExpiryThenName);
     }
 
     setCellItemsMap(by);
@@ -357,6 +385,25 @@ export default function RoomPage() {
     await ensureSignedUrls(paths);
   }
 
+  // household-wide index: used for fuzzy search + expiry lists
+  async function refreshIndexItems(householdId: string) {
+    // Preferred: items_v2 has household_id; this is typical in your schema.
+    const q = await supabase
+      .from("items_v2")
+      .select("id,cell_id,name,qty,unit,expires_at,aliases,household_id")
+      .eq("household_id", householdId)
+      .gt("qty", 0)
+      .limit(5000);
+
+    // If you do NOT have items_v2.household_id, replace the query with a join-by-cells strategy:
+    //   - build list of cell_ids from cellsFull and chunk in batches (avoid 1000+ IN list issues)
+    //   - then query items_v2 per chunk with .in("cell_id", chunk)
+    // Tell me if you don't have household_id and I’ll give you the chunked version.
+
+    if (q.error) throw new Error(`Index items load failed: ${q.error.message}`);
+    setIndexItems((q.data as IndexItem[]) ?? []);
+  }
+
   useEffect(() => {
     if (!user || !roomId) return;
     (async () => {
@@ -367,6 +414,7 @@ export default function RoomPage() {
         await loadRoom(roomId);
         await loadLayout(roomId);
         await loadCellsFull(hid);
+        await refreshIndexItems(hid);
       } catch (e: any) {
         setErr(e?.message ?? "Load failed.");
       }
@@ -375,7 +423,6 @@ export default function RoomPage() {
   }, [user?.id, roomId]);
 
   useEffect(() => {
-    // refresh cell map preview whenever cells change
     (async () => {
       try {
         setErr(null);
@@ -409,11 +456,61 @@ export default function RoomPage() {
     return `${c.room_name} / ${c.column_name} / ${short}${nm ? ` (${nm})` : ""}`;
   }
 
+  const cellFullById = useMemo(() => {
+    const m: Record<string, CellFull> = {};
+    for (const c of cellsFull) m[c.cell_id] = c;
+    return m;
+  }, [cellsFull]);
+
   const selectedCellFull = useMemo(() => {
     if (!selectedCellId) return null;
     return cellsFull.find((c) => c.cell_id === selectedCellId) ?? null;
   }, [cellsFull, selectedCellId]);
 
+  // -------- compact expiry lists (<=7, 8-30) --------
+  const expLists = useMemo(() => {
+    const today = startOfToday();
+    const rows = indexItems
+      .filter((it) => !!it.expires_at)
+      .map((it) => {
+        const exp = parseDateOnlyISO(it.expires_at!);
+        const d = daysBetween(today, exp); // negative => expired
+        return { it, days: d };
+      })
+      .filter((x) => x.days <= 30); // include expired + within 30d
+
+    rows.sort((a, b) => {
+      // expired and sooner first
+      if (a.days !== b.days) return a.days - b.days;
+      return a.it.name.localeCompare(b.it.name);
+    });
+
+    const within7 = rows.filter((x) => x.days <= 7); // includes expired
+    const within30 = rows.filter((x) => x.days > 7 && x.days <= 30);
+
+    return { within7, within30 };
+  }, [indexItems]);
+
+  // -------- fuzzy search results (client-side) --------
+  const searchResults = useMemo(() => {
+    const q = searchQ.trim();
+    if (!q) return [];
+
+    const scored = indexItems
+      .map((it) => {
+        const candidates = [it.name, ...(it.aliases ?? [])].filter(Boolean);
+        let best = 0;
+        for (const c of candidates) best = Math.max(best, fuzzyScore(q, c));
+        return { it, score: best };
+      })
+      .filter((x) => x.score > 0)
+      .sort((a, b) => b.score - a.score || a.it.name.localeCompare(b.it.name))
+      .slice(0, 50);
+
+    return scored;
+  }, [searchQ, indexItems]);
+
+  // location options for edit dropdown
   const locationOptions = useMemo(() => {
     const t = locQuery.trim().toLowerCase();
     const list = cellsFull.map((c) => ({
@@ -430,17 +527,12 @@ export default function RoomPage() {
     if (!room || !user) return;
     const v = prompt("Column name (e.g. Pantry / Dresser):", "New column");
     if (!v) return;
-    const name = v.trim();
-    if (!name) return;
+    const nm = v.trim();
+    if (!nm) return;
 
     const nextPos = (cols.reduce((m, c) => Math.max(m, c.position ?? 0), 0) || 0) + 1;
 
-    const ins = await supabase
-      .from("room_columns")
-      .insert({ room_id: room.id, name, position: nextPos, created_by: user.id })
-      .select("id,room_id,name,position")
-      .single();
-
+    const ins = await supabase.from("room_columns").insert({ room_id: room.id, name: nm, position: nextPos, created_by: user.id }).select("id,room_id,name,position").single();
     if (ins.error) return setErr(ins.error.message);
 
     setCols((prev) => [...prev, ins.data as Col].sort((a, b) => a.position - b.position));
@@ -451,13 +543,13 @@ export default function RoomPage() {
   async function renameColumn(colId: string, current: string) {
     const v = prompt("Rename column:", current);
     if (v === null) return;
-    const name = v.trim();
-    if (!name) return;
+    const nm = v.trim();
+    if (!nm) return;
 
-    const up = await supabase.from("room_columns").update({ name }).eq("id", colId);
+    const up = await supabase.from("room_columns").update({ name: nm }).eq("id", colId);
     if (up.error) return setErr(up.error.message);
 
-    setCols((prev) => prev.map((c) => (c.id === colId ? { ...c, name } : c)));
+    setCols((prev) => prev.map((c) => (c.id === colId ? { ...c, name: nm } : c)));
     if (household) await loadCellsFull(household.id);
   }
 
@@ -500,7 +592,10 @@ export default function RoomPage() {
       return next;
     });
 
-    if (household) await loadCellsFull(household.id);
+    if (household) {
+      await loadCellsFull(household.id);
+      await refreshIndexItems(household.id);
+    }
   }
 
   async function editCell(cell: Cell) {
@@ -515,9 +610,7 @@ export default function RoomPage() {
     setCellsByCol((prev) => {
       const next = { ...prev };
       for (const k of Object.keys(next)) {
-        next[k] = (next[k] ?? []).map((c) =>
-          c.id === cell.id ? { ...c, code: code.trim() || null, name: nm.trim() || null } : c
-        );
+        next[k] = (next[k] ?? []).map((c) => (c.id === cell.id ? { ...c, code: code.trim() || null, name: nm.trim() || null } : c));
       }
       return next;
     });
@@ -531,15 +624,12 @@ export default function RoomPage() {
     try {
       setErr(null);
 
-      // 1) delete items inside (no further confirmation)
       const di = await supabase.from("items_v2").delete().eq("cell_id", cellId);
       if (di.error) throw di.error;
 
-      // 2) delete the cell
       const del = await supabase.from("room_cells").delete().eq("id", cellId);
       if (del.error) throw del.error;
 
-      // update local states
       setCellsByCol((prev) => {
         const next = { ...prev };
         for (const k of Object.keys(next)) next[k] = (next[k] ?? []).filter((c) => c.id !== cellId);
@@ -557,12 +647,12 @@ export default function RoomPage() {
         setItems([]);
       }
 
-      if (editingId && editCellId === cellId) {
-        // if currently editing and the target location is deleted, cancel edit
-        cancelEdit();
-      }
+      if (editingId && editCellId === cellId) cancelEdit();
 
-      if (household) await loadCellsFull(household.id);
+      if (household) {
+        await loadCellsFull(household.id);
+        await refreshIndexItems(household.id);
+      }
     } catch (e: any) {
       setErr(e?.message ?? "Delete cell failed.");
     }
@@ -601,6 +691,7 @@ export default function RoomPage() {
         .from("items_v2")
         .insert({
           cell_id: selectedCellId,
+          household_id: household.id, // ok if column exists; if not, remove this line
           name: n,
           qty: safeQty,
           unit: unit.trim() || null,
@@ -632,6 +723,7 @@ export default function RoomPage() {
 
       await refreshItems(selectedCellId);
       await refreshMapItems(roomCellIds);
+      await refreshIndexItems(household.id);
     } catch (e: any) {
       setErr(e?.message ?? "Add item failed.");
     } finally {
@@ -703,7 +795,6 @@ export default function RoomPage() {
       const target = cellsFull.find((c) => c.cell_id === editCellId);
       cancelEdit();
 
-      // moved to other room -> jump there
       if (target && target.room_id !== roomId) {
         router.push(`/rooms/${target.room_id}?cell=${target.cell_id}`);
         return;
@@ -711,6 +802,7 @@ export default function RoomPage() {
 
       if (selectedCellId) await refreshItems(selectedCellId);
       await refreshMapItems(roomCellIds);
+      await refreshIndexItems(household.id);
     } catch (e: any) {
       setErr(e?.message ?? "Save failed.");
     } finally {
@@ -720,15 +812,14 @@ export default function RoomPage() {
   }
 
   async function deleteItem(itemId: string) {
-    // CHANGE #2: no confirmation
     const del = await supabase.from("items_v2").delete().eq("id", itemId);
     if (del.error) return setErr(del.error.message);
 
     setItems((prev) => prev.filter((x) => x.id !== itemId));
     if (editingId === itemId) cancelEdit();
 
-    // keep left map chips up to date
     await refreshMapItems(roomCellIds);
+    if (household) await refreshIndexItems(household.id);
   }
 
   function onCellClick(cellId: string) {
@@ -768,6 +859,13 @@ export default function RoomPage() {
     return { ...base, background: "rgba(47,93,124,.08)", borderColor: "rgba(47,93,124,.22)", color: "var(--blue)" };
   }
 
+  const topCardListStyle: React.CSSProperties = {
+    margin: 0,
+    paddingLeft: 18,
+    lineHeight: 1.35,
+    fontSize: 13,
+  };
+
   return (
     <div className="wrap">
       <div className="header">
@@ -802,6 +900,138 @@ export default function RoomPage() {
         </div>
       )}
 
+      {/* ===== TOP: compact expiry lists + fuzzy search ===== */}
+      <div className="card" style={{ marginBottom: 12 }}>
+        <div className="row" style={{ justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+          <div style={{ minWidth: 240, flex: "1 1 320px" }}>
+            <div className="h2" style={{ marginBottom: 6 }}>
+              Expiring soon (compact)
+            </div>
+
+            <div style={{ display: "grid", gap: 10 }}>
+              <div style={{ display: "grid", gap: 6 }}>
+                <div className="muted" style={{ fontWeight: 900 }}>
+                  ≤ 7 days (incl. expired)
+                </div>
+                {expLists.within7.length === 0 ? (
+                  <div className="muted">None</div>
+                ) : (
+                  <ul style={topCardListStyle}>
+                    {expLists.within7.slice(0, 20).map(({ it, days }) => {
+                      const loc = cellFullById[it.cell_id];
+                      const label = loc ? fmtCellLabel(loc) : it.cell_id;
+                      const tag = days < 0 ? `expired ${Math.abs(days)}d` : `${days}d`;
+                      return (
+                        <li key={`e7-${it.id}`}>
+                          <span style={{ fontWeight: 900 }}>{it.name}</span> — {label} — {tag}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </div>
+
+              <div style={{ display: "grid", gap: 6 }}>
+                <div className="muted" style={{ fontWeight: 900 }}>
+                  8–30 days
+                </div>
+                {expLists.within30.length === 0 ? (
+                  <div className="muted">None</div>
+                ) : (
+                  <ul style={topCardListStyle}>
+                    {expLists.within30.slice(0, 20).map(({ it, days }) => {
+                      const loc = cellFullById[it.cell_id];
+                      const label = loc ? fmtCellLabel(loc) : it.cell_id;
+                      return (
+                        <li key={`e30-${it.id}`}>
+                          <span style={{ fontWeight: 900 }}>{it.name}</span> — {label} — {days}d
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </div>
+            </div>
+          </div>
+
+          <div style={{ minWidth: 240, flex: "1 1 320px" }}>
+            <div className="h2" style={{ marginBottom: 6 }}>
+              Search (fuzzy)
+            </div>
+
+            <div style={{ display: "grid", gap: 8 }}>
+              <input
+                className="input"
+                value={searchQ}
+                onChange={(e) => {
+                  setSearchQ(e.target.value);
+                  setSearchOpen(true);
+                }}
+                onFocus={() => setSearchOpen(true)}
+                placeholder="Search item name / alias (fuzzy)…"
+              />
+
+              {searchOpen && searchQ.trim() && (
+                <div className="card" style={{ padding: 10, background: "rgba(47,93,124,.03)" }}>
+                  {searchResults.length === 0 ? (
+                    <div className="muted">No matches.</div>
+                  ) : (
+                    <div style={{ display: "grid", gap: 8 }}>
+                      {searchResults.map(({ it, score }) => {
+                        const loc = cellFullById[it.cell_id];
+                        const label = loc ? fmtCellLabel(loc) : it.cell_id;
+                        const st = expiryStatus(it.expires_at);
+                        const expTag =
+                          st.kind === "expired"
+                            ? `expired ${Math.abs(st.days ?? 0)}d`
+                            : st.kind === "soon"
+                              ? `${st.days}d`
+                              : it.expires_at
+                                ? `${st.days}d`
+                                : "";
+
+                        return (
+                          <button
+                            key={`sr-${it.id}`}
+                            className="cellBtn"
+                            style={{ textAlign: "left" }}
+                            onClick={() => {
+                              // jump to location
+                              if (loc && loc.room_id !== roomId) router.push(`/rooms/${loc.room_id}?cell=${it.cell_id}`);
+                              else setSelectedCellId(it.cell_id);
+
+                              setSearchOpen(false);
+                            }}
+                          >
+                            <div className="row" style={{ justifyContent: "space-between", gap: 10 }}>
+                              <div style={{ minWidth: 0 }}>
+                                <div style={{ fontWeight: 900, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{it.name}</div>
+                                <div className="muted" style={{ fontSize: 12 }}>
+                                  {label}
+                                  {expTag ? ` · ${expTag}` : ""}
+                                </div>
+                              </div>
+                              <div className="muted" style={{ fontSize: 12, flex: "0 0 auto" }}>
+                                score {score}
+                              </div>
+                            </div>
+                          </button>
+                        );
+                      })}
+                      <button className="pill ghost" onClick={() => setSearchOpen(false)}>
+                        Close
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div className="muted">Tip: supports partials, starts-with, and subsequence matching (better than plain ilike).</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       {pickBannerOn && (
         <div className="card" style={{ marginBottom: 12, background: "var(--blueSoft)" }}>
           <div className="row" style={{ justifyContent: "space-between" }}>
@@ -826,7 +1056,6 @@ export default function RoomPage() {
             </button>
           </div>
 
-          {/* CHANGE #5: ensure columns align to top */}
           <div className="cols" style={{ alignItems: "start" }}>
             {cols.length === 0 && <div className="muted">No columns yet. Click “+ Column”.</div>}
 
@@ -846,7 +1075,6 @@ export default function RoomPage() {
                     </div>
                   </div>
 
-                  {/* Cells list */}
                   <div className="cells">
                     {cells.length === 0 ? (
                       <div className="muted">No cells yet.</div>
@@ -872,7 +1100,6 @@ export default function RoomPage() {
                                 >
                                   Edit
                                 </button>
-                                {/* CHANGE #1: delete cell allowed; will delete items inside after confirm */}
                                 <button
                                   className="tiny danger"
                                   onClick={(e) => {
@@ -887,8 +1114,6 @@ export default function RoomPage() {
 
                             {nm ? <div className="cellName">{nm}</div> : null}
 
-
-                            {/* CHANGE #3: show all item names inside cell, sorted by expiry priority */}
                             {previewItems.length > 0 && (
                               <div
                                 style={{
@@ -913,7 +1138,6 @@ export default function RoomPage() {
                     )}
                   </div>
 
-                  {/* CHANGE #4: Add cell button at the very bottom of the column */}
                   <div style={{ marginTop: 10 }}>
                     <button className="pill" onClick={() => addCell(col.id)} style={{ width: "100%", justifyContent: "center" } as any}>
                       + Cell
@@ -951,12 +1175,7 @@ export default function RoomPage() {
                     <input className="input" value={unit} onChange={(e) => setUnit(e.target.value)} placeholder="Unit" />
                   </div>
 
-                  <input
-                    className="input"
-                    value={aliasesCsv}
-                    onChange={(e) => setAliasesCsv(e.target.value)}
-                    placeholder="Aliases (comma-separated): e.g. 黑胡椒, peppercorn"
-                  />
+                  <input className="input" value={aliasesCsv} onChange={(e) => setAliasesCsv(e.target.value)} placeholder="Aliases (comma-separated): e.g. 黑胡椒, peppercorn" />
 
                   <div style={{ display: "grid", gap: 8 }}>
                     <div className="muted">Expire date</div>
@@ -1019,7 +1238,6 @@ export default function RoomPage() {
                               <button className="pill" onClick={() => startEdit(it)}>
                                 Edit
                               </button>
-                              {/* CHANGE #2: delete immediately, no confirm */}
                               <button className="pill ghost" onClick={() => deleteItem(it.id)}>
                                 Delete
                               </button>
