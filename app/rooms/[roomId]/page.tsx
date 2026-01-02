@@ -885,7 +885,8 @@ export default function RoomPage() {
                               </div>
                             </div>
 
-                            <div className="cellName">{nm || "—"}</div>
+                            {nm ? <div className="cellName">{nm}</div> : null}
+
 
                             {/* CHANGE #3: show all item names inside cell, sorted by expiry priority */}
                             {previewItems.length > 0 && (
