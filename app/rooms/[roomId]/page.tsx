@@ -5,6 +5,27 @@ import { useParams, useRouter } from "next/navigation";
 import AuthGate from "@/src/components/AuthGate";
 import { supabase } from "@/src/lib/supabase";
 
+/** =========================
+ *  CONFIG: 按你真实数据库列名修改
+ *  ========================= */
+const ITEMS_TABLE = "items_v2";
+
+// items_v2 的字段名（把这里改成你真实列名）
+const ITEM_ID_FIELD = "id";
+const ITEM_HOUSEHOLD_FIELD = "household_id";
+const ITEM_CELL_FIELD = "cell_id";
+const ITEM_NAME_FIELD = "name";
+
+// ❗你现在的报错点：items_v2 没有 quantity
+// 把这里改成你真实的数量字段名：例如 "qty" / "count" / "amount"
+const ITEM_QTY_FIELD = "qty";
+
+// expire date 字段名（你之前一直用 expire_date；如果你表里叫 expires_at / expiry_date 就改这里）
+const ITEM_EXPIRE_FIELD = "expire_date";
+
+// 图片字段（如果有）
+const ITEM_IMG_FIELD = "image_url";
+
 const ACTIVE_HOUSEHOLD_KEY = "active_household_id";
 
 const COLORS = {
@@ -22,29 +43,16 @@ const COLORS = {
 type Household = { id: string; name: string; join_code: string | null };
 type Room = { id: string; household_id: string; name: string; position?: number };
 
-// room_columns：按 room_id 归属 room
-type Column = {
-  id: string;
-  room_id: string;
-  name: string;
-  position: number;
-};
+type Column = { id: string; room_id: string; name: string; position: number };
+type Cell = { id: string; column_id: string; code: string; position: number };
 
-// room_cells：没有 room_id；通过 column_id -> room_columns.room_id
-type Cell = {
-  id: string;
-  column_id: string;
-  code: string;
-  position: number;
-};
-
-// ✅ items_v2：没有 room_id（按你报错）；通过 cell_id 关联到 room
+// 统一成前端用的 Item 结构（不依赖数据库真实字段名）
 type Item = {
   id: string;
   household_id: string;
   cell_id: string;
   name: string;
-  quantity: number;
+  qty: number;
   expire_date?: string | null;
   image_url?: string | null;
 };
@@ -143,6 +151,22 @@ function fuzzyMatch(query: string, text: string): boolean {
   return false;
 }
 
+// 把 DB row 映射为前端 Item
+function normalizeItemRow(row: any): Item {
+  const qtyRaw = row?.[ITEM_QTY_FIELD];
+  const qtyNum = Number(qtyRaw ?? 0);
+
+  return {
+    id: String(row?.[ITEM_ID_FIELD]),
+    household_id: String(row?.[ITEM_HOUSEHOLD_FIELD]),
+    cell_id: String(row?.[ITEM_CELL_FIELD]),
+    name: String(row?.[ITEM_NAME_FIELD] ?? ""),
+    qty: Number.isFinite(qtyNum) ? qtyNum : 0,
+    expire_date: row?.[ITEM_EXPIRE_FIELD] ?? null,
+    image_url: row?.[ITEM_IMG_FIELD] ?? null,
+  };
+}
+
 export default function RoomPage() {
   const router = useRouter();
   const params = useParams();
@@ -217,6 +241,7 @@ export default function RoomPage() {
         .eq("user_id", user.id)
         .maybeSingle();
       if (profRes.error) throw new Error(profRes.error.message);
+
       const def = (profRes.data?.default_household_id as string | null) ?? null;
       setDefaultHouseholdId(def);
 
@@ -266,17 +291,18 @@ export default function RoomPage() {
       }
       setRoom(roomRes.data as Room);
 
-      // 1) columns by room_id
+      // columns by room_id
       const colRes = await supabase
         .from("room_columns")
         .select("id,room_id,name,position")
         .eq("room_id", roomId)
         .order("position", { ascending: true });
       if (colRes.error) throw new Error(colRes.error.message);
+
       const cols = (colRes.data as Column[]) ?? [];
       setColumns(cols);
 
-      // 2) cells by column_id IN (colIds)
+      // cells by column_id
       const colIds = cols.map((c) => c.id);
       let allCells: Cell[] = [];
       if (colIds.length === 0) {
@@ -293,18 +319,32 @@ export default function RoomPage() {
         setCells(allCells);
       }
 
-      // 3) ✅ items：不再按 room_id 拉；改为按 “该 room 下所有 cell ids”
+      // items：按 household + cell_id in cellIds
       const cellIds = allCells.map((c) => c.id);
       if (cellIds.length === 0) {
         setItems([]);
       } else {
+        // 动态 select（避免你字段名不同导致崩）
+        const selectCols = [
+          ITEM_ID_FIELD,
+          ITEM_HOUSEHOLD_FIELD,
+          ITEM_CELL_FIELD,
+          ITEM_NAME_FIELD,
+          ITEM_QTY_FIELD,
+          ITEM_EXPIRE_FIELD,
+          ITEM_IMG_FIELD,
+        ].join(",");
+
         const itemRes = await supabase
-          .from("items_v2")
-          .select("id,household_id,cell_id,name,quantity,expire_date,image_url")
-          .eq("household_id", hid)
-          .in("cell_id", cellIds);
+          .from(ITEMS_TABLE)
+          .select(selectCols)
+          .eq(ITEM_HOUSEHOLD_FIELD, hid)
+          .in(ITEM_CELL_FIELD, cellIds);
+
         if (itemRes.error) throw new Error(itemRes.error.message);
-        setItems((itemRes.data as Item[]) ?? []);
+
+        const normalized = (itemRes.data ?? []).map(normalizeItemRow);
+        setItems(normalized);
       }
     } catch (e: any) {
       setErr(e?.message ?? "Failed to load room.");
@@ -325,22 +365,18 @@ export default function RoomPage() {
       byCol[c.column_id] = byCol[c.column_id] || [];
       byCol[c.column_id].push(c);
     }
-    for (const k of Object.keys(byCol)) {
-      byCol[k].sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
-    }
+    for (const k of Object.keys(byCol)) byCol[k].sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
     return columns.map((col) => ({ col, cells: byCol[col.id] || [] }));
   }, [columns, cells]);
 
   const itemsByCell = useMemo(() => {
     const map: Record<string, Item[]> = {};
     for (const it of items) {
-      if (Number(it.quantity ?? 0) <= 0) continue;
+      if (Number(it.qty ?? 0) <= 0) continue;
       map[it.cell_id] = map[it.cell_id] || [];
       map[it.cell_id].push(it);
     }
-    for (const k of Object.keys(map)) {
-      map[k].sort(sortItemsByExpiry);
-    }
+    for (const k of Object.keys(map)) map[k].sort(sortItemsByExpiry);
     return map;
   }, [items]);
 
@@ -356,7 +392,7 @@ export default function RoomPage() {
 
   const expiring7 = useMemo(() => {
     return items
-      .filter((it) => it.quantity > 0)
+      .filter((it) => it.qty > 0)
       .map((it) => ({ it, du: daysUntil(it.expire_date ?? null) }))
       .filter(({ du }) => du !== null && du >= 0 && du <= 7)
       .sort((a, b) => (a.du! - b.du!) || a.it.name.localeCompare(b.it.name));
@@ -364,7 +400,7 @@ export default function RoomPage() {
 
   const expiring30 = useMemo(() => {
     return items
-      .filter((it) => it.quantity > 0)
+      .filter((it) => it.qty > 0)
       .map((it) => ({ it, du: daysUntil(it.expire_date ?? null) }))
       .filter(({ du }) => du !== null && du >= 8 && du <= 30)
       .sort((a, b) => (a.du! - b.du!) || a.it.name.localeCompare(b.it.name));
@@ -380,7 +416,7 @@ export default function RoomPage() {
     const q = search.trim();
     if (!q) return [];
     return items
-      .filter((it) => it.quantity > 0)
+      .filter((it) => it.qty > 0)
       .filter((it) => fuzzyMatch(q, it.name))
       .slice(0, 50)
       .map((it) => ({ it, loc: cellIndex.get(it.cell_id) }));
@@ -396,11 +432,10 @@ export default function RoomPage() {
     setMoveTargetCellId(cellId);
     setItemModalOpen(true);
   }
-
   function openEditItem(it: Item) {
     setEditingItem(it);
     setItemName(it.name ?? "");
-    setItemQty(Number(it.quantity ?? 1));
+    setItemQty(Number(it.qty ?? 1));
     setItemExpire(it.expire_date ?? "");
     setItemCellId(it.cell_id);
     setMoveQuery("");
@@ -419,32 +454,31 @@ export default function RoomPage() {
     setErr(null);
 
     try {
-      // ✅ payload 不再写 room_id
-      const payload: any = {
-        household_id: activeHouseholdId,
-        cell_id: itemCellId,
-        name: nm,
-        quantity: Number(itemQty ?? 0),
-        expire_date: itemExpire ? itemExpire : null,
-      };
+      const payload: any = {};
+      payload[ITEM_HOUSEHOLD_FIELD] = activeHouseholdId;
+      payload[ITEM_CELL_FIELD] = itemCellId;
+      payload[ITEM_NAME_FIELD] = nm;
+      payload[ITEM_QTY_FIELD] = Number(itemQty ?? 0);
+      payload[ITEM_EXPIRE_FIELD] = itemExpire ? itemExpire : null;
+
+      const selectCols = [
+        ITEM_ID_FIELD,
+        ITEM_HOUSEHOLD_FIELD,
+        ITEM_CELL_FIELD,
+        ITEM_NAME_FIELD,
+        ITEM_QTY_FIELD,
+        ITEM_EXPIRE_FIELD,
+        ITEM_IMG_FIELD,
+      ].join(",");
 
       if (!editingItem) {
-        const ins = await supabase
-          .from("items_v2")
-          .insert(payload)
-          .select("id,household_id,cell_id,name,quantity,expire_date,image_url")
-          .single();
+        const ins = await supabase.from(ITEMS_TABLE).insert(payload).select(selectCols).single();
         if (ins.error) throw new Error(ins.error.message);
-        setItems((prev) => [...prev, ins.data as Item]);
+        setItems((prev) => [...prev, normalizeItemRow(ins.data)]);
       } else {
-        const upd = await supabase
-          .from("items_v2")
-          .update(payload)
-          .eq("id", editingItem.id)
-          .select("id,household_id,cell_id,name,quantity,expire_date,image_url")
-          .single();
+        const upd = await supabase.from(ITEMS_TABLE).update(payload).eq(ITEM_ID_FIELD, editingItem.id).select(selectCols).single();
         if (upd.error) throw new Error(upd.error.message);
-        setItems((prev) => prev.map((x) => (x.id === editingItem.id ? (upd.data as Item) : x)));
+        setItems((prev) => prev.map((x) => (x.id === editingItem.id ? normalizeItemRow(upd.data) : x)));
       }
 
       setItemModalOpen(false);
@@ -459,7 +493,7 @@ export default function RoomPage() {
     setBusy(true);
     setErr(null);
     try {
-      const del = await supabase.from("items_v2").delete().eq("id", itemId);
+      const del = await supabase.from(ITEMS_TABLE).delete().eq(ITEM_ID_FIELD, itemId);
       if (del.error) throw new Error(del.error.message);
       setItems((prev) => prev.filter((x) => x.id !== itemId));
     } catch (e: any) {
@@ -477,14 +511,23 @@ export default function RoomPage() {
     setBusy(true);
     setErr(null);
     try {
-      const upd = await supabase
-        .from("items_v2")
-        .update({ cell_id: target })
-        .eq("id", editingItem.id)
-        .select("id,household_id,cell_id,name,quantity,expire_date,image_url")
-        .single();
+      const payload: any = {};
+      payload[ITEM_CELL_FIELD] = target;
+
+      const selectCols = [
+        ITEM_ID_FIELD,
+        ITEM_HOUSEHOLD_FIELD,
+        ITEM_CELL_FIELD,
+        ITEM_NAME_FIELD,
+        ITEM_QTY_FIELD,
+        ITEM_EXPIRE_FIELD,
+        ITEM_IMG_FIELD,
+      ].join(",");
+
+      const upd = await supabase.from(ITEMS_TABLE).update(payload).eq(ITEM_ID_FIELD, editingItem.id).select(selectCols).single();
       if (upd.error) throw new Error(upd.error.message);
-      setItems((prev) => prev.map((x) => (x.id === editingItem.id ? (upd.data as Item) : x)));
+
+      setItems((prev) => prev.map((x) => (x.id === editingItem.id ? normalizeItemRow(upd.data) : x)));
       setItemCellId(target);
     } catch (e: any) {
       setErr(e?.message ?? "Move failed.");
@@ -502,13 +545,7 @@ export default function RoomPage() {
     setErr(null);
     try {
       const nextPos = (columns.reduce((m, c) => Math.max(m, c.position ?? 0), 0) || 0) + 1;
-
-      const ins = await supabase
-        .from("room_columns")
-        .insert({ room_id: roomId, name: nm, position: nextPos })
-        .select("id,room_id,name,position")
-        .single();
-
+      const ins = await supabase.from("room_columns").insert({ room_id: roomId, name: nm, position: nextPos }).select("id,room_id,name,position").single();
       if (ins.error) throw new Error(ins.error.message);
       setColumns((prev) => [...prev, ins.data as Column].sort((a, b) => a.position - b.position));
       setNewColumnName("");
@@ -526,14 +563,8 @@ export default function RoomPage() {
     setBusy(true);
     setErr(null);
     try {
-      const upd = await supabase
-        .from("room_columns")
-        .update({ name: nm })
-        .eq("id", colId)
-        .select("id,room_id,name,position")
-        .single();
+      const upd = await supabase.from("room_columns").update({ name: nm }).eq("id", colId).select("id,room_id,name,position").single();
       if (upd.error) throw new Error(upd.error.message);
-
       setColumns((prev) => prev.map((c) => (c.id === colId ? (upd.data as Column) : c)));
       setEditingColumnId(null);
       setEditingColumnName("");
@@ -554,7 +585,7 @@ export default function RoomPage() {
       const colCells = cells.filter((c) => c.column_id === col.id).map((c) => c.id);
 
       if (colCells.length > 0) {
-        const delItems = await supabase.from("items_v2").delete().in("cell_id", colCells);
+        const delItems = await supabase.from(ITEMS_TABLE).delete().in(ITEM_CELL_FIELD, colCells);
         if (delItems.error) throw new Error(delItems.error.message);
 
         const delCells = await supabase.from("room_cells").delete().in("id", colCells);
@@ -582,12 +613,7 @@ export default function RoomPage() {
     setBusy(true);
     setErr(null);
     try {
-      const ins = await supabase
-        .from("room_cells")
-        .insert({ column_id: colId, code, position: nextPos })
-        .select("id,column_id,code,position")
-        .single();
-
+      const ins = await supabase.from("room_cells").insert({ column_id: colId, code, position: nextPos }).select("id,column_id,code,position").single();
       if (ins.error) throw new Error(ins.error.message);
       setCells((prev) => [...prev, ins.data as Cell]);
     } catch (e: any) {
@@ -604,7 +630,7 @@ export default function RoomPage() {
     setBusy(true);
     setErr(null);
     try {
-      const delItems = await supabase.from("items_v2").delete().eq("cell_id", cell.id);
+      const delItems = await supabase.from(ITEMS_TABLE).delete().eq(ITEM_CELL_FIELD, cell.id);
       if (delItems.error) throw new Error(delItems.error.message);
 
       const delCell = await supabase.from("room_cells").delete().eq("id", cell.id);
@@ -789,7 +815,7 @@ export default function RoomPage() {
                           }}
                         >
                           <span style={{ fontWeight: 900, color: COLORS.ink }}>{it.name}</span>{" "}
-                          <span>— {loc ? `${loc.colName} / ${loc.cellCode}` : "Unknown"} · qty {it.quantity}</span>
+                          <span>— {loc ? `${loc.colName} / ${loc.cellCode}` : "Unknown"} · qty {it.qty}</span>
                         </div>
                       ))}
                     </div>
@@ -982,7 +1008,7 @@ export default function RoomPage() {
                                     >
                                       {it.name}
                                     </span>
-                                    <span style={{ fontSize: 12, color: COLORS.muted }}>×{it.quantity}</span>
+                                    <span style={{ fontSize: 12, color: COLORS.muted }}>×{it.qty}</span>
                                   </button>
                                 ))
                             )}
@@ -1011,226 +1037,226 @@ export default function RoomPage() {
                 </div>
               ))}
             </div>
+
+            {/* Item modal */}
+            {itemModalOpen ? (
+              <div
+                style={{
+                  position: "fixed",
+                  inset: 0,
+                  background: "rgba(0,0,0,.35)",
+                  display: "flex",
+                  justifyContent: "center",
+                  alignItems: "center",
+                  padding: 16,
+                  zIndex: 50,
+                }}
+                onClick={() => setItemModalOpen(false)}
+              >
+                <div
+                  onClick={(e) => e.stopPropagation()}
+                  style={{
+                    width: "min(720px, 100%)",
+                    background: "white",
+                    borderRadius: 18,
+                    border: `1px solid ${COLORS.border}`,
+                    padding: 14,
+                  }}
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
+                    <div style={{ fontWeight: 900, fontSize: 16 }}>{editingItem ? "Edit item" : "Add item"}</div>
+                    <button
+                      onClick={() => setItemModalOpen(false)}
+                      style={{ padding: "6px 8px", borderRadius: 10, border: `1px solid ${COLORS.border}`, background: "white" }}
+                    >
+                      Close
+                    </button>
+                  </div>
+
+                  <div style={{ display: "grid", gap: 10, marginTop: 12 }}>
+                    <div style={{ display: "grid", gap: 6 }}>
+                      <div style={{ fontWeight: 900 }}>Name</div>
+                      <input
+                        value={itemName}
+                        onChange={(e) => setItemName(e.target.value)}
+                        placeholder="e.g. Olive oil"
+                        style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
+                      />
+                    </div>
+
+                    <div style={{ display: "grid", gap: 6, gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))" }}>
+                      <div style={{ display: "grid", gap: 6 }}>
+                        <div style={{ fontWeight: 900 }}>Quantity</div>
+                        <input
+                          type="number"
+                          value={itemQty}
+                          onChange={(e) => setItemQty(Number(e.target.value))}
+                          style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
+                        />
+                      </div>
+
+                      <div style={{ display: "grid", gap: 6 }}>
+                        <div style={{ fontWeight: 900 }}>Expire date</div>
+                        <input
+                          type="date"
+                          value={itemExpire}
+                          onChange={(e) => setItemExpire(e.target.value)}
+                          style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
+                        />
+                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                          {[
+                            { label: "1 week", days: 7 },
+                            { label: "1 month", days: 30 },
+                            { label: "3 months", days: 90 },
+                            { label: "1 year", days: 365 },
+                          ].map((x) => (
+                            <button
+                              key={x.label}
+                              onClick={() => {
+                                const now = new Date();
+                                const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + x.days);
+                                const yyyy = d.getFullYear();
+                                const mm = String(d.getMonth() + 1).padStart(2, "0");
+                                const dd = String(d.getDate()).padStart(2, "0");
+                                setItemExpire(`${yyyy}-${mm}-${dd}`);
+                              }}
+                              style={{ padding: "6px 8px", borderRadius: 999, border: `1px solid ${COLORS.border}`, background: "white", cursor: "pointer" }}
+                            >
+                              +{x.label}
+                            </button>
+                          ))}
+                          <button
+                            onClick={() => setItemExpire("")}
+                            style={{ padding: "6px 8px", borderRadius: 999, border: `1px solid ${COLORS.border}`, background: "white", cursor: "pointer" }}
+                          >
+                            Clear
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div style={{ display: "grid", gap: 6 }}>
+                      <div style={{ fontWeight: 900 }}>Cell</div>
+                      <select
+                        value={itemCellId}
+                        onChange={(e) => {
+                          setItemCellId(e.target.value);
+                          setMoveTargetCellId(e.target.value);
+                        }}
+                        style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
+                      >
+                        <option value="">Select a cell</option>
+                        {cells.map((c) => {
+                          const colName = columns.find((cc) => cc.id === c.column_id)?.name ?? "Column";
+                          return (
+                            <option key={c.id} value={c.id}>
+                              {colName} / {c.code}
+                            </option>
+                          );
+                        })}
+                      </select>
+                    </div>
+
+                    {editingItem ? (
+                      <div style={{ display: "grid", gap: 8 }}>
+                        <div style={{ fontWeight: 900 }}>Move item (searchable)</div>
+                        <input
+                          value={moveQuery}
+                          onChange={(e) => setMoveQuery(e.target.value)}
+                          placeholder="Search location, e.g. Pantry / K11"
+                          style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
+                        />
+                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                          {moveCellOptions.map((opt) => (
+                            <button
+                              key={opt.id}
+                              onClick={() => setMoveTargetCellId(opt.id)}
+                              style={{
+                                padding: "6px 8px",
+                                borderRadius: 999,
+                                border: `1px solid ${COLORS.border}`,
+                                background: moveTargetCellId === opt.id ? COLORS.okBg : "white",
+                                cursor: "pointer",
+                              }}
+                            >
+                              {opt.label}
+                            </button>
+                          ))}
+                        </div>
+                        <button
+                          onClick={moveItemToSelectedCell}
+                          disabled={busy || !moveTargetCellId || moveTargetCellId === editingItem.cell_id}
+                          style={{
+                            padding: "10px 12px",
+                            borderRadius: 12,
+                            fontWeight: 900,
+                            background: COLORS.blue,
+                            color: "white",
+                            border: "none",
+                            cursor: "pointer",
+                            opacity: busy || !moveTargetCellId || moveTargetCellId === editingItem.cell_id ? 0.6 : 1,
+                          }}
+                        >
+                          Move to selected cell
+                        </button>
+                      </div>
+                    ) : null}
+
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", marginTop: 6 }}>
+                      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                        <button
+                          onClick={saveItem}
+                          disabled={busy}
+                          style={{
+                            padding: "10px 12px",
+                            borderRadius: 12,
+                            fontWeight: 900,
+                            background: COLORS.blue,
+                            color: "white",
+                            border: "none",
+                            cursor: "pointer",
+                            opacity: busy ? 0.6 : 1,
+                          }}
+                        >
+                          {editingItem ? "Save changes" : "Add item"}
+                        </button>
+
+                        {editingItem ? (
+                          <button
+                            onClick={() => deleteItem(editingItem.id)}
+                            disabled={busy}
+                            style={{
+                              padding: "10px 12px",
+                              borderRadius: 12,
+                              fontWeight: 900,
+                              border: `1px solid rgba(220,0,0,.25)`,
+                              background: "rgba(220,0,0,.06)",
+                              color: "crimson",
+                              cursor: "pointer",
+                              opacity: busy ? 0.6 : 1,
+                            }}
+                          >
+                            Delete item
+                          </button>
+                        ) : null}
+                      </div>
+
+                      <button
+                        onClick={() => setItemModalOpen(false)}
+                        style={{ padding: "10px 12px", borderRadius: 12, border: `1px solid ${COLORS.border}`, background: "white" }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+
+                    {busy ? <div style={{ color: COLORS.muted }}>Working…</div> : null}
+                  </div>
+                </div>
+              </div>
+            ) : null}
           </>
         )}
       </div>
-
-      {/* Item modal（同你之前版本） */}
-      {itemModalOpen ? (
-        <div
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(0,0,0,.35)",
-            display: "flex",
-            justifyContent: "center",
-            alignItems: "center",
-            padding: 16,
-            zIndex: 50,
-          }}
-          onClick={() => setItemModalOpen(false)}
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            style={{
-              width: "min(720px, 100%)",
-              background: "white",
-              borderRadius: 18,
-              border: `1px solid ${COLORS.border}`,
-              padding: 14,
-            }}
-          >
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
-              <div style={{ fontWeight: 900, fontSize: 16 }}>{editingItem ? "Edit item" : "Add item"}</div>
-              <button
-                onClick={() => setItemModalOpen(false)}
-                style={{ padding: "6px 8px", borderRadius: 10, border: `1px solid ${COLORS.border}`, background: "white" }}
-              >
-                Close
-              </button>
-            </div>
-
-            <div style={{ display: "grid", gap: 10, marginTop: 12 }}>
-              <div style={{ display: "grid", gap: 6 }}>
-                <div style={{ fontWeight: 900 }}>Name</div>
-                <input
-                  value={itemName}
-                  onChange={(e) => setItemName(e.target.value)}
-                  placeholder="e.g. Olive oil"
-                  style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
-                />
-              </div>
-
-              <div style={{ display: "grid", gap: 6, gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))" }}>
-                <div style={{ display: "grid", gap: 6 }}>
-                  <div style={{ fontWeight: 900 }}>Quantity</div>
-                  <input
-                    type="number"
-                    value={itemQty}
-                    onChange={(e) => setItemQty(Number(e.target.value))}
-                    style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
-                  />
-                </div>
-
-                <div style={{ display: "grid", gap: 6 }}>
-                  <div style={{ fontWeight: 900 }}>Expire date</div>
-                  <input
-                    type="date"
-                    value={itemExpire}
-                    onChange={(e) => setItemExpire(e.target.value)}
-                    style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
-                  />
-                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                    {[
-                      { label: "1 week", days: 7 },
-                      { label: "1 month", days: 30 },
-                      { label: "3 months", days: 90 },
-                      { label: "1 year", days: 365 },
-                    ].map((x) => (
-                      <button
-                        key={x.label}
-                        onClick={() => {
-                          const now = new Date();
-                          const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + x.days);
-                          const yyyy = d.getFullYear();
-                          const mm = String(d.getMonth() + 1).padStart(2, "0");
-                          const dd = String(d.getDate()).padStart(2, "0");
-                          setItemExpire(`${yyyy}-${mm}-${dd}`);
-                        }}
-                        style={{ padding: "6px 8px", borderRadius: 999, border: `1px solid ${COLORS.border}`, background: "white", cursor: "pointer" }}
-                      >
-                        +{x.label}
-                      </button>
-                    ))}
-                    <button
-                      onClick={() => setItemExpire("")}
-                      style={{ padding: "6px 8px", borderRadius: 999, border: `1px solid ${COLORS.border}`, background: "white", cursor: "pointer" }}
-                    >
-                      Clear
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              <div style={{ display: "grid", gap: 6 }}>
-                <div style={{ fontWeight: 900 }}>Cell</div>
-                <select
-                  value={itemCellId}
-                  onChange={(e) => {
-                    setItemCellId(e.target.value);
-                    setMoveTargetCellId(e.target.value);
-                  }}
-                  style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
-                >
-                  <option value="">Select a cell</option>
-                  {cells.map((c) => {
-                    const colName = columns.find((cc) => cc.id === c.column_id)?.name ?? "Column";
-                    return (
-                      <option key={c.id} value={c.id}>
-                        {colName} / {c.code}
-                      </option>
-                    );
-                  })}
-                </select>
-              </div>
-
-              {editingItem ? (
-                <div style={{ display: "grid", gap: 8 }}>
-                  <div style={{ fontWeight: 900 }}>Move item (searchable)</div>
-                  <input
-                    value={moveQuery}
-                    onChange={(e) => setMoveQuery(e.target.value)}
-                    placeholder="Search location, e.g. Pantry / K11"
-                    style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
-                  />
-                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                    {moveCellOptions.map((opt) => (
-                      <button
-                        key={opt.id}
-                        onClick={() => setMoveTargetCellId(opt.id)}
-                        style={{
-                          padding: "6px 8px",
-                          borderRadius: 999,
-                          border: `1px solid ${COLORS.border}`,
-                          background: moveTargetCellId === opt.id ? COLORS.okBg : "white",
-                          cursor: "pointer",
-                        }}
-                      >
-                        {opt.label}
-                      </button>
-                    ))}
-                  </div>
-                  <button
-                    onClick={moveItemToSelectedCell}
-                    disabled={busy || !moveTargetCellId || moveTargetCellId === editingItem.cell_id}
-                    style={{
-                      padding: "10px 12px",
-                      borderRadius: 12,
-                      fontWeight: 900,
-                      background: COLORS.blue,
-                      color: "white",
-                      border: "none",
-                      cursor: "pointer",
-                      opacity: busy || !moveTargetCellId || moveTargetCellId === editingItem.cell_id ? 0.6 : 1,
-                    }}
-                  >
-                    Move to selected cell
-                  </button>
-                </div>
-              ) : null}
-
-              <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", marginTop: 6 }}>
-                <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                  <button
-                    onClick={saveItem}
-                    disabled={busy}
-                    style={{
-                      padding: "10px 12px",
-                      borderRadius: 12,
-                      fontWeight: 900,
-                      background: COLORS.blue,
-                      color: "white",
-                      border: "none",
-                      cursor: "pointer",
-                      opacity: busy ? 0.6 : 1,
-                    }}
-                  >
-                    {editingItem ? "Save changes" : "Add item"}
-                  </button>
-
-                  {editingItem ? (
-                    <button
-                      onClick={() => deleteItem(editingItem.id)}
-                      disabled={busy}
-                      style={{
-                        padding: "10px 12px",
-                        borderRadius: 12,
-                        fontWeight: 900,
-                        border: `1px solid rgba(220,0,0,.25)`,
-                        background: "rgba(220,0,0,.06)",
-                        color: "crimson",
-                        cursor: "pointer",
-                        opacity: busy ? 0.6 : 1,
-                      }}
-                    >
-                      Delete item
-                    </button>
-                  ) : null}
-                </div>
-
-                <button
-                  onClick={() => setItemModalOpen(false)}
-                  style={{ padding: "10px 12px", borderRadius: 12, border: `1px solid ${COLORS.border}`, background: "white" }}
-                >
-                  Cancel
-                </button>
-              </div>
-
-              {busy ? <div style={{ color: COLORS.muted }}>Working…</div> : null}
-            </div>
-          </div>
-        </div>
-      ) : null}
     </div>
   );
 }
