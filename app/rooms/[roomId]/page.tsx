@@ -22,7 +22,7 @@ const COLORS = {
 type Household = { id: string; name: string; join_code: string | null };
 type Room = { id: string; household_id: string; name: string; position?: number };
 
-// ✅ 你的 room_columns：用 room_id 归属 room
+// room_columns：按 room_id 归属 room
 type Column = {
   id: string;
   room_id: string;
@@ -30,7 +30,7 @@ type Column = {
   position: number;
 };
 
-// ✅ 你的 room_cells：没有 room_id；通过 column_id 归属 column，再通过 column.room_id 归属 room
+// room_cells：没有 room_id；通过 column_id -> room_columns.room_id
 type Cell = {
   id: string;
   column_id: string;
@@ -38,11 +38,10 @@ type Cell = {
   position: number;
 };
 
-// ✅ items_v2：你之前说 cell_id 是 uuid（room_cells.id），并且 items_v2 有 room_id / household_id
+// ✅ items_v2：没有 room_id（按你报错）；通过 cell_id 关联到 room
 type Item = {
   id: string;
   household_id: string;
-  room_id: string;
   cell_id: string;
   name: string;
   quantity: number;
@@ -137,7 +136,6 @@ function fuzzyMatch(query: string, text: string): boolean {
   }
   if (hits > 0 && hits >= Math.max(1, Math.ceil(qTokens.length * 0.5))) return true;
 
-  // 轻量拼写容错
   if (q.length <= 6) {
     const dist = levenshtein(q, t.slice(0, Math.min(t.length, 12)));
     if (dist <= 2) return true;
@@ -280,6 +278,7 @@ export default function RoomPage() {
 
       // 2) cells by column_id IN (colIds)
       const colIds = cols.map((c) => c.id);
+      let allCells: Cell[] = [];
       if (colIds.length === 0) {
         setCells([]);
       } else {
@@ -290,17 +289,23 @@ export default function RoomPage() {
           .order("column_id", { ascending: true })
           .order("position", { ascending: true });
         if (cellRes.error) throw new Error(cellRes.error.message);
-        setCells((cellRes.data as Cell[]) ?? []);
+        allCells = (cellRes.data as Cell[]) ?? [];
+        setCells(allCells);
       }
 
-      // 3) items by household + room
-      const itemRes = await supabase
-        .from("items_v2")
-        .select("id,household_id,room_id,cell_id,name,quantity,expire_date,image_url")
-        .eq("room_id", roomId)
-        .eq("household_id", hid);
-      if (itemRes.error) throw new Error(itemRes.error.message);
-      setItems((itemRes.data as Item[]) ?? []);
+      // 3) ✅ items：不再按 room_id 拉；改为按 “该 room 下所有 cell ids”
+      const cellIds = allCells.map((c) => c.id);
+      if (cellIds.length === 0) {
+        setItems([]);
+      } else {
+        const itemRes = await supabase
+          .from("items_v2")
+          .select("id,household_id,cell_id,name,quantity,expire_date,image_url")
+          .eq("household_id", hid)
+          .in("cell_id", cellIds);
+        if (itemRes.error) throw new Error(itemRes.error.message);
+        setItems((itemRes.data as Item[]) ?? []);
+      }
     } catch (e: any) {
       setErr(e?.message ?? "Failed to load room.");
     } finally {
@@ -404,7 +409,7 @@ export default function RoomPage() {
   }
 
   async function saveItem() {
-    if (!user?.id || !activeHouseholdId || !roomId) return;
+    if (!user?.id || !activeHouseholdId) return;
 
     const nm = itemName.trim();
     if (!nm) return setErr("Item name required.");
@@ -414,9 +419,9 @@ export default function RoomPage() {
     setErr(null);
 
     try {
+      // ✅ payload 不再写 room_id
       const payload: any = {
         household_id: activeHouseholdId,
-        room_id: roomId,
         cell_id: itemCellId,
         name: nm,
         quantity: Number(itemQty ?? 0),
@@ -427,7 +432,7 @@ export default function RoomPage() {
         const ins = await supabase
           .from("items_v2")
           .insert(payload)
-          .select("id,household_id,room_id,cell_id,name,quantity,expire_date,image_url")
+          .select("id,household_id,cell_id,name,quantity,expire_date,image_url")
           .single();
         if (ins.error) throw new Error(ins.error.message);
         setItems((prev) => [...prev, ins.data as Item]);
@@ -436,7 +441,7 @@ export default function RoomPage() {
           .from("items_v2")
           .update(payload)
           .eq("id", editingItem.id)
-          .select("id,household_id,room_id,cell_id,name,quantity,expire_date,image_url")
+          .select("id,household_id,cell_id,name,quantity,expire_date,image_url")
           .single();
         if (upd.error) throw new Error(upd.error.message);
         setItems((prev) => prev.map((x) => (x.id === editingItem.id ? (upd.data as Item) : x)));
@@ -450,7 +455,6 @@ export default function RoomPage() {
     }
   }
 
-  // ✅ 删除 item：不需要确认
   async function deleteItem(itemId: string) {
     setBusy(true);
     setErr(null);
@@ -477,7 +481,7 @@ export default function RoomPage() {
         .from("items_v2")
         .update({ cell_id: target })
         .eq("id", editingItem.id)
-        .select("id,household_id,room_id,cell_id,name,quantity,expire_date,image_url")
+        .select("id,household_id,cell_id,name,quantity,expire_date,image_url")
         .single();
       if (upd.error) throw new Error(upd.error.message);
       setItems((prev) => prev.map((x) => (x.id === editingItem.id ? (upd.data as Item) : x)));
@@ -573,8 +577,6 @@ export default function RoomPage() {
   async function addCell(colId: string) {
     const existing = cells.filter((c) => c.column_id === colId);
     const nextPos = (existing.reduce((m, c) => Math.max(m, c.position ?? 0), 0) || 0) + 1;
-
-    // 你如果想让 code 是 K11/K12 那种，也可以在这里改生成规则
     const code = `C${nextPos}`;
 
     setBusy(true);
@@ -595,7 +597,6 @@ export default function RoomPage() {
     }
   }
 
-  // ✅ 删除 cell：需要确认，并默认删内部 items
   async function deleteCell(cell: Cell) {
     const ok = window.confirm(`Delete cell "${cell.code}"?\n\nThis will delete ALL items inside this cell.`);
     if (!ok) return;
@@ -642,32 +643,18 @@ export default function RoomPage() {
   return (
     <div style={{ minHeight: "100vh", background: COLORS.oatBg, color: COLORS.ink }}>
       <div style={{ padding: 16, maxWidth: 1200, margin: "0 auto" }}>
-        {/* Top bar */}
         <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 12 }}>
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
             <button
               onClick={() => router.push("/rooms")}
-              style={{
-                padding: "8px 10px",
-                borderRadius: 12,
-                fontWeight: 900,
-                border: `1px solid ${COLORS.border}`,
-                background: "white",
-              }}
+              style={{ padding: "8px 10px", borderRadius: 12, fontWeight: 900, border: `1px solid ${COLORS.border}`, background: "white" }}
             >
               Back
             </button>
 
-            {/* ✅ 你要的：左上角 Switch household */}
             <button
               onClick={() => router.push("/households")}
-              style={{
-                padding: "8px 10px",
-                borderRadius: 12,
-                fontWeight: 900,
-                border: `1px solid ${COLORS.border}`,
-                background: "white",
-              }}
+              style={{ padding: "8px 10px", borderRadius: 12, fontWeight: 900, border: `1px solid ${COLORS.border}`, background: "white" }}
             >
               Switch household
             </button>
@@ -679,14 +666,7 @@ export default function RoomPage() {
             <button
               onClick={() => loadContextAndData()}
               disabled={busy}
-              style={{
-                padding: "8px 10px",
-                borderRadius: 12,
-                border: `1px solid ${COLORS.border}`,
-                background: "white",
-                cursor: "pointer",
-                opacity: busy ? 0.6 : 1,
-              }}
+              style={{ padding: "8px 10px", borderRadius: 12, border: `1px solid ${COLORS.border}`, background: "white", opacity: busy ? 0.6 : 1 }}
             >
               Refresh
             </button>
@@ -734,7 +714,6 @@ export default function RoomPage() {
           <div style={{ opacity: 0.8 }}>Loading…</div>
         ) : (
           <>
-            {/* Compact expiring lists */}
             <div style={{ background: COLORS.oatCard, border: `1px solid ${COLORS.border}`, borderRadius: 16, padding: 14, marginBottom: 12 }}>
               <div style={{ fontWeight: 900, marginBottom: 8 }}>Expiring soon</div>
 
@@ -785,7 +764,6 @@ export default function RoomPage() {
               </div>
             </div>
 
-            {/* Search */}
             <div style={{ background: COLORS.oatCard, border: `1px solid ${COLORS.border}`, borderRadius: 16, padding: 14, marginBottom: 12 }}>
               <div style={{ fontWeight: 900, marginBottom: 8 }}>Search items</div>
               <input
@@ -820,7 +798,6 @@ export default function RoomPage() {
               ) : null}
             </div>
 
-            {/* Add column */}
             <div style={{ background: COLORS.oatCard, border: `1px solid ${COLORS.border}`, borderRadius: 16, padding: 14, marginBottom: 12 }}>
               <div style={{ fontWeight: 900, marginBottom: 8 }}>Add column</div>
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
@@ -849,7 +826,6 @@ export default function RoomPage() {
               </div>
             </div>
 
-            {/* Columns layout (mobile friendly horizontal scroll) */}
             <div style={{ display: "flex", gap: 12, alignItems: "flex-start", overflowX: "auto", paddingBottom: 6 }}>
               {columnsWithCells.map(({ col, cells }) => (
                 <div
@@ -867,7 +843,6 @@ export default function RoomPage() {
                     gap: 10,
                   }}
                 >
-                  {/* Column header */}
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
                     {editingColumnId === col.id ? (
                       <div style={{ display: "flex", gap: 8, alignItems: "center", width: "100%" }}>
@@ -934,7 +909,6 @@ export default function RoomPage() {
                     )}
                   </div>
 
-                  {/* Cells */}
                   <div style={{ display: "grid", gap: 10 }}>
                     {cells.map((cell) => {
                       const list = itemsByCell[cell.id] || [];
@@ -972,7 +946,6 @@ export default function RoomPage() {
                             </div>
                           </div>
 
-                          {/* Items chips */}
                           <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 6 }}>
                             {list.length === 0 ? (
                               <div style={{ color: COLORS.muted, fontSize: 12 }}>Empty</div>
@@ -996,7 +969,6 @@ export default function RoomPage() {
                                       cursor: "pointer",
                                     }}
                                   >
-                                    {/* ✅ 防止长名字造成 layout 问题：ellipsis */}
                                     <span
                                       style={{
                                         maxWidth: 190,
@@ -1020,7 +992,6 @@ export default function RoomPage() {
                     })}
                   </div>
 
-                  {/* ✅ Add cell button at bottom */}
                   <button
                     onClick={() => addCell(col.id)}
                     disabled={busy}
@@ -1044,7 +1015,7 @@ export default function RoomPage() {
         )}
       </div>
 
-      {/* Item modal */}
+      {/* Item modal（同你之前版本） */}
       {itemModalOpen ? (
         <div
           style={{
@@ -1109,8 +1080,6 @@ export default function RoomPage() {
                     onChange={(e) => setItemExpire(e.target.value)}
                     style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
                   />
-
-                  {/* 快捷日期 */}
                   <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                     {[
                       { label: "1 week", days: 7 },
@@ -1165,7 +1134,6 @@ export default function RoomPage() {
                 </select>
               </div>
 
-              {/* Move UI */}
               {editingItem ? (
                 <div style={{ display: "grid", gap: 8 }}>
                   <div style={{ fontWeight: 900 }}>Move item (searchable)</div>
