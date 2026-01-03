@@ -6,7 +6,7 @@ import AuthGate from "@/src/components/AuthGate";
 import { supabase } from "@/src/lib/supabase";
 
 /** =========================
- *  CONFIG: 你的真实数据库列名（已按你最新确认）
+ *  CONFIG: 你的真实数据库列名（按你最新确认）
  *  ========================= */
 const ITEMS_TABLE = "items_v2";
 const ITEM_ID_FIELD = "id";
@@ -18,6 +18,11 @@ const ITEM_EXPIRE_FIELD = "expires_at";
 const ITEM_IMG_FIELD = "image_path";
 
 const ACTIVE_HOUSEHOLD_KEY = "active_household_id";
+
+/** ✅ 图片上传：Supabase Storage bucket 名字
+ *  如果你之前创建的 bucket 不是 item-images，请改这里
+ */
+const STORAGE_BUCKET = "item-images";
 
 const COLORS = {
   oatBg: "#F4EBDD",
@@ -155,7 +160,15 @@ function normalizeItemRow(row: any): Item {
 
 /** 防止 Enter 在 IME 输入中误触发提交 */
 function isComposingEvent(e: any): boolean {
-  return Boolean(e?.nativeEvent?.isComposing) || Boolean(e?.isComposing);
+  return Boolean(e?.nativeEvent?.isComposing) || Boolean((e as any)?.isComposing);
+}
+
+function sanitizeFilename(name: string): string {
+  return name.replace(/[^\w.\-]+/g, "_");
+}
+
+function isUrl(s?: string | null): boolean {
+  return !!s && /^https?:\/\//i.test(s);
 }
 
 export default function RoomPage() {
@@ -194,6 +207,7 @@ export default function RoomPage() {
   const [editingCellId, setEditingCellId] = useState<string | null>(null);
   const [editingCellCode, setEditingCellCode] = useState("");
 
+  // Item modal state
   const [itemModalOpen, setItemModalOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<Item | null>(null);
   const [itemName, setItemName] = useState("");
@@ -203,6 +217,10 @@ export default function RoomPage() {
 
   // 两级联动 location：先选 room，再选 cell
   const [locationRoomId, setLocationRoomId] = useState<string>("");
+
+  // ✅ 图片上传/预览相关
+  const [itemImageFile, setItemImageFile] = useState<File | null>(null);
+  const [itemImageLocalUrl, setItemImageLocalUrl] = useState<string | null>(null);
 
   const cellRefMap = useRef<Record<string, HTMLDivElement | null>>({});
 
@@ -215,18 +233,36 @@ export default function RoomPage() {
     return () => sub.subscription.unsubscribe();
   }, []);
 
-  // Esc 关闭 modal（桌面很实用；移动端不影响）
+  // Esc 关闭 modal（桌面）
   useEffect(() => {
     if (!itemModalOpen) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        setItemModalOpen(false);
-        setEditingItem(null);
+        closeItemModal();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [itemModalOpen]);
+
+  // 清理 objectURL
+  useEffect(() => {
+    return () => {
+      if (itemImageLocalUrl) URL.revokeObjectURL(itemImageLocalUrl);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function closeItemModal() {
+    setItemModalOpen(false);
+    setEditingItem(null);
+
+    // reset image states
+    if (itemImageLocalUrl) URL.revokeObjectURL(itemImageLocalUrl);
+    setItemImageLocalUrl(null);
+    setItemImageFile(null);
+  }
 
   async function ensureProfileRow() {
     if (!user?.id) return;
@@ -287,7 +323,7 @@ export default function RoomPage() {
       if (hRes.error) throw new Error(hRes.error.message);
       setHousehold(hRes.data as Household);
 
-      // Household rooms/columns/cells
+      // Load household rooms/columns/cells
       const hhRoomRes = await supabase
         .from("rooms")
         .select("id,household_id,name,position")
@@ -359,6 +395,7 @@ export default function RoomPage() {
       setColumns(cols);
 
       const curColIds = cols.map((c) => c.id);
+      let curCells: Cell[] = [];
       if (curColIds.length === 0) {
         setCells([]);
       } else {
@@ -369,10 +406,11 @@ export default function RoomPage() {
           .order("column_id", { ascending: true })
           .order("position", { ascending: true });
         if (cellRes.error) throw new Error(cellRes.error.message);
-        setCells((cellRes.data as Cell[]) ?? []);
+        curCells = (cellRes.data as Cell[]) ?? [];
+        setCells(curCells);
       }
 
-      // Items across household
+      // Items for entire household
       const hhCellIds = allCells.map((c) => c.id);
       if (hhCellIds.length === 0) {
         setItems([]);
@@ -409,6 +447,7 @@ export default function RoomPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id, roomId]);
 
+  // Current room columns with cells
   const columnsWithCells = useMemo(() => {
     const byCol: Record<string, Cell[]> = {};
     for (const c of cells) {
@@ -419,6 +458,7 @@ export default function RoomPage() {
     return columns.map((col) => ({ col, cells: byCol[col.id] || [] }));
   }, [columns, cells]);
 
+  // Items in current-room cells only (for per-cell chips rendering)
   const itemsByCell = useMemo(() => {
     const map: Record<string, Item[]> = {};
     const curCellIds = new Set(cells.map((c) => c.id));
@@ -432,9 +472,11 @@ export default function RoomPage() {
     return map;
   }, [items, cells]);
 
+  // Household-level index: cell -> room/col/code label
   const hhIndex = useMemo(() => {
     const roomById = new Map(hhRooms.map((r) => [r.id, r]));
     const colById = new Map(hhColumns.map((c) => [c.id, c]));
+
     const m = new Map<
       string,
       { roomId: string; roomName: string; colId: string; colName: string; cellCode: string; label: string }
@@ -458,6 +500,7 @@ export default function RoomPage() {
     return m;
   }, [hhRooms, hhColumns, hhCells]);
 
+  // Expiring list across household
   const expiring0to7 = useMemo(() => {
     return items
       .filter((it) => it.qty > 0)
@@ -483,6 +526,7 @@ export default function RoomPage() {
   function goToCell(it: Item) {
     const loc = hhIndex.get(it.cell_id);
     if (!loc?.roomId) return;
+
     if (loc.roomId === roomId) {
       const ref = cellRefMap.current[it.cell_id];
       if (ref) ref.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
@@ -491,6 +535,7 @@ export default function RoomPage() {
     router.push(`/rooms/${loc.roomId}`);
   }
 
+  // Search results across household
   const filteredItemsSummary = useMemo(() => {
     const q = search.trim();
     if (!q) return [];
@@ -501,7 +546,7 @@ export default function RoomPage() {
       .map((it) => ({ it, loc: hhIndex.get(it.cell_id) }));
   }, [search, items, hhIndex]);
 
-  // 两级联动：Room -> Cells (按 code 字母顺序 / numeric)
+  // ✅ 两级联动：选择 room 后，只显示该 room 的 cells；cells 按 code 排序
   const roomCellOptions = useMemo(() => {
     const rid = locationRoomId;
     if (!rid) return [];
@@ -527,13 +572,35 @@ export default function RoomPage() {
     }));
   }, [locationRoomId, hhCells, hhIndex]);
 
-  function openAddItem(cellId: string) {
-    setEditingItem(null);
+  /** ✅ 解析 image_path -> 可显示 URL
+   *  - 如果 image_path 已经是完整 URL，就直接用
+   *  - 否则当作 Storage object path，走 getPublicUrl
+   *  注意：若 bucket 不是 public，你需要改成 createSignedUrl（这会更安全）
+   */
+  function resolveImageUrl(imagePath?: string | null): string | null {
+    if (!imagePath) return null;
+    if (isUrl(imagePath)) return imagePath;
+
+    const { data } = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(imagePath);
+    return data?.publicUrl ?? null;
+  }
+
+  function resetItemModalFields() {
     setItemName("");
     setItemQty(1);
     setItemExpire("");
-    setItemCellId(cellId);
+    setItemCellId("");
+    setLocationRoomId("");
+    if (itemImageLocalUrl) URL.revokeObjectURL(itemImageLocalUrl);
+    setItemImageLocalUrl(null);
+    setItemImageFile(null);
+  }
 
+  function openAddItem(cellId: string) {
+    setEditingItem(null);
+    resetItemModalFields();
+
+    setItemCellId(cellId);
     setLocationRoomId(roomId);
 
     setItemModalOpen(true);
@@ -541,6 +608,8 @@ export default function RoomPage() {
 
   function openEditItem(it: Item) {
     setEditingItem(it);
+    resetItemModalFields();
+
     setItemName(it.name ?? "");
     setItemQty(Number(it.qty ?? 1));
     setItemExpire(it.expires_at ?? "");
@@ -550,6 +619,28 @@ export default function RoomPage() {
     setLocationRoomId(loc?.roomId || roomId);
 
     setItemModalOpen(true);
+  }
+
+  async function uploadItemImageIfAny(): Promise<string | null> {
+    if (!itemImageFile) return null;
+    if (!activeHouseholdId) return null;
+
+    const ext = itemImageFile.name.split(".").pop() || "jpg";
+    const safeName = sanitizeFilename(itemImageFile.name);
+    const uuid = typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : String(Date.now());
+    const objectPath = `${activeHouseholdId}/${uuid}_${safeName}`;
+
+    const up = await supabase.storage.from(STORAGE_BUCKET).upload(objectPath, itemImageFile, {
+      upsert: true,
+      contentType: itemImageFile.type || `image/${ext}`,
+    });
+
+    if (up.error) {
+      throw new Error(
+        `Image upload failed: ${up.error.message}. Most common causes: bucket not created, bucket policy/RLS, or not authenticated.`
+      );
+    }
+    return objectPath;
   }
 
   async function saveItem() {
@@ -563,12 +654,19 @@ export default function RoomPage() {
     setErr(null);
 
     try {
+      // ✅ 先上传图片（如果选了新文件）
+      let nextImagePath: string | null | undefined = editingItem?.image_path ?? null;
+      if (itemImageFile) {
+        nextImagePath = await uploadItemImageIfAny();
+      }
+
       const payload: any = {};
       payload[ITEM_HOUSEHOLD_FIELD] = activeHouseholdId;
       payload[ITEM_CELL_FIELD] = itemCellId;
       payload[ITEM_NAME_FIELD] = nm;
       payload[ITEM_QTY_FIELD] = Number(itemQty ?? 0);
       payload[ITEM_EXPIRE_FIELD] = itemExpire ? itemExpire : null;
+      payload[ITEM_IMG_FIELD] = nextImagePath ?? null;
 
       const selectCols = [
         ITEM_ID_FIELD,
@@ -595,8 +693,7 @@ export default function RoomPage() {
         setItems((prev) => prev.map((x) => (x.id === editingItem.id ? normalizeItemRow(upd.data) : x)));
       }
 
-      setItemModalOpen(false);
-      setEditingItem(null);
+      closeItemModal();
     } catch (e: any) {
       setErr(e?.message ?? "Save failed.");
     } finally {
@@ -604,7 +701,7 @@ export default function RoomPage() {
     }
   }
 
-  // Delete：成功后关掉 edit modal
+  // ✅ Delete：删除后关闭 modal
   async function deleteItem(itemId: string) {
     setBusy(true);
     setErr(null);
@@ -614,9 +711,7 @@ export default function RoomPage() {
 
       setItems((prev) => prev.filter((x) => x.id !== itemId));
 
-      // ✅ 你要求：delete 后直接关闭 edit
-      setItemModalOpen(false);
-      setEditingItem(null);
+      closeItemModal();
     } catch (e: any) {
       setErr(e?.message ?? "Delete failed.");
     } finally {
@@ -782,6 +877,13 @@ export default function RoomPage() {
   }, [household?.id, defaultHouseholdId]);
 
   if (!session) return <AuthGate onAuthed={(s) => setSession(s)} />;
+
+  // ✅ modal 内部当前要显示的大图 URL：优先本地选择的文件 preview，其次 DB 里的 image_path
+  const modalImageUrl = useMemo(() => {
+    if (itemImageLocalUrl) return itemImageLocalUrl;
+    if (editingItem?.image_path) return resolveImageUrl(editingItem.image_path);
+    return null;
+  }, [itemImageLocalUrl, editingItem?.image_path]);
 
   return (
     <div style={{ minHeight: "100vh", background: COLORS.oatBg, color: COLORS.ink }}>
@@ -1106,6 +1208,7 @@ export default function RoomPage() {
                             )}
                           </div>
 
+                          {/* ✅ cell 内不显示图片 preview，只显示名字 chip */}
                           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                             {list.length === 0 ? (
                               <div style={{ color: COLORS.muted, fontSize: 12 }}>Empty</div>
@@ -1213,247 +1316,317 @@ export default function RoomPage() {
         )}
       </div>
 
-      {/* ✅ Modal: mobile/ipad/desktop 优化 + Enter submit */}
+      {/* ✅ Item modal：改回“居中弹出窗口”的样式 + Enter 提交 + 大图 preview + 图片上传 */}
       {itemModalOpen ? (
         <div
-          className="fixed inset-0 z-50 bg-black/40 p-3 sm:p-6 overflow-y-auto"
-          onClick={() => {
-            setItemModalOpen(false);
-            setEditingItem(null);
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,.35)",
+            display: "flex",
+            justifyContent: "center",
+            alignItems: "center",
+            padding: 16,
+            zIndex: 50,
           }}
+          onClick={() => closeItemModal()}
         >
-          {/* 让移动端从顶部开始展示，避免键盘弹出时把内容顶没 */}
-          <div className="mx-auto w-full max-w-2xl flex justify-center sm:items-center items-start">
-            <div
-              className="w-full bg-white rounded-2xl border border-black/10 shadow-xl overflow-hidden"
-              style={{
-                // 关键：用 100dvh 适配移动端动态视口（键盘弹出）
-                maxHeight: "calc(100dvh - 24px)",
-              }}
-              onClick={(e) => e.stopPropagation()}
-            >
-              {/* Header sticky：永远能看到 Close */}
-              <div
-                className="sticky top-0 z-10 bg-white border-b border-black/10"
-                style={{ padding: 14 }}
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: "min(760px, 100%)",
+              background: "white",
+              borderRadius: 18,
+              border: `1px solid ${COLORS.border}`,
+              padding: 14,
+              // ✅ 轻量移动端兜底：内容可滚动，避免小屏卡死
+              maxHeight: "90vh",
+              overflowY: "auto",
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
+              <div style={{ fontWeight: 900, fontSize: 16 }}>{editingItem ? "Edit item" : "Add item"}</div>
+              <button
+                onClick={() => closeItemModal()}
+                style={{ padding: "6px 8px", borderRadius: 10, border: `1px solid ${COLORS.border}`, background: "white" }}
               >
-                <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
-                  <div style={{ fontWeight: 900, fontSize: 16 }}>{editingItem ? "Edit item" : "Add item"}</div>
-                  <button
-                    onClick={() => {
-                      setItemModalOpen(false);
-                      setEditingItem(null);
-                    }}
-                    style={{ padding: "6px 8px", borderRadius: 10, border: `1px solid ${COLORS.border}`, background: "white" }}
-                  >
-                    Close
-                  </button>
-                </div>
-              </div>
+                Close
+              </button>
+            </div>
 
-              {/* Content scroll area */}
-              <div
-                className="overflow-y-auto"
-                style={{
-                  padding: 14,
-                  WebkitOverflowScrolling: "touch",
-                  // 留出 footer 的高度，避免最后一行被按钮遮挡
-                  paddingBottom: 96,
-                }}
-              >
-                {/* ✅ 用 form + onSubmit 实现 Enter 提交 */}
-                <form
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    if (busy) return;
-                    void saveItem();
-                  }}
-                  onKeyDown={(e) => {
-                    // Enter 提交（排除 IME composition，避免中文输入法误提交）
-                    if (e.key === "Enter" && !isComposingEvent(e)) {
-                      const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
-                      if (tag === "textarea") return;
-                      // select 的 Enter 有时用于打开/选择；这里依然允许 submit（符合你要求）
-                      e.preventDefault();
-                      if (!busy) void saveItem();
-                    }
+            {/* ✅ 大图 preview：只在弹窗里显示 */}
+            <div style={{ marginTop: 12 }}>
+              {modalImageUrl ? (
+                <div
+                  style={{
+                    width: "100%",
+                    borderRadius: 14,
+                    border: `1px solid ${COLORS.border}`,
+                    background: COLORS.oatCard,
+                    overflow: "hidden",
                   }}
                 >
-                  <div style={{ display: "grid", gap: 10 }}>
-                    <div style={{ display: "grid", gap: 6 }}>
-                      <div style={{ fontWeight: 900 }}>Name</div>
-                      <input
-                        value={itemName}
-                        onChange={(e) => setItemName(e.target.value)}
-                        placeholder="e.g. Olive oil"
-                        style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
-                      />
-                    </div>
+                  <img
+                    src={modalImageUrl}
+                    alt="item preview"
+                    style={{
+                      width: "100%",
+                      height: 280,
+                      objectFit: "contain",
+                      display: "block",
+                      background: "white",
+                    }}
+                  />
+                </div>
+              ) : (
+                <div
+                  style={{
+                    width: "100%",
+                    borderRadius: 14,
+                    border: `1px solid ${COLORS.border}`,
+                    background: COLORS.oatCard,
+                    padding: 12,
+                    color: COLORS.muted,
+                    fontWeight: 900,
+                  }}
+                >
+                  No image
+                </div>
+              )}
+            </div>
 
-                    <div style={{ display: "grid", gap: 6, gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))" }}>
-                      <div style={{ display: "grid", gap: 6 }}>
-                        <div style={{ fontWeight: 900 }}>Quantity</div>
-                        <input
-                          type="number"
-                          value={itemQty}
-                          onChange={(e) => setItemQty(Number(e.target.value))}
-                          style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
-                        />
-                      </div>
+            {/* ✅ form：Enter 提交（新增/更新都一样） */}
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (!busy) void saveItem();
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !isComposingEvent(e)) {
+                  const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
+                  if (tag === "textarea") return;
+                  e.preventDefault();
+                  if (!busy) void saveItem();
+                }
+              }}
+              style={{ marginTop: 12 }}
+            >
+              <div style={{ display: "grid", gap: 10 }}>
+                <div style={{ display: "grid", gap: 6 }}>
+                  <div style={{ fontWeight: 900 }}>Name</div>
+                  <input
+                    value={itemName}
+                    onChange={(e) => setItemName(e.target.value)}
+                    placeholder="e.g. Olive oil"
+                    style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
+                  />
+                </div>
 
-                      <div style={{ display: "grid", gap: 6 }}>
-                        <div style={{ fontWeight: 900 }}>Expire date</div>
-                        <input
-                          type="date"
-                          value={itemExpire}
-                          onChange={(e) => setItemExpire(e.target.value)}
-                          style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
-                        />
-                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                          {[
-                            { label: "1 week", days: 7 },
-                            { label: "1 month", days: 30 },
-                            { label: "3 months", days: 90 },
-                            { label: "1 year", days: 365 },
-                          ].map((x) => (
-                            <button
-                              key={x.label}
-                              type="button"
-                              onClick={() => {
-                                const now = new Date();
-                                const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + x.days);
-                                const yyyy = d.getFullYear();
-                                const mm = String(d.getMonth() + 1).padStart(2, "0");
-                                const dd = String(d.getDate()).padStart(2, "0");
-                                setItemExpire(`${yyyy}-${mm}-${dd}`);
-                              }}
-                              style={{ padding: "6px 8px", borderRadius: 999, border: `1px solid ${COLORS.border}`, background: "white", cursor: "pointer" }}
-                            >
-                              +{x.label}
-                            </button>
-                          ))}
-                          <button
-                            type="button"
-                            onClick={() => setItemExpire("")}
-                            style={{ padding: "6px 8px", borderRadius: 999, border: `1px solid ${COLORS.border}`, background: "white", cursor: "pointer" }}
-                          >
-                            Clear
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* 两级联动 location */}
-                    <div style={{ display: "grid", gap: 10 }}>
-                      <div style={{ display: "grid", gap: 6 }}>
-                        <div style={{ fontWeight: 900 }}>Room</div>
-                        <select
-                          value={locationRoomId}
-                          onChange={(e) => setLocationRoomId(e.target.value)}
-                          style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
-                        >
-                          <option value="">Select a room</option>
-                          {hhRooms.map((r) => (
-                            <option key={r.id} value={r.id}>
-                              {r.name}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-
-                      <div style={{ display: "grid", gap: 6 }}>
-                        <div style={{ fontWeight: 900 }}>Cell (in selected room)</div>
-                        <select
-                          value={itemCellId}
-                          onChange={(e) => setItemCellId(e.target.value)}
-                          style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
-                          disabled={!locationRoomId}
-                        >
-                          <option value="">Select a cell</option>
-                          {roomCellOptions.map((opt) => (
-                            <option key={opt.id} value={opt.id}>
-                              {opt.code} · {opt.label}
-                            </option>
-                          ))}
-                        </select>
-
-                        {locationRoomId ? (
-                          <AutoFixCellSelection
-                            roomCellOptions={roomCellOptions}
-                            itemCellId={itemCellId}
-                            setItemCellId={setItemCellId}
-                          />
-                        ) : null}
-                      </div>
-                    </div>
-
-                    {busy ? <div style={{ color: COLORS.muted }}>Working…</div> : null}
+                <div style={{ display: "grid", gap: 6, gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))" }}>
+                  <div style={{ display: "grid", gap: 6 }}>
+                    <div style={{ fontWeight: 900 }}>Quantity</div>
+                    <input
+                      type="number"
+                      value={itemQty}
+                      onChange={(e) => setItemQty(Number(e.target.value))}
+                      style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
+                    />
                   </div>
 
-                  {/* Footer sticky：按钮永远在屏幕底部可见 */}
-                  <div
-                    className="sticky bottom-0 z-10 bg-white border-t border-black/10"
-                    style={{ padding: 14 }}
-                  >
-                    <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
-                      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                  <div style={{ display: "grid", gap: 6 }}>
+                    <div style={{ fontWeight: 900 }}>Expire date</div>
+                    <input
+                      type="date"
+                      value={itemExpire}
+                      onChange={(e) => setItemExpire(e.target.value)}
+                      style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
+                    />
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                      {[
+                        { label: "1 week", days: 7 },
+                        { label: "1 month", days: 30 },
+                        { label: "3 months", days: 90 },
+                        { label: "1 year", days: 365 },
+                      ].map((x) => (
                         <button
-                          type="submit"
-                          disabled={busy}
-                          style={{
-                            padding: "10px 12px",
-                            borderRadius: 12,
-                            fontWeight: 900,
-                            background: COLORS.blue,
-                            color: "white",
-                            border: "none",
-                            cursor: "pointer",
-                            opacity: busy ? 0.6 : 1,
+                          key={x.label}
+                          type="button"
+                          onClick={() => {
+                            const now = new Date();
+                            const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + x.days);
+                            const yyyy = d.getFullYear();
+                            const mm = String(d.getMonth() + 1).padStart(2, "0");
+                            const dd = String(d.getDate()).padStart(2, "0");
+                            setItemExpire(`${yyyy}-${mm}-${dd}`);
                           }}
+                          style={{ padding: "6px 8px", borderRadius: 999, border: `1px solid ${COLORS.border}`, background: "white", cursor: "pointer" }}
                         >
-                          {editingItem ? "Save changes" : "Add item"}
+                          +{x.label}
                         </button>
-
-                        {editingItem ? (
-                          <button
-                            type="button"
-                            onClick={() => deleteItem(editingItem.id)}
-                            disabled={busy}
-                            style={{
-                              padding: "10px 12px",
-                              borderRadius: 12,
-                              fontWeight: 900,
-                              border: `1px solid rgba(220,0,0,.25)`,
-                              background: "rgba(220,0,0,.06)",
-                              color: "crimson",
-                              cursor: "pointer",
-                              opacity: busy ? 0.6 : 1,
-                            }}
-                          >
-                            Delete item
-                          </button>
-                        ) : null}
-                      </div>
-
+                      ))}
                       <button
                         type="button"
-                        onClick={() => {
-                          setItemModalOpen(false);
-                          setEditingItem(null);
-                        }}
-                        style={{ padding: "10px 12px", borderRadius: 12, border: `1px solid ${COLORS.border}`, background: "white" }}
+                        onClick={() => setItemExpire("")}
+                        style={{ padding: "6px 8px", borderRadius: 999, border: `1px solid ${COLORS.border}`, background: "white", cursor: "pointer" }}
                       >
-                        Cancel
+                        Clear
                       </button>
                     </div>
-
-                    <div style={{ marginTop: 6, color: COLORS.muted, fontSize: 12 }}>
-                      Tip: Press Enter to {editingItem ? "save" : "add"} (Esc to close on desktop)
-                    </div>
                   </div>
-                </form>
+                </div>
+
+                {/* ✅ 图片上传（回来了） */}
+                <div style={{ display: "grid", gap: 6 }}>
+                  <div style={{ fontWeight: 900 }}>Image</div>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0] ?? null;
+                      setItemImageFile(f);
+
+                      if (itemImageLocalUrl) URL.revokeObjectURL(itemImageLocalUrl);
+                      if (f) {
+                        const url = URL.createObjectURL(f);
+                        setItemImageLocalUrl(url);
+                      } else {
+                        setItemImageLocalUrl(null);
+                      }
+                    }}
+                    style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
+                  />
+                  <div style={{ color: COLORS.muted, fontSize: 12 }}>
+                    Selecting a file will upload it on Save.
+                    <br />
+                    Bucket: <b>{STORAGE_BUCKET}</b> (change in code if yours differs)
+                  </div>
+
+                  {/* 可选：移除图片（只是把 DB 字段清空，不删 storage 文件） */}
+                  {editingItem?.image_path ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        // 仅清空当前 editingItem 的 image_path（等你点 Save 才写入）
+                        setEditingItem((prev) => (prev ? { ...prev, image_path: null } : prev));
+                        if (itemImageLocalUrl) URL.revokeObjectURL(itemImageLocalUrl);
+                        setItemImageLocalUrl(null);
+                        setItemImageFile(null);
+                      }}
+                      style={{
+                        width: "fit-content",
+                        padding: "8px 10px",
+                        borderRadius: 12,
+                        border: `1px solid rgba(220,0,0,.25)`,
+                        background: "rgba(220,0,0,.06)",
+                        color: "crimson",
+                        fontWeight: 900,
+                        cursor: "pointer",
+                      }}
+                    >
+                      Remove current image
+                    </button>
+                  ) : null}
+                </div>
+
+                {/* ✅ 两级联动 location */}
+                <div style={{ display: "grid", gap: 10 }}>
+                  <div style={{ display: "grid", gap: 6 }}>
+                    <div style={{ fontWeight: 900 }}>Room</div>
+                    <select
+                      value={locationRoomId}
+                      onChange={(e) => setLocationRoomId(e.target.value)}
+                      style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
+                    >
+                      <option value="">Select a room</option>
+                      {hhRooms.map((r) => (
+                        <option key={r.id} value={r.id}>
+                          {r.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div style={{ display: "grid", gap: 6 }}>
+                    <div style={{ fontWeight: 900 }}>Cell (in selected room)</div>
+                    <select
+                      value={itemCellId}
+                      onChange={(e) => setItemCellId(e.target.value)}
+                      style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
+                      disabled={!locationRoomId}
+                    >
+                      <option value="">Select a cell</option>
+                      {roomCellOptions.map((opt) => (
+                        <option key={opt.id} value={opt.id}>
+                          {opt.code} · {opt.label}
+                        </option>
+                      ))}
+                    </select>
+
+                    {locationRoomId ? (
+                      <AutoFixCellSelection
+                        roomCellOptions={roomCellOptions}
+                        itemCellId={itemCellId}
+                        setItemCellId={setItemCellId}
+                      />
+                    ) : null}
+                  </div>
+                </div>
+
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", marginTop: 6 }}>
+                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                    <button
+                      type="submit"
+                      disabled={busy}
+                      style={{
+                        padding: "10px 12px",
+                        borderRadius: 12,
+                        fontWeight: 900,
+                        background: COLORS.blue,
+                        color: "white",
+                        border: "none",
+                        cursor: "pointer",
+                        opacity: busy ? 0.6 : 1,
+                      }}
+                    >
+                      {editingItem ? "Save changes" : "Add item"}
+                    </button>
+
+                    {editingItem ? (
+                      <button
+                        type="button"
+                        onClick={() => deleteItem(editingItem.id)}
+                        disabled={busy}
+                        style={{
+                          padding: "10px 12px",
+                          borderRadius: 12,
+                          fontWeight: 900,
+                          border: `1px solid rgba(220,0,0,.25)`,
+                          background: "rgba(220,0,0,.06)",
+                          color: "crimson",
+                          cursor: "pointer",
+                          opacity: busy ? 0.6 : 1,
+                        }}
+                      >
+                        Delete item
+                      </button>
+                    ) : null}
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => closeItemModal()}
+                    style={{ padding: "10px 12px", borderRadius: 12, border: `1px solid ${COLORS.border}`, background: "white" }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+
+                {busy ? <div style={{ color: COLORS.muted }}>Working…</div> : null}
+                <div style={{ color: COLORS.muted, fontSize: 12 }}>
+                  Tip: Press Enter to {editingItem ? "save" : "add"}.
+                </div>
               </div>
-            </div>
+            </form>
           </div>
         </div>
       ) : null}
@@ -1461,6 +1634,9 @@ export default function RoomPage() {
   );
 }
 
+/**
+ * ✅ 小组件：当 room 变化导致 itemCellId 不在该 room options 里时，自动选第一格
+ */
 function AutoFixCellSelection(props: {
   roomCellOptions: { id: string; code: string; label: string }[];
   itemCellId: string;
