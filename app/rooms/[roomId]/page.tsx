@@ -5,16 +5,8 @@ import { useParams, useRouter } from "next/navigation";
 import AuthGate from "@/src/components/AuthGate";
 import { supabase } from "@/src/lib/supabase";
 
-/**
- * ✅ Household selection model:
- * - default household is stored in public.profiles.default_household_id
- * - temporary "switch only" household is stored in localStorage.active_household_id
- */
 const ACTIVE_HOUSEHOLD_KEY = "active_household_id";
 
-/**
- * ✅ Color palette (oat + blue theme)
- */
 const COLORS = {
   oatBg: "#F4EBDD",
   oatCard: "#FBF6EC",
@@ -30,10 +22,10 @@ const COLORS = {
 type Household = { id: string; name: string; join_code: string | null };
 type Room = { id: string; household_id: string; name: string; position?: number };
 
+// ✅ 注意：这里移除了 household_id（因为你表里没有）
 type Column = {
   id: string;
   room_id: string;
-  household_id: string;
   name: string;
   position: number;
 };
@@ -41,9 +33,8 @@ type Column = {
 type Cell = {
   id: string;
   room_id: string;
-  household_id: string;
   column_id: string;
-  code: string; // e.g. K11 / user-defined
+  code: string;
   position: number;
 };
 
@@ -51,12 +42,11 @@ type Item = {
   id: string;
   household_id: string;
   room_id: string;
-  column_id?: string | null; // optional (depends on your schema)
-  cell_id: string; // UUID of room_cells.id
+  cell_id: string; // uuid -> room_cells.id
   name: string;
   quantity: number;
-  expire_date?: string | null; // ISO date string
-  image_url?: string | null;   // optional
+  expire_date?: string | null;
+  image_url?: string | null;
 };
 
 function safeGetLS(key: string): string | null {
@@ -74,10 +64,8 @@ function safeSetLS(key: string, val: string | null) {
 }
 
 function toDateOnly(d: string): Date {
-  // parse "YYYY-MM-DD" safely as local date
   return new Date(`${d}T00:00:00`);
 }
-
 function daysUntil(expireDate?: string | null): number | null {
   if (!expireDate) return null;
   const d = toDateOnly(expireDate);
@@ -86,16 +74,13 @@ function daysUntil(expireDate?: string | null): number | null {
   const diffMs = d.getTime() - today.getTime();
   return Math.floor(diffMs / (1000 * 60 * 60 * 24));
 }
-
 function urgencyRank(it: Item): number {
-  // smaller = more urgent
   const du = daysUntil(it.expire_date ?? null);
   if (du === null) return 3;
-  if (du < 0) return 0;     // expired
-  if (du <= 30) return 1;   // soon
-  return 2;                 // ok
+  if (du < 0) return 0;
+  if (du <= 30) return 1;
+  return 2;
 }
-
 function chipBg(it: Item): string {
   const du = daysUntil(it.expire_date ?? null);
   if (du === null) return COLORS.okBg;
@@ -103,7 +88,6 @@ function chipBg(it: Item): string {
   if (du <= 30) return COLORS.soonBg;
   return COLORS.okBg;
 }
-
 function sortItemsByExpiry(a: Item, b: Item): number {
   const ra = urgencyRank(a);
   const rb = urgencyRank(b);
@@ -112,7 +96,6 @@ function sortItemsByExpiry(a: Item, b: Item): number {
   const da = daysUntil(a.expire_date ?? null);
   const db = daysUntil(b.expire_date ?? null);
 
-  // within same bucket, earlier expire first (null goes last)
   if (da === null && db !== null) return 1;
   if (da !== null && db === null) return -1;
   if (da !== null && db !== null && da !== db) return da - db;
@@ -123,13 +106,6 @@ function sortItemsByExpiry(a: Item, b: Item): number {
 function normalize(s: string): string {
   return (s || "").toLowerCase().trim();
 }
-
-/**
- * A lightweight fuzzy-ish match without extra deps:
- * - exact substring match OR
- * - token overlap OR
- * - small edit distance (<=2) for short words
- */
 function levenshtein(a: string, b: string): number {
   const m = a.length;
   const n = b.length;
@@ -144,7 +120,6 @@ function levenshtein(a: string, b: string): number {
   }
   return dp[m][n];
 }
-
 function fuzzyMatch(query: string, text: string): boolean {
   const q = normalize(query);
   const t = normalize(text);
@@ -154,14 +129,12 @@ function fuzzyMatch(query: string, text: string): boolean {
   const qTokens = q.split(/\s+/).filter(Boolean);
   const tTokens = t.split(/\s+/).filter(Boolean);
 
-  // token overlap
   let hits = 0;
   for (const qt of qTokens) {
     if (tTokens.some((tt) => tt.includes(qt))) hits++;
   }
   if (hits > 0 && hits >= Math.max(1, Math.ceil(qTokens.length * 0.5))) return true;
 
-  // small edit distance for short query
   if (q.length <= 6) {
     const dist = levenshtein(q, t.slice(0, Math.min(t.length, 12)));
     if (dist <= 2) return true;
@@ -190,28 +163,23 @@ export default function RoomPage() {
   const [cells, setCells] = useState<Cell[]>([]);
   const [items, setItems] = useState<Item[]>([]);
 
-  // UI states
   const [search, setSearch] = useState("");
   const [busy, setBusy] = useState(false);
 
-  // column edit / add
   const [newColumnName, setNewColumnName] = useState("");
   const [editingColumnId, setEditingColumnId] = useState<string | null>(null);
   const [editingColumnName, setEditingColumnName] = useState("");
 
-  // item modal
   const [itemModalOpen, setItemModalOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<Item | null>(null);
   const [itemName, setItemName] = useState("");
   const [itemQty, setItemQty] = useState<number>(1);
-  const [itemExpire, setItemExpire] = useState<string>(""); // yyyy-mm-dd
+  const [itemExpire, setItemExpire] = useState<string>("");
   const [itemCellId, setItemCellId] = useState<string>("");
 
-  // move item chooser (searchable)
   const [moveQuery, setMoveQuery] = useState("");
   const [moveTargetCellId, setMoveTargetCellId] = useState<string>("");
 
-  // Refs for scrolling to cells (optional)
   const cellRefMap = useRef<Record<string, HTMLDivElement | null>>({});
 
   useEffect(() => {
@@ -225,7 +193,6 @@ export default function RoomPage() {
 
   async function ensureProfileRow() {
     if (!user?.id) return;
-    // requires profiles insert policy (we added earlier)
     await supabase.from("profiles").upsert({ user_id: user.id }, { onConflict: "user_id" });
   }
 
@@ -238,13 +205,11 @@ export default function RoomPage() {
     try {
       await ensureProfileRow();
 
-      // load memberships (policy allows reading own rows)
       const memRes = await supabase.from("household_members").select("household_id").eq("user_id", user.id);
       if (memRes.error) throw new Error(memRes.error.message);
       const mems = memRes.data ?? [];
       const myHids = new Set(mems.map((m: any) => m.household_id as string));
 
-      // default household
       const profRes = await supabase
         .from("profiles")
         .select("default_household_id")
@@ -255,14 +220,12 @@ export default function RoomPage() {
       const def = (profRes.data?.default_household_id as string | null) ?? null;
       setDefaultHouseholdId(def);
 
-      // active (temporary) household
       let active = safeGetLS(ACTIVE_HOUSEHOLD_KEY);
       if (active && !myHids.has(active)) {
         safeSetLS(ACTIVE_HOUSEHOLD_KEY, null);
         active = null;
       }
 
-      // choose household
       let hid: string | null = active || def;
 
       if (!hid) {
@@ -272,7 +235,6 @@ export default function RoomPage() {
         }
         if (mems.length === 1) {
           hid = mems[0].household_id;
-          // set default if missing
           const rpc = await supabase.rpc("set_default_household", { p_household_id: hid });
           if (rpc.error) throw new Error(rpc.error.message);
           setDefaultHouseholdId(hid);
@@ -284,13 +246,10 @@ export default function RoomPage() {
 
       setActiveHouseholdId(hid);
 
-      // load household info
       const hRes = await supabase.from("households").select("id,name,join_code").eq("id", hid).single();
       if (hRes.error) throw new Error(hRes.error.message);
       setHousehold(hRes.data as Household);
 
-      // load room (must belong to selected household)
-      // TODO: if your rooms table doesn't have household_id, remove this filter (but it should).
       const roomRes = await supabase
         .from("rooms")
         .select("id,household_id,name,position")
@@ -308,32 +267,27 @@ export default function RoomPage() {
       }
       setRoom(roomRes.data as Room);
 
-      // load columns
-      // TODO: if your table name differs, change "room_columns"
+      // ✅ 修复点：room_columns 不再 select/eq household_id
       const colRes = await supabase
         .from("room_columns")
-        .select("id,room_id,household_id,name,position")
+        .select("id,room_id,name,position")
         .eq("room_id", roomId)
-        .eq("household_id", hid)
         .order("position", { ascending: true });
 
       if (colRes.error) throw new Error(colRes.error.message);
       setColumns((colRes.data as Column[]) ?? []);
 
-      // load cells
-      // TODO: if your table name differs, change "room_cells"
+      // ✅ 修复点：room_cells 不再 select/eq household_id
       const cellRes = await supabase
         .from("room_cells")
-        .select("id,room_id,household_id,column_id,code,position")
+        .select("id,room_id,column_id,code,position")
         .eq("room_id", roomId)
-        .eq("household_id", hid)
         .order("position", { ascending: true });
 
       if (cellRes.error) throw new Error(cellRes.error.message);
       setCells((cellRes.data as Cell[]) ?? []);
 
-      // load items
-      // TODO: ensure these fields exist in items_v2; adjust names if needed
+      // items_v2 仍然用 household_id + room_id（你这里是有 household_id 的）
       const itemRes = await supabase
         .from("items_v2")
         .select("id,household_id,room_id,cell_id,name,quantity,expire_date,image_url")
@@ -370,7 +324,7 @@ export default function RoomPage() {
   const itemsByCell = useMemo(() => {
     const map: Record<string, Item[]> = {};
     for (const it of items) {
-      if (it.quantity !== undefined && it.quantity !== null && Number(it.quantity) <= 0) continue; // hide quantity<=0
+      if (Number(it.quantity ?? 0) <= 0) continue;
       map[it.cell_id] = map[it.cell_id] || [];
       map[it.cell_id].push(it);
     }
@@ -391,36 +345,35 @@ export default function RoomPage() {
   }, [columns, cells]);
 
   const expiring7 = useMemo(() => {
-    const list = items
+    return items
       .filter((it) => it.quantity > 0)
       .map((it) => ({ it, du: daysUntil(it.expire_date ?? null) }))
       .filter(({ du }) => du !== null && du >= 0 && du <= 7)
       .sort((a, b) => (a.du! - b.du!) || a.it.name.localeCompare(b.it.name));
-
-    return list;
   }, [items]);
 
   const expiring30 = useMemo(() => {
-    const list = items
+    return items
       .filter((it) => it.quantity > 0)
       .map((it) => ({ it, du: daysUntil(it.expire_date ?? null) }))
       .filter(({ du }) => du !== null && du >= 8 && du <= 30)
       .sort((a, b) => (a.du! - b.du!) || a.it.name.localeCompare(b.it.name));
-    return list;
   }, [items]);
+
+  function expLine(it: Item, du: number) {
+    const loc = cellIndex.get(it.cell_id);
+    const where = loc ? `${loc.colName} / ${loc.cellCode}` : "Unknown";
+    return `${it.name} — ${where} (in ${du}d)`;
+  }
 
   const filteredItemsSummary = useMemo(() => {
     const q = search.trim();
     if (!q) return [];
-    const hits = items
+    return items
       .filter((it) => it.quantity > 0)
       .filter((it) => fuzzyMatch(q, it.name))
       .slice(0, 50)
-      .map((it) => {
-        const loc = cellIndex.get(it.cell_id);
-        return { it, loc };
-      });
-    return hits;
+      .map((it) => ({ it, loc: cellIndex.get(it.cell_id) }));
   }, [search, items, cellIndex]);
 
   function openAddItem(cellId: string) {
@@ -430,7 +383,7 @@ export default function RoomPage() {
     setItemExpire("");
     setItemCellId(cellId);
     setMoveQuery("");
-    setMoveTargetCellId("");
+    setMoveTargetCellId(cellId);
     setItemModalOpen(true);
   }
 
@@ -449,17 +402,12 @@ export default function RoomPage() {
     if (!user?.id || !activeHouseholdId || !roomId) return;
 
     const nm = itemName.trim();
-    if (!nm) {
-      setErr("Item name required.");
-      return;
-    }
-    if (!itemCellId) {
-      setErr("Cell required.");
-      return;
-    }
+    if (!nm) return setErr("Item name required.");
+    if (!itemCellId) return setErr("Cell required.");
 
     setBusy(true);
     setErr(null);
+
     try {
       const payload: any = {
         household_id: activeHouseholdId,
@@ -498,7 +446,6 @@ export default function RoomPage() {
   }
 
   async function deleteItem(itemId: string) {
-    // per your requirement: no confirmation for deleting item
     setBusy(true);
     setErr(null);
     try {
@@ -526,7 +473,6 @@ export default function RoomPage() {
         .eq("id", editingItem.id)
         .select("id,household_id,room_id,cell_id,name,quantity,expire_date,image_url")
         .single();
-
       if (upd.error) throw new Error(upd.error.message);
       setItems((prev) => prev.map((x) => (x.id === editingItem.id ? (upd.data as Item) : x)));
       setItemCellId(target);
@@ -538,7 +484,7 @@ export default function RoomPage() {
   }
 
   async function addColumn() {
-    if (!activeHouseholdId || !roomId) return;
+    if (!roomId) return;
     const nm = newColumnName.trim();
     if (!nm) return;
 
@@ -546,11 +492,14 @@ export default function RoomPage() {
     setErr(null);
     try {
       const nextPos = (columns.reduce((m, c) => Math.max(m, c.position ?? 0), 0) || 0) + 1;
+
+      // ✅ 修复点：insert 不再带 household_id
       const ins = await supabase
         .from("room_columns")
-        .insert({ household_id: activeHouseholdId, room_id: roomId, name: nm, position: nextPos })
-        .select("id,room_id,household_id,name,position")
+        .insert({ room_id: roomId, name: nm, position: nextPos })
+        .select("id,room_id,name,position")
         .single();
+
       if (ins.error) throw new Error(ins.error.message);
       setColumns((prev) => [...prev, ins.data as Column].sort((a, b) => a.position - b.position));
       setNewColumnName("");
@@ -572,9 +521,10 @@ export default function RoomPage() {
         .from("room_columns")
         .update({ name: nm })
         .eq("id", colId)
-        .select("id,room_id,household_id,name,position")
+        .select("id,room_id,name,position")
         .single();
       if (upd.error) throw new Error(upd.error.message);
+
       setColumns((prev) => prev.map((c) => (c.id === colId ? (upd.data as Column) : c)));
       setEditingColumnId(null);
       setEditingColumnName("");
@@ -592,8 +542,8 @@ export default function RoomPage() {
     setBusy(true);
     setErr(null);
     try {
-      // delete items under cells in this column
       const colCells = cells.filter((c) => c.column_id === col.id).map((c) => c.id);
+
       if (colCells.length > 0) {
         const delItems = await supabase.from("items_v2").delete().in("cell_id", colCells);
         if (delItems.error) throw new Error(delItems.error.message);
@@ -605,7 +555,6 @@ export default function RoomPage() {
       const delCol = await supabase.from("room_columns").delete().eq("id", col.id);
       if (delCol.error) throw new Error(delCol.error.message);
 
-      // local state updates
       setItems((prev) => prev.filter((it) => !colCells.includes(it.cell_id)));
       setCells((prev) => prev.filter((c) => c.column_id !== col.id));
       setColumns((prev) => prev.filter((c) => c.id !== col.id));
@@ -617,27 +566,22 @@ export default function RoomPage() {
   }
 
   async function addCell(colId: string) {
-    if (!activeHouseholdId || !roomId) return;
+    if (!roomId) return;
 
-    // default new code = COLUMNNAME + running number, user can edit later if you have that UI elsewhere
     const existing = cells.filter((c) => c.column_id === colId);
     const nextPos = (existing.reduce((m, c) => Math.max(m, c.position ?? 0), 0) || 0) + 1;
-    const code = `C${nextPos}`; // TODO: if you want a nicer default code, change here
+    const code = `C${nextPos}`; // 你想更漂亮可以改
 
     setBusy(true);
     setErr(null);
     try {
+      // ✅ 修复点：insert 不再带 household_id
       const ins = await supabase
         .from("room_cells")
-        .insert({
-          household_id: activeHouseholdId,
-          room_id: roomId,
-          column_id: colId,
-          code,
-          position: nextPos,
-        })
-        .select("id,room_id,household_id,column_id,code,position")
+        .insert({ room_id: roomId, column_id: colId, code, position: nextPos })
+        .select("id,room_id,column_id,code,position")
         .single();
+
       if (ins.error) throw new Error(ins.error.message);
       setCells((prev) => [...prev, ins.data as Cell]);
     } catch (e: any) {
@@ -669,12 +613,6 @@ export default function RoomPage() {
     }
   }
 
-  function expLine(it: Item, du: number) {
-    const loc = cellIndex.get(it.cell_id);
-    const where = loc ? `${loc.colName} / ${loc.cellCode}` : "Unknown";
-    return `${it.name} — ${where} (in ${du}d)`;
-  }
-
   const moveCellOptions = useMemo(() => {
     const q = normalize(moveQuery);
     const colById = new Map(columns.map((c) => [c.id, c]));
@@ -699,7 +637,6 @@ export default function RoomPage() {
   return (
     <div style={{ minHeight: "100vh", background: COLORS.oatBg, color: COLORS.ink }}>
       <div style={{ padding: 16, maxWidth: 1200, margin: "0 auto" }}>
-        {/* Top bar */}
         <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 12 }}>
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
             <button
@@ -709,7 +646,6 @@ export default function RoomPage() {
               Back
             </button>
 
-            {/* ✅ You requested this: Change household button on room page */}
             <button
               onClick={() => router.push("/households")}
               style={{ padding: "8px 10px", borderRadius: 12, fontWeight: 900, border: `1px solid ${COLORS.border}`, background: "white" }}
@@ -717,9 +653,7 @@ export default function RoomPage() {
               Change household
             </button>
 
-            <div style={{ fontWeight: 900, fontSize: 18 }}>
-              {room?.name ?? "Room"}
-            </div>
+            <div style={{ fontWeight: 900, fontSize: 18 }}>{room?.name ?? "Room"}</div>
           </div>
 
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
@@ -742,7 +676,6 @@ export default function RoomPage() {
           </div>
         </div>
 
-        {/* Household label */}
         {household ? (
           <div style={{ marginBottom: 10, color: COLORS.muted }}>
             Household: <span style={{ fontWeight: 900, color: COLORS.ink }}>{household.name}</span>{" "}
@@ -756,7 +689,6 @@ export default function RoomPage() {
           </div>
         ) : null}
 
-        {/* Errors */}
         {err ? (
           <div style={{ marginBottom: 12, color: "crimson", fontWeight: 900 }}>
             {err}
@@ -775,16 +707,7 @@ export default function RoomPage() {
           <div style={{ opacity: 0.8 }}>Loading…</div>
         ) : (
           <>
-            {/* Expiring summary (text lists) */}
-            <div
-              style={{
-                background: COLORS.oatCard,
-                border: `1px solid ${COLORS.border}`,
-                borderRadius: 16,
-                padding: 14,
-                marginBottom: 12,
-              }}
-            >
+            <div style={{ background: COLORS.oatCard, border: `1px solid ${COLORS.border}`, borderRadius: 16, padding: 14, marginBottom: 12 }}>
               <div style={{ fontWeight: 900, marginBottom: 8 }}>Expiring soon</div>
 
               <div style={{ display: "grid", gap: 10, gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))" }}>
@@ -834,28 +757,13 @@ export default function RoomPage() {
               </div>
             </div>
 
-            {/* Search */}
-            <div
-              style={{
-                background: COLORS.oatCard,
-                border: `1px solid ${COLORS.border}`,
-                borderRadius: 16,
-                padding: 14,
-                marginBottom: 12,
-              }}
-            >
+            <div style={{ background: COLORS.oatCard, border: `1px solid ${COLORS.border}`, borderRadius: 16, padding: 14, marginBottom: 12 }}>
               <div style={{ fontWeight: 900, marginBottom: 8 }}>Search items</div>
               <input
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="Type an item name (fuzzy match supported)"
-                style={{
-                  width: "100%",
-                  padding: 10,
-                  borderRadius: 12,
-                  border: `1px solid ${COLORS.border}`,
-                  background: "white",
-                }}
+                style={{ width: "100%", padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}`, background: "white" }}
               />
               {search.trim() ? (
                 <div style={{ marginTop: 10, color: COLORS.muted }}>
@@ -873,9 +781,7 @@ export default function RoomPage() {
                           }}
                         >
                           <span style={{ fontWeight: 900, color: COLORS.ink }}>{it.name}</span>{" "}
-                          <span>
-                            — {loc ? `${loc.colName} / ${loc.cellCode}` : "Unknown"} · qty {it.quantity}
-                          </span>
+                          <span>— {loc ? `${loc.colName} / ${loc.cellCode}` : "Unknown"} · qty {it.quantity}</span>
                         </div>
                       ))}
                     </div>
@@ -884,29 +790,14 @@ export default function RoomPage() {
               ) : null}
             </div>
 
-            {/* Column add */}
-            <div
-              style={{
-                background: COLORS.oatCard,
-                border: `1px solid ${COLORS.border}`,
-                borderRadius: 16,
-                padding: 14,
-                marginBottom: 12,
-              }}
-            >
+            <div style={{ background: COLORS.oatCard, border: `1px solid ${COLORS.border}`, borderRadius: 16, padding: 14, marginBottom: 12 }}>
               <div style={{ fontWeight: 900, marginBottom: 8 }}>Add column</div>
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                 <input
                   value={newColumnName}
                   onChange={(e) => setNewColumnName(e.target.value)}
                   placeholder="Example: Pantry / Dresser / Shelf"
-                  style={{
-                    flex: "1 1 260px",
-                    padding: 10,
-                    borderRadius: 12,
-                    border: `1px solid ${COLORS.border}`,
-                    background: "white",
-                  }}
+                  style={{ flex: "1 1 260px", padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}`, background: "white" }}
                 />
                 <button
                   onClick={addColumn}
@@ -942,16 +833,7 @@ export default function RoomPage() {
               </div>
             </div>
 
-            {/* Layout: horizontally scroll columns on mobile, top-aligned */}
-            <div
-              style={{
-                display: "flex",
-                gap: 12,
-                alignItems: "flex-start",
-                overflowX: "auto",
-                paddingBottom: 6,
-              }}
-            >
+            <div style={{ display: "flex", gap: 12, alignItems: "flex-start", overflowX: "auto", paddingBottom: 6 }}>
               {columnsWithCells.map(({ col, cells }) => (
                 <div
                   key={col.id}
@@ -968,20 +850,13 @@ export default function RoomPage() {
                     gap: 10,
                   }}
                 >
-                  {/* Column header */}
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
                     {editingColumnId === col.id ? (
                       <div style={{ display: "flex", gap: 8, alignItems: "center", width: "100%" }}>
                         <input
                           value={editingColumnName}
                           onChange={(e) => setEditingColumnName(e.target.value)}
-                          style={{
-                            flex: 1,
-                            padding: 8,
-                            borderRadius: 10,
-                            border: `1px solid ${COLORS.border}`,
-                            background: "white",
-                          }}
+                          style={{ flex: 1, padding: 8, borderRadius: 10, border: `1px solid ${COLORS.border}`, background: "white" }}
                         />
                         <button
                           onClick={() => renameColumn(col.id)}
@@ -1004,13 +879,7 @@ export default function RoomPage() {
                             setEditingColumnId(null);
                             setEditingColumnName("");
                           }}
-                          style={{
-                            padding: "8px 10px",
-                            borderRadius: 10,
-                            border: `1px solid ${COLORS.border}`,
-                            background: "white",
-                            cursor: "pointer",
-                          }}
+                          style={{ padding: "8px 10px", borderRadius: 10, border: `1px solid ${COLORS.border}`, background: "white", cursor: "pointer" }}
                         >
                           Cancel
                         </button>
@@ -1024,13 +893,7 @@ export default function RoomPage() {
                               setEditingColumnId(col.id);
                               setEditingColumnName(col.name);
                             }}
-                            style={{
-                              padding: "6px 8px",
-                              borderRadius: 10,
-                              border: `1px solid ${COLORS.border}`,
-                              background: "white",
-                              cursor: "pointer",
-                            }}
+                            style={{ padding: "6px 8px", borderRadius: 10, border: `1px solid ${COLORS.border}`, background: "white", cursor: "pointer" }}
                           >
                             Edit
                           </button>
@@ -1053,7 +916,6 @@ export default function RoomPage() {
                     )}
                   </div>
 
-                  {/* Cells list */}
                   <div style={{ display: "grid", gap: 10 }}>
                     {cells.map((cell) => {
                       const list = itemsByCell[cell.id] || [];
@@ -1063,26 +925,14 @@ export default function RoomPage() {
                           ref={(el) => {
                             cellRefMap.current[cell.id] = el;
                           }}
-                          style={{
-                            border: `1px solid ${COLORS.border}`,
-                            borderRadius: 14,
-                            background: "white",
-                            padding: 10,
-                          }}
+                          style={{ border: `1px solid ${COLORS.border}`, borderRadius: 14, background: "white", padding: 10 }}
                         >
-                          {/* Cell header */}
                           <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
                             <div style={{ fontWeight: 900 }}>{cell.code}</div>
                             <div style={{ display: "flex", gap: 8 }}>
                               <button
                                 onClick={() => openAddItem(cell.id)}
-                                style={{
-                                  padding: "6px 8px",
-                                  borderRadius: 10,
-                                  border: `1px solid ${COLORS.border}`,
-                                  background: "white",
-                                  cursor: "pointer",
-                                }}
+                                style={{ padding: "6px 8px", borderRadius: 10, border: `1px solid ${COLORS.border}`, background: "white", cursor: "pointer" }}
                               >
                                 + Item
                               </button>
@@ -1103,7 +953,6 @@ export default function RoomPage() {
                             </div>
                           </div>
 
-                          {/* Items chips */}
                           <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 6 }}>
                             {list.length === 0 ? (
                               <div style={{ color: COLORS.muted, fontSize: 12 }}>Empty</div>
@@ -1150,7 +999,6 @@ export default function RoomPage() {
                     })}
                   </div>
 
-                  {/* ✅ You asked: Add cell button at bottom of column */}
                   <button
                     onClick={() => addCell(col.id)}
                     disabled={busy}
@@ -1174,7 +1022,6 @@ export default function RoomPage() {
         )}
       </div>
 
-      {/* Item modal */}
       {itemModalOpen ? (
         <div
           style={{
@@ -1200,9 +1047,7 @@ export default function RoomPage() {
             }}
           >
             <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
-              <div style={{ fontWeight: 900, fontSize: 16 }}>
-                {editingItem ? "Edit item" : "Add item"}
-              </div>
+              <div style={{ fontWeight: 900, fontSize: 16 }}>{editingItem ? "Edit item" : "Add item"}</div>
               <button
                 onClick={() => setItemModalOpen(false)}
                 style={{ padding: "6px 8px", borderRadius: 10, border: `1px solid ${COLORS.border}`, background: "white" }}
@@ -1258,26 +1103,14 @@ export default function RoomPage() {
                           const dd = String(d.getDate()).padStart(2, "0");
                           setItemExpire(`${yyyy}-${mm}-${dd}`);
                         }}
-                        style={{
-                          padding: "6px 8px",
-                          borderRadius: 999,
-                          border: `1px solid ${COLORS.border}`,
-                          background: "white",
-                          cursor: "pointer",
-                        }}
+                        style={{ padding: "6px 8px", borderRadius: 999, border: `1px solid ${COLORS.border}`, background: "white", cursor: "pointer" }}
                       >
                         +{x.label}
                       </button>
                     ))}
                     <button
                       onClick={() => setItemExpire("")}
-                      style={{
-                        padding: "6px 8px",
-                        borderRadius: 999,
-                        border: `1px solid ${COLORS.border}`,
-                        background: "white",
-                        cursor: "pointer",
-                      }}
+                      style={{ padding: "6px 8px", borderRadius: 999, border: `1px solid ${COLORS.border}`, background: "white", cursor: "pointer" }}
                     >
                       Clear
                     </button>
@@ -1285,7 +1118,6 @@ export default function RoomPage() {
                 </div>
               </div>
 
-              {/* Location (cell) */}
               <div style={{ display: "grid", gap: 6 }}>
                 <div style={{ fontWeight: 900 }}>Cell</div>
                 <select
@@ -1353,7 +1185,6 @@ export default function RoomPage() {
                 </div>
               ) : null}
 
-              {/* Actions */}
               <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", marginTop: 6 }}>
                 <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                   <button
