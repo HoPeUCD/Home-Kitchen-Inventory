@@ -153,6 +153,11 @@ function normalizeItemRow(row: any): Item {
   };
 }
 
+/** 防止 Enter 在 IME 输入中误触发提交 */
+function isComposingEvent(e: any): boolean {
+  return Boolean(e?.nativeEvent?.isComposing) || Boolean(e?.isComposing);
+}
+
 export default function RoomPage() {
   const router = useRouter();
   const params = useParams();
@@ -196,7 +201,7 @@ export default function RoomPage() {
   const [itemExpire, setItemExpire] = useState<string>("");
   const [itemCellId, setItemCellId] = useState<string>("");
 
-  // ✅ 新增：两级 location 联动：先选 room，再选 cell
+  // 两级联动 location：先选 room，再选 cell
   const [locationRoomId, setLocationRoomId] = useState<string>("");
 
   const cellRefMap = useRef<Record<string, HTMLDivElement | null>>({});
@@ -209,6 +214,19 @@ export default function RoomPage() {
     const { data: sub } = supabase.auth.onAuthStateChange((_evt, s) => setSession(s));
     return () => sub.subscription.unsubscribe();
   }, []);
+
+  // Esc 关闭 modal（桌面很实用；移动端不影响）
+  useEffect(() => {
+    if (!itemModalOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setItemModalOpen(false);
+        setEditingItem(null);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [itemModalOpen]);
 
   async function ensureProfileRow() {
     if (!user?.id) return;
@@ -269,7 +287,7 @@ export default function RoomPage() {
       if (hRes.error) throw new Error(hRes.error.message);
       setHousehold(hRes.data as Household);
 
-      // Load household-level rooms/columns/cells
+      // Household rooms/columns/cells
       const hhRoomRes = await supabase
         .from("rooms")
         .select("id,household_id,name,position")
@@ -341,7 +359,6 @@ export default function RoomPage() {
       setColumns(cols);
 
       const curColIds = cols.map((c) => c.id);
-      let curCells: Cell[] = [];
       if (curColIds.length === 0) {
         setCells([]);
       } else {
@@ -352,11 +369,10 @@ export default function RoomPage() {
           .order("column_id", { ascending: true })
           .order("position", { ascending: true });
         if (cellRes.error) throw new Error(cellRes.error.message);
-        curCells = (cellRes.data as Cell[]) ?? [];
-        setCells(curCells);
+        setCells((cellRes.data as Cell[]) ?? []);
       }
 
-      // Items for entire household (so expiring lists & search can span rooms)
+      // Items across household
       const hhCellIds = allCells.map((c) => c.id);
       if (hhCellIds.length === 0) {
         setItems([]);
@@ -393,7 +409,6 @@ export default function RoomPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id, roomId]);
 
-  // Current room columns with cells
   const columnsWithCells = useMemo(() => {
     const byCol: Record<string, Cell[]> = {};
     for (const c of cells) {
@@ -404,7 +419,6 @@ export default function RoomPage() {
     return columns.map((col) => ({ col, cells: byCol[col.id] || [] }));
   }, [columns, cells]);
 
-  // Items in current-room cells only (for per-cell chips rendering)
   const itemsByCell = useMemo(() => {
     const map: Record<string, Item[]> = {};
     const curCellIds = new Set(cells.map((c) => c.id));
@@ -418,11 +432,9 @@ export default function RoomPage() {
     return map;
   }, [items, cells]);
 
-  // Household-level index: cell -> room/col/code label
   const hhIndex = useMemo(() => {
     const roomById = new Map(hhRooms.map((r) => [r.id, r]));
     const colById = new Map(hhColumns.map((c) => [c.id, c]));
-
     const m = new Map<
       string,
       { roomId: string; roomName: string; colId: string; colName: string; cellCode: string; label: string }
@@ -446,7 +458,6 @@ export default function RoomPage() {
     return m;
   }, [hhRooms, hhColumns, hhCells]);
 
-  // Expiring list across household
   const expiring0to7 = useMemo(() => {
     return items
       .filter((it) => it.qty > 0)
@@ -472,7 +483,6 @@ export default function RoomPage() {
   function goToCell(it: Item) {
     const loc = hhIndex.get(it.cell_id);
     if (!loc?.roomId) return;
-
     if (loc.roomId === roomId) {
       const ref = cellRefMap.current[it.cell_id];
       if (ref) ref.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
@@ -481,7 +491,6 @@ export default function RoomPage() {
     router.push(`/rooms/${loc.roomId}`);
   }
 
-  // Search results across household
   const filteredItemsSummary = useMemo(() => {
     const q = search.trim();
     if (!q) return [];
@@ -492,12 +501,11 @@ export default function RoomPage() {
       .map((it) => ({ it, loc: hhIndex.get(it.cell_id) }));
   }, [search, items, hhIndex]);
 
-  // ✅ 两级联动：选择 room 后，只显示该 room 的 cells；cells 按 code 排序
+  // 两级联动：Room -> Cells (按 code 字母顺序 / numeric)
   const roomCellOptions = useMemo(() => {
     const rid = locationRoomId;
     if (!rid) return [];
 
-    // 选出属于这个 room 的 cells（通过 hhIndex 反查）
     const list = hhCells
       .map((c) => {
         const loc = hhIndex.get(c.id);
@@ -506,7 +514,6 @@ export default function RoomPage() {
       })
       .filter(Boolean) as { cell: Cell; loc: any }[];
 
-    // 按 code 字母顺序（带 numeric，让 K2 排在 K11 前）
     list.sort((a, b) => {
       const c = a.loc.cellCode.localeCompare(b.loc.cellCode, undefined, { numeric: true, sensitivity: "base" });
       if (c !== 0) return c;
@@ -527,7 +534,6 @@ export default function RoomPage() {
     setItemExpire("");
     setItemCellId(cellId);
 
-    // 默认 room：当前页面 room
     setLocationRoomId(roomId);
 
     setItemModalOpen(true);
@@ -540,7 +546,6 @@ export default function RoomPage() {
     setItemExpire(it.expires_at ?? "");
     setItemCellId(it.cell_id);
 
-    // 默认 room：该 item 当前所在 room
     const loc = hhIndex.get(it.cell_id);
     setLocationRoomId(loc?.roomId || roomId);
 
@@ -599,8 +604,8 @@ export default function RoomPage() {
     }
   }
 
-  // ✅ Delete：如果在 edit modal 里删当前 item，成功后关闭 modal
-  async function deleteItem(itemId: string, closeModalOnSuccess?: boolean) {
+  // Delete：成功后关掉 edit modal
+  async function deleteItem(itemId: string) {
     setBusy(true);
     setErr(null);
     try {
@@ -609,10 +614,9 @@ export default function RoomPage() {
 
       setItems((prev) => prev.filter((x) => x.id !== itemId));
 
-      if (closeModalOnSuccess) {
-        setItemModalOpen(false);
-        setEditingItem(null);
-      }
+      // ✅ 你要求：delete 后直接关闭 edit
+      setItemModalOpen(false);
+      setEditingItem(null);
     } catch (e: any) {
       setErr(e?.message ?? "Delete failed.");
     } finally {
@@ -1209,206 +1213,246 @@ export default function RoomPage() {
         )}
       </div>
 
-      {/* Item modal */}
+      {/* ✅ Modal: mobile/ipad/desktop 优化 + Enter submit */}
       {itemModalOpen ? (
         <div
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(0,0,0,.35)",
-            display: "flex",
-            justifyContent: "center",
-            alignItems: "center",
-            padding: 16,
-            zIndex: 50,
+          className="fixed inset-0 z-50 bg-black/40 p-3 sm:p-6 overflow-y-auto"
+          onClick={() => {
+            setItemModalOpen(false);
+            setEditingItem(null);
           }}
-          onClick={() => setItemModalOpen(false)}
         >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            style={{
-              width: "min(760px, 100%)",
-              background: "white",
-              borderRadius: 18,
-              border: `1px solid ${COLORS.border}`,
-              padding: 14,
-            }}
-          >
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
-              <div style={{ fontWeight: 900, fontSize: 16 }}>{editingItem ? "Edit item" : "Add item"}</div>
-              <button
-                onClick={() => setItemModalOpen(false)}
-                style={{ padding: "6px 8px", borderRadius: 10, border: `1px solid ${COLORS.border}`, background: "white" }}
+          {/* 让移动端从顶部开始展示，避免键盘弹出时把内容顶没 */}
+          <div className="mx-auto w-full max-w-2xl flex justify-center sm:items-center items-start">
+            <div
+              className="w-full bg-white rounded-2xl border border-black/10 shadow-xl overflow-hidden"
+              style={{
+                // 关键：用 100dvh 适配移动端动态视口（键盘弹出）
+                maxHeight: "calc(100dvh - 24px)",
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* Header sticky：永远能看到 Close */}
+              <div
+                className="sticky top-0 z-10 bg-white border-b border-black/10"
+                style={{ padding: 14 }}
               >
-                Close
-              </button>
-            </div>
-
-            <div style={{ display: "grid", gap: 10, marginTop: 12 }}>
-              <div style={{ display: "grid", gap: 6 }}>
-                <div style={{ fontWeight: 900 }}>Name</div>
-                <input
-                  value={itemName}
-                  onChange={(e) => setItemName(e.target.value)}
-                  placeholder="e.g. Olive oil"
-                  style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
-                />
-              </div>
-
-              <div style={{ display: "grid", gap: 6, gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))" }}>
-                <div style={{ display: "grid", gap: 6 }}>
-                  <div style={{ fontWeight: 900 }}>Quantity</div>
-                  <input
-                    type="number"
-                    value={itemQty}
-                    onChange={(e) => setItemQty(Number(e.target.value))}
-                    style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
-                  />
-                </div>
-
-                <div style={{ display: "grid", gap: 6 }}>
-                  <div style={{ fontWeight: 900 }}>Expire date</div>
-                  <input
-                    type="date"
-                    value={itemExpire}
-                    onChange={(e) => setItemExpire(e.target.value)}
-                    style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
-                  />
-                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                    {[
-                      { label: "1 week", days: 7 },
-                      { label: "1 month", days: 30 },
-                      { label: "3 months", days: 90 },
-                      { label: "1 year", days: 365 },
-                    ].map((x) => (
-                      <button
-                        key={x.label}
-                        onClick={() => {
-                          const now = new Date();
-                          const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + x.days);
-                          const yyyy = d.getFullYear();
-                          const mm = String(d.getMonth() + 1).padStart(2, "0");
-                          const dd = String(d.getDate()).padStart(2, "0");
-                          setItemExpire(`${yyyy}-${mm}-${dd}`);
-                        }}
-                        style={{ padding: "6px 8px", borderRadius: 999, border: `1px solid ${COLORS.border}`, background: "white", cursor: "pointer" }}
-                      >
-                        +{x.label}
-                      </button>
-                    ))}
-                    <button
-                      onClick={() => setItemExpire("")}
-                      style={{ padding: "6px 8px", borderRadius: 999, border: `1px solid ${COLORS.border}`, background: "white", cursor: "pointer" }}
-                    >
-                      Clear
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              {/* ✅ 两级联动 location */}
-              <div style={{ display: "grid", gap: 10 }}>
-                <div style={{ display: "grid", gap: 6 }}>
-                  <div style={{ fontWeight: 900 }}>Room</div>
-                  <select
-                    value={locationRoomId}
-                    onChange={(e) => {
-                      const rid = e.target.value;
-                      setLocationRoomId(rid);
-
-                      // 选新 room 后：自动选该 room 第一格（如果有）
-                      // 这样不会出现 room 变了但 cell 还在旧 room 的情况
-                      setTimeout(() => {
-                        // 依赖 roomCellOptions 的计算需要 state 更新后才稳定，所以用 setTimeout(0)
-                        // 如果你不喜欢 setTimeout，我也可以换成 useEffect 监听 locationRoomId
-                      }, 0);
-                    }}
-                    style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
-                  >
-                    <option value="">Select a room</option>
-                    {hhRooms.map((r) => (
-                      <option key={r.id} value={r.id}>
-                        {r.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div style={{ display: "grid", gap: 6 }}>
-                  <div style={{ fontWeight: 900 }}>Cell (in selected room)</div>
-                  <select
-                    value={itemCellId}
-                    onChange={(e) => setItemCellId(e.target.value)}
-                    style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
-                    disabled={!locationRoomId}
-                  >
-                    <option value="">Select a cell</option>
-                    {roomCellOptions.map((opt) => (
-                      <option key={opt.id} value={opt.id}>
-                        {opt.code} · {opt.label}
-                      </option>
-                    ))}
-                  </select>
-
-                  {/* 当切换 room 后，如果当前 itemCellId 不属于该 room，自动选第一格 */}
-                  {locationRoomId ? (
-                    <AutoFixCellSelection
-                      roomCellOptions={roomCellOptions}
-                      itemCellId={itemCellId}
-                      setItemCellId={setItemCellId}
-                    />
-                  ) : null}
-                </div>
-              </div>
-
-              <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", marginTop: 6 }}>
-                <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
+                  <div style={{ fontWeight: 900, fontSize: 16 }}>{editingItem ? "Edit item" : "Add item"}</div>
                   <button
-                    onClick={saveItem}
-                    disabled={busy}
-                    style={{
-                      padding: "10px 12px",
-                      borderRadius: 12,
-                      fontWeight: 900,
-                      background: COLORS.blue,
-                      color: "white",
-                      border: "none",
-                      cursor: "pointer",
-                      opacity: busy ? 0.6 : 1,
+                    onClick={() => {
+                      setItemModalOpen(false);
+                      setEditingItem(null);
                     }}
+                    style={{ padding: "6px 8px", borderRadius: 10, border: `1px solid ${COLORS.border}`, background: "white" }}
                   >
-                    {editingItem ? "Save changes" : "Add item"}
+                    Close
                   </button>
-
-                  {editingItem ? (
-                    <button
-                      onClick={() => deleteItem(editingItem.id, true)}
-                      disabled={busy}
-                      style={{
-                        padding: "10px 12px",
-                        borderRadius: 12,
-                        fontWeight: 900,
-                        border: `1px solid rgba(220,0,0,.25)`,
-                        background: "rgba(220,0,0,.06)",
-                        color: "crimson",
-                        cursor: "pointer",
-                        opacity: busy ? 0.6 : 1,
-                      }}
-                    >
-                      Delete item
-                    </button>
-                  ) : null}
                 </div>
-
-                <button
-                  onClick={() => setItemModalOpen(false)}
-                  style={{ padding: "10px 12px", borderRadius: 12, border: `1px solid ${COLORS.border}`, background: "white" }}
-                >
-                  Cancel
-                </button>
               </div>
 
-              {busy ? <div style={{ color: COLORS.muted }}>Working…</div> : null}
+              {/* Content scroll area */}
+              <div
+                className="overflow-y-auto"
+                style={{
+                  padding: 14,
+                  WebkitOverflowScrolling: "touch",
+                  // 留出 footer 的高度，避免最后一行被按钮遮挡
+                  paddingBottom: 96,
+                }}
+              >
+                {/* ✅ 用 form + onSubmit 实现 Enter 提交 */}
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    if (busy) return;
+                    void saveItem();
+                  }}
+                  onKeyDown={(e) => {
+                    // Enter 提交（排除 IME composition，避免中文输入法误提交）
+                    if (e.key === "Enter" && !isComposingEvent(e)) {
+                      const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
+                      if (tag === "textarea") return;
+                      // select 的 Enter 有时用于打开/选择；这里依然允许 submit（符合你要求）
+                      e.preventDefault();
+                      if (!busy) void saveItem();
+                    }
+                  }}
+                >
+                  <div style={{ display: "grid", gap: 10 }}>
+                    <div style={{ display: "grid", gap: 6 }}>
+                      <div style={{ fontWeight: 900 }}>Name</div>
+                      <input
+                        value={itemName}
+                        onChange={(e) => setItemName(e.target.value)}
+                        placeholder="e.g. Olive oil"
+                        style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
+                      />
+                    </div>
+
+                    <div style={{ display: "grid", gap: 6, gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))" }}>
+                      <div style={{ display: "grid", gap: 6 }}>
+                        <div style={{ fontWeight: 900 }}>Quantity</div>
+                        <input
+                          type="number"
+                          value={itemQty}
+                          onChange={(e) => setItemQty(Number(e.target.value))}
+                          style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
+                        />
+                      </div>
+
+                      <div style={{ display: "grid", gap: 6 }}>
+                        <div style={{ fontWeight: 900 }}>Expire date</div>
+                        <input
+                          type="date"
+                          value={itemExpire}
+                          onChange={(e) => setItemExpire(e.target.value)}
+                          style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
+                        />
+                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                          {[
+                            { label: "1 week", days: 7 },
+                            { label: "1 month", days: 30 },
+                            { label: "3 months", days: 90 },
+                            { label: "1 year", days: 365 },
+                          ].map((x) => (
+                            <button
+                              key={x.label}
+                              type="button"
+                              onClick={() => {
+                                const now = new Date();
+                                const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + x.days);
+                                const yyyy = d.getFullYear();
+                                const mm = String(d.getMonth() + 1).padStart(2, "0");
+                                const dd = String(d.getDate()).padStart(2, "0");
+                                setItemExpire(`${yyyy}-${mm}-${dd}`);
+                              }}
+                              style={{ padding: "6px 8px", borderRadius: 999, border: `1px solid ${COLORS.border}`, background: "white", cursor: "pointer" }}
+                            >
+                              +{x.label}
+                            </button>
+                          ))}
+                          <button
+                            type="button"
+                            onClick={() => setItemExpire("")}
+                            style={{ padding: "6px 8px", borderRadius: 999, border: `1px solid ${COLORS.border}`, background: "white", cursor: "pointer" }}
+                          >
+                            Clear
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* 两级联动 location */}
+                    <div style={{ display: "grid", gap: 10 }}>
+                      <div style={{ display: "grid", gap: 6 }}>
+                        <div style={{ fontWeight: 900 }}>Room</div>
+                        <select
+                          value={locationRoomId}
+                          onChange={(e) => setLocationRoomId(e.target.value)}
+                          style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
+                        >
+                          <option value="">Select a room</option>
+                          {hhRooms.map((r) => (
+                            <option key={r.id} value={r.id}>
+                              {r.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div style={{ display: "grid", gap: 6 }}>
+                        <div style={{ fontWeight: 900 }}>Cell (in selected room)</div>
+                        <select
+                          value={itemCellId}
+                          onChange={(e) => setItemCellId(e.target.value)}
+                          style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
+                          disabled={!locationRoomId}
+                        >
+                          <option value="">Select a cell</option>
+                          {roomCellOptions.map((opt) => (
+                            <option key={opt.id} value={opt.id}>
+                              {opt.code} · {opt.label}
+                            </option>
+                          ))}
+                        </select>
+
+                        {locationRoomId ? (
+                          <AutoFixCellSelection
+                            roomCellOptions={roomCellOptions}
+                            itemCellId={itemCellId}
+                            setItemCellId={setItemCellId}
+                          />
+                        ) : null}
+                      </div>
+                    </div>
+
+                    {busy ? <div style={{ color: COLORS.muted }}>Working…</div> : null}
+                  </div>
+
+                  {/* Footer sticky：按钮永远在屏幕底部可见 */}
+                  <div
+                    className="sticky bottom-0 z-10 bg-white border-t border-black/10"
+                    style={{ padding: 14 }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+                      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                        <button
+                          type="submit"
+                          disabled={busy}
+                          style={{
+                            padding: "10px 12px",
+                            borderRadius: 12,
+                            fontWeight: 900,
+                            background: COLORS.blue,
+                            color: "white",
+                            border: "none",
+                            cursor: "pointer",
+                            opacity: busy ? 0.6 : 1,
+                          }}
+                        >
+                          {editingItem ? "Save changes" : "Add item"}
+                        </button>
+
+                        {editingItem ? (
+                          <button
+                            type="button"
+                            onClick={() => deleteItem(editingItem.id)}
+                            disabled={busy}
+                            style={{
+                              padding: "10px 12px",
+                              borderRadius: 12,
+                              fontWeight: 900,
+                              border: `1px solid rgba(220,0,0,.25)`,
+                              background: "rgba(220,0,0,.06)",
+                              color: "crimson",
+                              cursor: "pointer",
+                              opacity: busy ? 0.6 : 1,
+                            }}
+                          >
+                            Delete item
+                          </button>
+                        ) : null}
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setItemModalOpen(false);
+                          setEditingItem(null);
+                        }}
+                        style={{ padding: "10px 12px", borderRadius: 12, border: `1px solid ${COLORS.border}`, background: "white" }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+
+                    <div style={{ marginTop: 6, color: COLORS.muted, fontSize: 12 }}>
+                      Tip: Press Enter to {editingItem ? "save" : "add"} (Esc to close on desktop)
+                    </div>
+                  </div>
+                </form>
+              </div>
             </div>
           </div>
         </div>
@@ -1417,10 +1461,6 @@ export default function RoomPage() {
   );
 }
 
-/**
- * ✅ 小组件：当 room 变化导致 itemCellId 不在该 room 的 options 里时，自动选第一格
- * 这样不会出现“Room=Bathroom，但 Cell 仍然是 Kitchen 的某格”的不一致。
- */
 function AutoFixCellSelection(props: {
   roomCellOptions: { id: string; code: string; label: string }[];
   itemCellId: string;
