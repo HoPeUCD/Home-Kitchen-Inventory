@@ -6,24 +6,15 @@ import AuthGate from "@/src/components/AuthGate";
 import { supabase } from "@/src/lib/supabase";
 
 /** =========================
- *  CONFIG: 按你真实数据库列名修改
+ *  CONFIG: 你的真实数据库列名（已按你最新确认）
  *  ========================= */
 const ITEMS_TABLE = "items_v2";
-
-// items_v2 的字段名（把这里改成你真实列名）
 const ITEM_ID_FIELD = "id";
 const ITEM_HOUSEHOLD_FIELD = "household_id";
 const ITEM_CELL_FIELD = "cell_id";
 const ITEM_NAME_FIELD = "name";
-
-// ❗你现在的报错点：items_v2 没有 quantity
-// 把这里改成你真实的数量字段名：例如 "qty" / "count" / "amount"
 const ITEM_QTY_FIELD = "qty";
-
-// expire date 字段名（你之前一直用 expire_date；如果你表里叫 expires_at / expiry_date 就改这里）
 const ITEM_EXPIRE_FIELD = "expires_at";
-
-// 图片字段（如果有）
 const ITEM_IMG_FIELD = "image_path";
 
 const ACTIVE_HOUSEHOLD_KEY = "active_household_id";
@@ -42,19 +33,17 @@ const COLORS = {
 
 type Household = { id: string; name: string; join_code: string | null };
 type Room = { id: string; household_id: string; name: string; position?: number };
-
 type Column = { id: string; room_id: string; name: string; position: number };
 type Cell = { id: string; column_id: string; code: string; position: number };
 
-// 统一成前端用的 Item 结构（不依赖数据库真实字段名）
 type Item = {
   id: string;
   household_id: string;
   cell_id: string;
   name: string;
   qty: number;
-  expire_date?: string | null;
-  image_url?: string | null;
+  expires_at?: string | null;
+  image_path?: string | null;
 };
 
 function safeGetLS(key: string): string | null {
@@ -74,23 +63,23 @@ function safeSetLS(key: string, val: string | null) {
 function toDateOnly(d: string): Date {
   return new Date(`${d}T00:00:00`);
 }
-function daysUntil(expireDate?: string | null): number | null {
-  if (!expireDate) return null;
-  const d = toDateOnly(expireDate);
+function daysUntil(expiresAt?: string | null): number | null {
+  if (!expiresAt) return null;
+  const d = toDateOnly(expiresAt);
   const now = new Date();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const diffMs = d.getTime() - today.getTime();
   return Math.floor(diffMs / (1000 * 60 * 60 * 24));
 }
 function urgencyRank(it: Item): number {
-  const du = daysUntil(it.expire_date ?? null);
-  if (du === null) return 3;
-  if (du < 0) return 0;
-  if (du <= 30) return 1;
-  return 2;
+  const du = daysUntil(it.expires_at ?? null);
+  if (du === null) return 3; // no expire date
+  if (du < 0) return 0; // expired
+  if (du <= 30) return 1; // soon
+  return 2; // ok
 }
 function chipBg(it: Item): string {
-  const du = daysUntil(it.expire_date ?? null);
+  const du = daysUntil(it.expires_at ?? null);
   if (du === null) return COLORS.okBg;
   if (du < 0) return COLORS.expiredBg;
   if (du <= 30) return COLORS.soonBg;
@@ -101,8 +90,8 @@ function sortItemsByExpiry(a: Item, b: Item): number {
   const rb = urgencyRank(b);
   if (ra !== rb) return ra - rb;
 
-  const da = daysUntil(a.expire_date ?? null);
-  const db = daysUntil(b.expire_date ?? null);
+  const da = daysUntil(a.expires_at ?? null);
+  const db = daysUntil(b.expires_at ?? null);
 
   if (da === null && db !== null) return 1;
   if (da !== null && db === null) return -1;
@@ -153,17 +142,15 @@ function fuzzyMatch(query: string, text: string): boolean {
 
 // 把 DB row 映射为前端 Item
 function normalizeItemRow(row: any): Item {
-  const qtyRaw = row?.[ITEM_QTY_FIELD];
-  const qtyNum = Number(qtyRaw ?? 0);
-
+  const qtyNum = Number(row?.[ITEM_QTY_FIELD] ?? 0);
   return {
     id: String(row?.[ITEM_ID_FIELD]),
     household_id: String(row?.[ITEM_HOUSEHOLD_FIELD]),
     cell_id: String(row?.[ITEM_CELL_FIELD]),
     name: String(row?.[ITEM_NAME_FIELD] ?? ""),
     qty: Number.isFinite(qtyNum) ? qtyNum : 0,
-    expire_date: row?.[ITEM_EXPIRE_FIELD] ?? null,
-    image_url: row?.[ITEM_IMG_FIELD] ?? null,
+    expires_at: row?.[ITEM_EXPIRE_FIELD] ?? null,
+    image_path: row?.[ITEM_IMG_FIELD] ?? null,
   };
 }
 
@@ -287,7 +274,7 @@ export default function RoomPage() {
         setColumns([]);
         setCells([]);
         setItems([]);
-        throw new Error("Room not found in the current household. Switch household or go back to Rooms.");
+        throw new Error("Room not found in the current household. Use Rooms or Switch household.");
       }
       setRoom(roomRes.data as Room);
 
@@ -324,7 +311,6 @@ export default function RoomPage() {
       if (cellIds.length === 0) {
         setItems([]);
       } else {
-        // 动态 select（避免你字段名不同导致崩）
         const selectCols = [
           ITEM_ID_FIELD,
           ITEM_HOUSEHOLD_FIELD,
@@ -342,9 +328,7 @@ export default function RoomPage() {
           .in(ITEM_CELL_FIELD, cellIds);
 
         if (itemRes.error) throw new Error(itemRes.error.message);
-
-        const normalized = (itemRes.data ?? []).map(normalizeItemRow);
-        setItems(normalized);
+        setItems((itemRes.data ?? []).map(normalizeItemRow));
       }
     } catch (e: any) {
       setErr(e?.message ?? "Failed to load room.");
@@ -390,18 +374,19 @@ export default function RoomPage() {
     return m;
   }, [columns, cells]);
 
-  const expiring7 = useMemo(() => {
+  // ✅ 你喜欢的分类：0–7 天；8–30 天
+  const expiring0to7 = useMemo(() => {
     return items
       .filter((it) => it.qty > 0)
-      .map((it) => ({ it, du: daysUntil(it.expire_date ?? null) }))
+      .map((it) => ({ it, du: daysUntil(it.expires_at ?? null) }))
       .filter(({ du }) => du !== null && du >= 0 && du <= 7)
       .sort((a, b) => (a.du! - b.du!) || a.it.name.localeCompare(b.it.name));
   }, [items]);
 
-  const expiring30 = useMemo(() => {
+  const expiring8to30 = useMemo(() => {
     return items
       .filter((it) => it.qty > 0)
-      .map((it) => ({ it, du: daysUntil(it.expire_date ?? null) }))
+      .map((it) => ({ it, du: daysUntil(it.expires_at ?? null) }))
       .filter(({ du }) => du !== null && du >= 8 && du <= 30)
       .sort((a, b) => (a.du! - b.du!) || a.it.name.localeCompare(b.it.name));
   }, [items]);
@@ -436,7 +421,7 @@ export default function RoomPage() {
     setEditingItem(it);
     setItemName(it.name ?? "");
     setItemQty(Number(it.qty ?? 1));
-    setItemExpire(it.expire_date ?? "");
+    setItemExpire(it.expires_at ?? "");
     setItemCellId(it.cell_id);
     setMoveQuery("");
     setMoveTargetCellId(it.cell_id);
@@ -669,13 +654,15 @@ export default function RoomPage() {
   return (
     <div style={{ minHeight: "100vh", background: COLORS.oatBg, color: COLORS.ink }}>
       <div style={{ padding: 16, maxWidth: 1200, margin: "0 auto" }}>
+        {/* Header */}
         <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 12 }}>
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            {/* ✅ 你要的：去其他 rooms（同 household） */}
             <button
               onClick={() => router.push("/rooms")}
               style={{ padding: "8px 10px", borderRadius: 12, fontWeight: 900, border: `1px solid ${COLORS.border}`, background: "white" }}
             >
-              Back
+              Rooms
             </button>
 
             <button
@@ -740,17 +727,18 @@ export default function RoomPage() {
           <div style={{ opacity: 0.8 }}>Loading…</div>
         ) : (
           <>
+            {/* ✅ Expiring soon（0–7 / 8–30） */}
             <div style={{ background: COLORS.oatCard, border: `1px solid ${COLORS.border}`, borderRadius: 16, padding: 14, marginBottom: 12 }}>
               <div style={{ fontWeight: 900, marginBottom: 8 }}>Expiring soon</div>
 
               <div style={{ display: "grid", gap: 10, gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))" }}>
                 <div>
                   <div style={{ fontWeight: 900, marginBottom: 6 }}>Within 7 days</div>
-                  {expiring7.length === 0 ? (
+                  {expiring0to7.length === 0 ? (
                     <div style={{ color: COLORS.muted }}>None</div>
                   ) : (
                     <div style={{ display: "grid", gap: 4 }}>
-                      {expiring7.slice(0, 30).map(({ it, du }) => (
+                      {expiring0to7.slice(0, 30).map(({ it, du }) => (
                         <div
                           key={it.id}
                           style={{ cursor: "pointer" }}
@@ -767,12 +755,12 @@ export default function RoomPage() {
                 </div>
 
                 <div>
-                  <div style={{ fontWeight: 900, marginBottom: 6 }}>Within 30 days</div>
-                  {expiring30.length === 0 ? (
+                  <div style={{ fontWeight: 900, marginBottom: 6 }}>8 to 30 days</div>
+                  {expiring8to30.length === 0 ? (
                     <div style={{ color: COLORS.muted }}>None</div>
                   ) : (
                     <div style={{ display: "grid", gap: 4 }}>
-                      {expiring30.slice(0, 50).map(({ it, du }) => (
+                      {expiring8to30.slice(0, 50).map(({ it, du }) => (
                         <div
                           key={it.id}
                           style={{ cursor: "pointer" }}
@@ -790,6 +778,7 @@ export default function RoomPage() {
               </div>
             </div>
 
+            {/* Search */}
             <div style={{ background: COLORS.oatCard, border: `1px solid ${COLORS.border}`, borderRadius: 16, padding: 14, marginBottom: 12 }}>
               <div style={{ fontWeight: 900, marginBottom: 8 }}>Search items</div>
               <input
@@ -824,6 +813,7 @@ export default function RoomPage() {
               ) : null}
             </div>
 
+            {/* Add column */}
             <div style={{ background: COLORS.oatCard, border: `1px solid ${COLORS.border}`, borderRadius: 16, padding: 14, marginBottom: 12 }}>
               <div style={{ fontWeight: 900, marginBottom: 8 }}>Add column</div>
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
@@ -852,6 +842,7 @@ export default function RoomPage() {
               </div>
             </div>
 
+            {/* Columns */}
             <div style={{ display: "flex", gap: 12, alignItems: "flex-start", overflowX: "auto", paddingBottom: 6 }}>
               {columnsWithCells.map(({ col, cells }) => (
                 <div
@@ -1037,226 +1028,226 @@ export default function RoomPage() {
                 </div>
               ))}
             </div>
-
-            {/* Item modal */}
-            {itemModalOpen ? (
-              <div
-                style={{
-                  position: "fixed",
-                  inset: 0,
-                  background: "rgba(0,0,0,.35)",
-                  display: "flex",
-                  justifyContent: "center",
-                  alignItems: "center",
-                  padding: 16,
-                  zIndex: 50,
-                }}
-                onClick={() => setItemModalOpen(false)}
-              >
-                <div
-                  onClick={(e) => e.stopPropagation()}
-                  style={{
-                    width: "min(720px, 100%)",
-                    background: "white",
-                    borderRadius: 18,
-                    border: `1px solid ${COLORS.border}`,
-                    padding: 14,
-                  }}
-                >
-                  <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
-                    <div style={{ fontWeight: 900, fontSize: 16 }}>{editingItem ? "Edit item" : "Add item"}</div>
-                    <button
-                      onClick={() => setItemModalOpen(false)}
-                      style={{ padding: "6px 8px", borderRadius: 10, border: `1px solid ${COLORS.border}`, background: "white" }}
-                    >
-                      Close
-                    </button>
-                  </div>
-
-                  <div style={{ display: "grid", gap: 10, marginTop: 12 }}>
-                    <div style={{ display: "grid", gap: 6 }}>
-                      <div style={{ fontWeight: 900 }}>Name</div>
-                      <input
-                        value={itemName}
-                        onChange={(e) => setItemName(e.target.value)}
-                        placeholder="e.g. Olive oil"
-                        style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
-                      />
-                    </div>
-
-                    <div style={{ display: "grid", gap: 6, gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))" }}>
-                      <div style={{ display: "grid", gap: 6 }}>
-                        <div style={{ fontWeight: 900 }}>Quantity</div>
-                        <input
-                          type="number"
-                          value={itemQty}
-                          onChange={(e) => setItemQty(Number(e.target.value))}
-                          style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
-                        />
-                      </div>
-
-                      <div style={{ display: "grid", gap: 6 }}>
-                        <div style={{ fontWeight: 900 }}>Expire date</div>
-                        <input
-                          type="date"
-                          value={itemExpire}
-                          onChange={(e) => setItemExpire(e.target.value)}
-                          style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
-                        />
-                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                          {[
-                            { label: "1 week", days: 7 },
-                            { label: "1 month", days: 30 },
-                            { label: "3 months", days: 90 },
-                            { label: "1 year", days: 365 },
-                          ].map((x) => (
-                            <button
-                              key={x.label}
-                              onClick={() => {
-                                const now = new Date();
-                                const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + x.days);
-                                const yyyy = d.getFullYear();
-                                const mm = String(d.getMonth() + 1).padStart(2, "0");
-                                const dd = String(d.getDate()).padStart(2, "0");
-                                setItemExpire(`${yyyy}-${mm}-${dd}`);
-                              }}
-                              style={{ padding: "6px 8px", borderRadius: 999, border: `1px solid ${COLORS.border}`, background: "white", cursor: "pointer" }}
-                            >
-                              +{x.label}
-                            </button>
-                          ))}
-                          <button
-                            onClick={() => setItemExpire("")}
-                            style={{ padding: "6px 8px", borderRadius: 999, border: `1px solid ${COLORS.border}`, background: "white", cursor: "pointer" }}
-                          >
-                            Clear
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div style={{ display: "grid", gap: 6 }}>
-                      <div style={{ fontWeight: 900 }}>Cell</div>
-                      <select
-                        value={itemCellId}
-                        onChange={(e) => {
-                          setItemCellId(e.target.value);
-                          setMoveTargetCellId(e.target.value);
-                        }}
-                        style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
-                      >
-                        <option value="">Select a cell</option>
-                        {cells.map((c) => {
-                          const colName = columns.find((cc) => cc.id === c.column_id)?.name ?? "Column";
-                          return (
-                            <option key={c.id} value={c.id}>
-                              {colName} / {c.code}
-                            </option>
-                          );
-                        })}
-                      </select>
-                    </div>
-
-                    {editingItem ? (
-                      <div style={{ display: "grid", gap: 8 }}>
-                        <div style={{ fontWeight: 900 }}>Move item (searchable)</div>
-                        <input
-                          value={moveQuery}
-                          onChange={(e) => setMoveQuery(e.target.value)}
-                          placeholder="Search location, e.g. Pantry / K11"
-                          style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
-                        />
-                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                          {moveCellOptions.map((opt) => (
-                            <button
-                              key={opt.id}
-                              onClick={() => setMoveTargetCellId(opt.id)}
-                              style={{
-                                padding: "6px 8px",
-                                borderRadius: 999,
-                                border: `1px solid ${COLORS.border}`,
-                                background: moveTargetCellId === opt.id ? COLORS.okBg : "white",
-                                cursor: "pointer",
-                              }}
-                            >
-                              {opt.label}
-                            </button>
-                          ))}
-                        </div>
-                        <button
-                          onClick={moveItemToSelectedCell}
-                          disabled={busy || !moveTargetCellId || moveTargetCellId === editingItem.cell_id}
-                          style={{
-                            padding: "10px 12px",
-                            borderRadius: 12,
-                            fontWeight: 900,
-                            background: COLORS.blue,
-                            color: "white",
-                            border: "none",
-                            cursor: "pointer",
-                            opacity: busy || !moveTargetCellId || moveTargetCellId === editingItem.cell_id ? 0.6 : 1,
-                          }}
-                        >
-                          Move to selected cell
-                        </button>
-                      </div>
-                    ) : null}
-
-                    <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", marginTop: 6 }}>
-                      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                        <button
-                          onClick={saveItem}
-                          disabled={busy}
-                          style={{
-                            padding: "10px 12px",
-                            borderRadius: 12,
-                            fontWeight: 900,
-                            background: COLORS.blue,
-                            color: "white",
-                            border: "none",
-                            cursor: "pointer",
-                            opacity: busy ? 0.6 : 1,
-                          }}
-                        >
-                          {editingItem ? "Save changes" : "Add item"}
-                        </button>
-
-                        {editingItem ? (
-                          <button
-                            onClick={() => deleteItem(editingItem.id)}
-                            disabled={busy}
-                            style={{
-                              padding: "10px 12px",
-                              borderRadius: 12,
-                              fontWeight: 900,
-                              border: `1px solid rgba(220,0,0,.25)`,
-                              background: "rgba(220,0,0,.06)",
-                              color: "crimson",
-                              cursor: "pointer",
-                              opacity: busy ? 0.6 : 1,
-                            }}
-                          >
-                            Delete item
-                          </button>
-                        ) : null}
-                      </div>
-
-                      <button
-                        onClick={() => setItemModalOpen(false)}
-                        style={{ padding: "10px 12px", borderRadius: 12, border: `1px solid ${COLORS.border}`, background: "white" }}
-                      >
-                        Cancel
-                      </button>
-                    </div>
-
-                    {busy ? <div style={{ color: COLORS.muted }}>Working…</div> : null}
-                  </div>
-                </div>
-              </div>
-            ) : null}
           </>
         )}
       </div>
+
+      {/* Item modal */}
+      {itemModalOpen ? (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,.35)",
+            display: "flex",
+            justifyContent: "center",
+            alignItems: "center",
+            padding: 16,
+            zIndex: 50,
+          }}
+          onClick={() => setItemModalOpen(false)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: "min(720px, 100%)",
+              background: "white",
+              borderRadius: 18,
+              border: `1px solid ${COLORS.border}`,
+              padding: 14,
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
+              <div style={{ fontWeight: 900, fontSize: 16 }}>{editingItem ? "Edit item" : "Add item"}</div>
+              <button
+                onClick={() => setItemModalOpen(false)}
+                style={{ padding: "6px 8px", borderRadius: 10, border: `1px solid ${COLORS.border}`, background: "white" }}
+              >
+                Close
+              </button>
+            </div>
+
+            <div style={{ display: "grid", gap: 10, marginTop: 12 }}>
+              <div style={{ display: "grid", gap: 6 }}>
+                <div style={{ fontWeight: 900 }}>Name</div>
+                <input
+                  value={itemName}
+                  onChange={(e) => setItemName(e.target.value)}
+                  placeholder="e.g. Olive oil"
+                  style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
+                />
+              </div>
+
+              <div style={{ display: "grid", gap: 6, gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))" }}>
+                <div style={{ display: "grid", gap: 6 }}>
+                  <div style={{ fontWeight: 900 }}>Quantity</div>
+                  <input
+                    type="number"
+                    value={itemQty}
+                    onChange={(e) => setItemQty(Number(e.target.value))}
+                    style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
+                  />
+                </div>
+
+                <div style={{ display: "grid", gap: 6 }}>
+                  <div style={{ fontWeight: 900 }}>Expire date</div>
+                  <input
+                    type="date"
+                    value={itemExpire}
+                    onChange={(e) => setItemExpire(e.target.value)}
+                    style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
+                  />
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    {[
+                      { label: "1 week", days: 7 },
+                      { label: "1 month", days: 30 },
+                      { label: "3 months", days: 90 },
+                      { label: "1 year", days: 365 },
+                    ].map((x) => (
+                      <button
+                        key={x.label}
+                        onClick={() => {
+                          const now = new Date();
+                          const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + x.days);
+                          const yyyy = d.getFullYear();
+                          const mm = String(d.getMonth() + 1).padStart(2, "0");
+                          const dd = String(d.getDate()).padStart(2, "0");
+                          setItemExpire(`${yyyy}-${mm}-${dd}`);
+                        }}
+                        style={{ padding: "6px 8px", borderRadius: 999, border: `1px solid ${COLORS.border}`, background: "white", cursor: "pointer" }}
+                      >
+                        +{x.label}
+                      </button>
+                    ))}
+                    <button
+                      onClick={() => setItemExpire("")}
+                      style={{ padding: "6px 8px", borderRadius: 999, border: `1px solid ${COLORS.border}`, background: "white", cursor: "pointer" }}
+                    >
+                      Clear
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div style={{ display: "grid", gap: 6 }}>
+                <div style={{ fontWeight: 900 }}>Cell</div>
+                <select
+                  value={itemCellId}
+                  onChange={(e) => {
+                    setItemCellId(e.target.value);
+                    setMoveTargetCellId(e.target.value);
+                  }}
+                  style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
+                >
+                  <option value="">Select a cell</option>
+                  {cells.map((c) => {
+                    const colName = columns.find((cc) => cc.id === c.column_id)?.name ?? "Column";
+                    return (
+                      <option key={c.id} value={c.id}>
+                        {colName} / {c.code}
+                      </option>
+                    );
+                  })}
+                </select>
+              </div>
+
+              {editingItem ? (
+                <div style={{ display: "grid", gap: 8 }}>
+                  <div style={{ fontWeight: 900 }}>Move item (searchable)</div>
+                  <input
+                    value={moveQuery}
+                    onChange={(e) => setMoveQuery(e.target.value)}
+                    placeholder="Search location, e.g. Pantry / K11"
+                    style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
+                  />
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    {moveCellOptions.map((opt) => (
+                      <button
+                        key={opt.id}
+                        onClick={() => setMoveTargetCellId(opt.id)}
+                        style={{
+                          padding: "6px 8px",
+                          borderRadius: 999,
+                          border: `1px solid ${COLORS.border}`,
+                          background: moveTargetCellId === opt.id ? COLORS.okBg : "white",
+                          cursor: "pointer",
+                        }}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                  <button
+                    onClick={moveItemToSelectedCell}
+                    disabled={busy || !moveTargetCellId || moveTargetCellId === editingItem.cell_id}
+                    style={{
+                      padding: "10px 12px",
+                      borderRadius: 12,
+                      fontWeight: 900,
+                      background: COLORS.blue,
+                      color: "white",
+                      border: "none",
+                      cursor: "pointer",
+                      opacity: busy || !moveTargetCellId || moveTargetCellId === editingItem.cell_id ? 0.6 : 1,
+                    }}
+                  >
+                    Move to selected cell
+                  </button>
+                </div>
+              ) : null}
+
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", marginTop: 6 }}>
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                  <button
+                    onClick={saveItem}
+                    disabled={busy}
+                    style={{
+                      padding: "10px 12px",
+                      borderRadius: 12,
+                      fontWeight: 900,
+                      background: COLORS.blue,
+                      color: "white",
+                      border: "none",
+                      cursor: "pointer",
+                      opacity: busy ? 0.6 : 1,
+                    }}
+                  >
+                    {editingItem ? "Save changes" : "Add item"}
+                  </button>
+
+                  {editingItem ? (
+                    <button
+                      onClick={() => deleteItem(editingItem.id)}
+                      disabled={busy}
+                      style={{
+                        padding: "10px 12px",
+                        borderRadius: 12,
+                        fontWeight: 900,
+                        border: `1px solid rgba(220,0,0,.25)`,
+                        background: "rgba(220,0,0,.06)",
+                        color: "crimson",
+                        cursor: "pointer",
+                        opacity: busy ? 0.6 : 1,
+                      }}
+                    >
+                      Delete item
+                    </button>
+                  ) : null}
+                </div>
+
+                <button
+                  onClick={() => setItemModalOpen(false)}
+                  style={{ padding: "10px 12px", borderRadius: 12, border: `1px solid ${COLORS.border}`, background: "white" }}
+                >
+                  Cancel
+                </button>
+              </div>
+
+              {busy ? <div style={{ color: COLORS.muted }}>Working…</div> : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
