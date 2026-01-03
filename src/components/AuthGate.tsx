@@ -1,67 +1,55 @@
-"use client";
+'use client';
 
-import { useState } from "react";
-import { supabase } from "@/src/lib/supabase";
-import type { Session } from "@supabase/supabase-js";
+import React, { useEffect, useState } from 'react';
+import type { Session } from '@supabase/supabase-js';
+import { supabase } from '@/src/lib/supabase';
 
-export default function AuthGate(props: { onAuthed: (s: Session) => void }) {
-  const [mode, setMode] = useState<"signin" | "signup">("signin");
-  const [email, setEmail] = useState("");
-  const [pw, setPw] = useState("");
-  const [err, setErr] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+export default function AuthGate(props: {
+  children: React.ReactNode;
+  onAuthed?: (s: Session) => void; // ✅ 改成可选
+}) {
+  const { children, onAuthed } = props;
 
-  async function doSignIn() {
-    setErr(null);
-    setBusy(true);
-    const { data, error } = await supabase.auth.signInWithPassword({ email, password: pw });
-    setBusy(false);
-    if (error) return setErr(error.message);
-    if (data.session) props.onAuthed(data.session);
+  const [checking, setChecking] = useState(true);
+  const [session, setSession] = useState<Session | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+
+    const init = async () => {
+      const { data } = await supabase.auth.getSession();
+      if (!mounted) return;
+
+      setSession(data.session ?? null);
+      setChecking(false);
+
+      if (data.session && onAuthed) onAuthed(data.session);
+    };
+
+    init();
+
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, newSession) => {
+      if (!mounted) return;
+      setSession(newSession ?? null);
+      setChecking(false);
+      if (newSession && onAuthed) onAuthed(newSession);
+    });
+
+    return () => {
+      mounted = false;
+      sub.subscription.unsubscribe();
+    };
+  }, [onAuthed]);
+
+  // 你原来如果有更复杂的“未登录提示/跳转”，可以在这里替换；
+  // 先给出一个安全默认：未登录就显示一个简单提示。
+  if (checking) {
+    return <div className="min-h-screen flex items-center justify-center text-sm text-black/60">Checking session…</div>;
   }
 
-  async function doSignUp() {
-    setErr(null);
-    setBusy(true);
-    const { data, error } = await supabase.auth.signUp({ email, password: pw });
-    setBusy(false);
-    if (error) return setErr(error.message);
-    if (data.session) props.onAuthed(data.session);
-    else setErr("Sign-up succeeded. Please confirm your email (if required), then sign in.");
+  if (!session) {
+    return <div className="min-h-screen flex items-center justify-center text-sm text-black/60">Please sign in.</div>;
   }
 
-  return (
-    <div className="authWrap">
-      <div className="card authCard">
-        <div className="h1">Home Inventory</div>
-        <div className="muted">Sign in to manage your household layout & items.</div>
-
-        <div className="tabs">
-          <button className={`tab ${mode === "signin" ? "on" : ""}`} onClick={() => setMode("signin")}>
-            Sign in
-          </button>
-          <button className={`tab ${mode === "signup" ? "on" : ""}`} onClick={() => setMode("signup")}>
-            Sign up
-          </button>
-        </div>
-
-        <input className="input" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email" />
-        <input className="input" type="password" value={pw} onChange={(e) => setPw(e.target.value)} placeholder="Password" />
-
-        {err && <div className="alert">{err}</div>}
-
-        <button
-          className="btn primary"
-          disabled={busy || !email.trim() || !pw.trim()}
-          onClick={mode === "signin" ? doSignIn : doSignUp}
-        >
-          {busy ? "Please wait…" : mode === "signin" ? "Sign in" : "Create account"}
-        </button>
-
-        <div className="muted small">
-          If email confirmation is enabled, confirm first then sign in.
-        </div>
-      </div>
-    </div>
-  );
+  return <>{children}</>;
 }
