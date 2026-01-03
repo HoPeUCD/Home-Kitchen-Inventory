@@ -73,10 +73,10 @@ function daysUntil(expiresAt?: string | null): number | null {
 }
 function urgencyRank(it: Item): number {
   const du = daysUntil(it.expires_at ?? null);
-  if (du === null) return 3; // no expire date
-  if (du < 0) return 0; // expired
-  if (du <= 30) return 1; // soon
-  return 2; // ok
+  if (du === null) return 3;
+  if (du < 0) return 0;
+  if (du <= 30) return 1;
+  return 2;
 }
 function chipBg(it: Item): string {
   const du = daysUntil(it.expires_at ?? null);
@@ -140,7 +140,6 @@ function fuzzyMatch(query: string, text: string): boolean {
   return false;
 }
 
-// 把 DB row 映射为前端 Item
 function normalizeItemRow(row: any): Item {
   const qtyNum = Number(row?.[ITEM_QTY_FIELD] ?? 0);
   return {
@@ -181,6 +180,10 @@ export default function RoomPage() {
   const [newColumnName, setNewColumnName] = useState("");
   const [editingColumnId, setEditingColumnId] = useState<string | null>(null);
   const [editingColumnName, setEditingColumnName] = useState("");
+
+  // ✅ Cell edit state
+  const [editingCellId, setEditingCellId] = useState<string | null>(null);
+  const [editingCellCode, setEditingCellCode] = useState("");
 
   const [itemModalOpen, setItemModalOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<Item | null>(null);
@@ -278,7 +281,6 @@ export default function RoomPage() {
       }
       setRoom(roomRes.data as Room);
 
-      // columns by room_id
       const colRes = await supabase
         .from("room_columns")
         .select("id,room_id,name,position")
@@ -289,7 +291,6 @@ export default function RoomPage() {
       const cols = (colRes.data as Column[]) ?? [];
       setColumns(cols);
 
-      // cells by column_id
       const colIds = cols.map((c) => c.id);
       let allCells: Cell[] = [];
       if (colIds.length === 0) {
@@ -306,7 +307,6 @@ export default function RoomPage() {
         setCells(allCells);
       }
 
-      // items：按 household + cell_id in cellIds
       const cellIds = allCells.map((c) => c.id);
       if (cellIds.length === 0) {
         setItems([]);
@@ -374,7 +374,6 @@ export default function RoomPage() {
     return m;
   }, [columns, cells]);
 
-  // ✅ 你喜欢的分类：0–7 天；8–30 天
   const expiring0to7 = useMemo(() => {
     return items
       .filter((it) => it.qty > 0)
@@ -608,6 +607,26 @@ export default function RoomPage() {
     }
   }
 
+  // ✅ 新增：保存 cell code（edit）
+  async function saveCellCode(cellId: string) {
+    const next = editingCellCode.trim();
+    if (!next) return;
+
+    setBusy(true);
+    setErr(null);
+    try {
+      const upd = await supabase.from("room_cells").update({ code: next }).eq("id", cellId).select("id,column_id,code,position").single();
+      if (upd.error) throw new Error(upd.error.message);
+      setCells((prev) => prev.map((c) => (c.id === cellId ? (upd.data as Cell) : c)));
+      setEditingCellId(null);
+      setEditingCellCode("");
+    } catch (e: any) {
+      setErr(e?.message ?? "Edit cell failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function deleteCell(cell: Cell) {
     const ok = window.confirm(`Delete cell "${cell.code}"?\n\nThis will delete ALL items inside this cell.`);
     if (!ok) return;
@@ -657,7 +676,6 @@ export default function RoomPage() {
         {/* Header */}
         <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 12 }}>
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-            {/* ✅ 你要的：去其他 rooms（同 household） */}
             <button
               onClick={() => router.push("/rooms")}
               style={{ padding: "8px 10px", borderRadius: 12, fontWeight: 900, border: `1px solid ${COLORS.border}`, background: "white" }}
@@ -727,7 +745,7 @@ export default function RoomPage() {
           <div style={{ opacity: 0.8 }}>Loading…</div>
         ) : (
           <>
-            {/* ✅ Expiring soon（0–7 / 8–30） */}
+            {/* Expiring soon */}
             <div style={{ background: COLORS.oatCard, border: `1px solid ${COLORS.border}`, borderRadius: 16, padding: 14, marginBottom: 12 }}>
               <div style={{ fontWeight: 900, marginBottom: 8 }}>Expiring soon</div>
 
@@ -787,7 +805,6 @@ export default function RoomPage() {
                 placeholder="Type an item name (fuzzy match supported)"
                 style={{ width: "100%", padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}`, background: "white" }}
               />
-
               {search.trim() ? (
                 <div style={{ marginTop: 10, color: COLORS.muted }}>
                   {filteredItemsSummary.length === 0 ? (
@@ -860,6 +877,7 @@ export default function RoomPage() {
                     gap: 10,
                   }}
                 >
+                  {/* Column header */}
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
                     {editingColumnId === col.id ? (
                       <div style={{ display: "flex", gap: 8, alignItems: "center", width: "100%" }}>
@@ -926,44 +944,81 @@ export default function RoomPage() {
                     )}
                   </div>
 
+                  {/* Cells */}
                   <div style={{ display: "grid", gap: 10 }}>
                     {cells.map((cell) => {
                       const list = itemsByCell[cell.id] || [];
+                      const isEditingThis = editingCellId === cell.id;
+
                       return (
                         <div
                           key={cell.id}
                           ref={(el) => {
                             cellRefMap.current[cell.id] = el;
                           }}
-                          style={{ border: `1px solid ${COLORS.border}`, borderRadius: 14, background: "white", padding: 10 }}
+                          style={{
+                            border: `1px solid ${COLORS.border}`,
+                            borderRadius: 14,
+                            background: "white",
+                            padding: 10,
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: 8,
+                          }}
                         >
+                          {/* Top row: cell code + +Item (右上角) */}
                           <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
-                            <div style={{ fontWeight: 900 }}>{cell.code}</div>
-                            <div style={{ display: "flex", gap: 8 }}>
-                              <button
-                                onClick={() => openAddItem(cell.id)}
-                                style={{ padding: "6px 8px", borderRadius: 10, border: `1px solid ${COLORS.border}`, background: "white", cursor: "pointer" }}
-                              >
-                                + Item
-                              </button>
-                              <button
-                                onClick={() => deleteCell(cell)}
-                                style={{
-                                  padding: "6px 8px",
-                                  borderRadius: 10,
-                                  border: `1px solid rgba(220,0,0,.25)`,
-                                  background: "rgba(220,0,0,.06)",
-                                  color: "crimson",
-                                  cursor: "pointer",
-                                  fontWeight: 900,
-                                }}
-                              >
-                                Del
-                              </button>
-                            </div>
+                            {isEditingThis ? (
+                              <div style={{ display: "flex", gap: 8, alignItems: "center", width: "100%" }}>
+                                <input
+                                  value={editingCellCode}
+                                  onChange={(e) => setEditingCellCode(e.target.value)}
+                                  placeholder="Cell code (e.g. K21)"
+                                  style={{ flex: 1, padding: 8, borderRadius: 10, border: `1px solid ${COLORS.border}` }}
+                                />
+                                <button
+                                  onClick={() => saveCellCode(cell.id)}
+                                  disabled={busy || !editingCellCode.trim()}
+                                  style={{
+                                    padding: "8px 10px",
+                                    borderRadius: 10,
+                                    fontWeight: 900,
+                                    background: COLORS.blue,
+                                    color: "white",
+                                    border: "none",
+                                    cursor: "pointer",
+                                    opacity: busy || !editingCellCode.trim() ? 0.6 : 1,
+                                  }}
+                                >
+                                  Save
+                                </button>
+                                <button
+                                  onClick={() => {
+                                    setEditingCellId(null);
+                                    setEditingCellCode("");
+                                  }}
+                                  style={{ padding: "8px 10px", borderRadius: 10, border: `1px solid ${COLORS.border}`, background: "white" }}
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            ) : (
+                              <>
+                                <div style={{ fontWeight: 900 }}>{cell.code}</div>
+
+                                {/* ✅ 你要的：+Item 仍在右上角 */}
+                                <button
+                                  onClick={() => openAddItem(cell.id)}
+                                  style={{ padding: "6px 8px", borderRadius: 10, border: `1px solid ${COLORS.border}`, background: "white", cursor: "pointer" }}
+                                >
+                                  + Item
+                                </button>
+                              </>
+                            )}
                           </div>
 
-                          <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 6 }}>
+                          {/* Items chips */}
+                          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                             {list.length === 0 ? (
                               <div style={{ color: COLORS.muted, fontSize: 12 }}>Empty</div>
                             ) : (
@@ -1004,6 +1059,45 @@ export default function RoomPage() {
                                 ))
                             )}
                           </div>
+
+                          {/* ✅ 底部一排：Edit + Del */}
+                          {!isEditingThis ? (
+                            <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginTop: 2 }}>
+                              <button
+                                onClick={() => {
+                                  setEditingCellId(cell.id);
+                                  setEditingCellCode(cell.code);
+                                }}
+                                style={{
+                                  flex: 1,
+                                  padding: "8px 10px",
+                                  borderRadius: 12,
+                                  border: `1px solid ${COLORS.border}`,
+                                  background: "white",
+                                  cursor: "pointer",
+                                  fontWeight: 900,
+                                }}
+                              >
+                                Edit
+                              </button>
+
+                              <button
+                                onClick={() => deleteCell(cell)}
+                                style={{
+                                  flex: 1,
+                                  padding: "8px 10px",
+                                  borderRadius: 12,
+                                  border: `1px solid rgba(220,0,0,.25)`,
+                                  background: "rgba(220,0,0,.06)",
+                                  color: "crimson",
+                                  cursor: "pointer",
+                                  fontWeight: 900,
+                                }}
+                              >
+                                Del
+                              </button>
+                            </div>
+                          ) : null}
                         </div>
                       );
                     })}
@@ -1032,7 +1126,7 @@ export default function RoomPage() {
         )}
       </div>
 
-      {/* Item modal */}
+      {/* Item modal（保持不变） */}
       {itemModalOpen ? (
         <div
           style={{
