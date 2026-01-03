@@ -21,10 +21,10 @@ const ITEM_NAME_FIELD = "name";
 const ITEM_QTY_FIELD = "qty";
 
 // expire date 字段名（你之前一直用 expire_date；如果你表里叫 expires_at / expiry_date 就改这里）
-const ITEM_EXPIRE_FIELD = "expire_date";
+const ITEM_EXPIRE_FIELD = "expire_at";
 
 // 图片字段（如果有）
-const ITEM_IMG_FIELD = "image_url";
+const ITEM_IMG_FIELD = "image_path";
 
 const ACTIVE_HOUSEHOLD_KEY = "active_household_id";
 
