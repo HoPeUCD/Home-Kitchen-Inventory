@@ -168,12 +168,7 @@ function isUrl(s?: string | null): boolean {
   return !!s && /^https?:\/\//i.test(s);
 }
 
-function IconEmoji(props: {
-  title: string;
-  emoji: string;
-  onClick: () => void;
-  disabled?: boolean;
-}) {
+function IconEmoji(props: { title: string; emoji: string; onClick: () => void; disabled?: boolean }) {
   const { title, emoji, onClick, disabled } = props;
   return (
     <span
@@ -234,11 +229,15 @@ export default function RoomPage() {
   const [busy, setBusy] = useState(false);
 
   const [newColumnName, setNewColumnName] = useState("");
-  const [editingColumnId, setEditingColumnId] = useState<string | null>(null);
-  const [editingColumnName, setEditingColumnName] = useState("");
 
   const [editingCellId, setEditingCellId] = useState<string | null>(null);
   const [editingCellCode, setEditingCellCode] = useState("");
+
+  // ✅ Column rename modal
+  const [colModalOpen, setColModalOpen] = useState(false);
+  const [colModalCol, setColModalCol] = useState<Column | null>(null);
+  const [colModalName, setColModalName] = useState("");
+  const colNameInputRef = useRef<HTMLInputElement | null>(null);
 
   // Item modal
   const [itemModalOpen, setItemModalOpen] = useState(false);
@@ -270,15 +269,18 @@ export default function RoomPage() {
     return () => sub.subscription.unsubscribe();
   }, []);
 
+  // ESC handlers for modals
   useEffect(() => {
-    if (!itemModalOpen) return;
+    if (!itemModalOpen && !colModalOpen) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") closeItemModal();
+      if (e.key !== "Escape") return;
+      if (itemModalOpen) closeItemModal();
+      if (colModalOpen) closeColModal();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [itemModalOpen]);
+  }, [itemModalOpen, colModalOpen]);
 
   useEffect(() => {
     return () => {
@@ -287,12 +289,20 @@ export default function RoomPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // auto focus item name on add
   useEffect(() => {
     if (!itemModalOpen) return;
     if (editingItem) return;
     const t = window.setTimeout(() => nameInputRef.current?.focus(), 0);
     return () => window.clearTimeout(t);
   }, [itemModalOpen, editingItem]);
+
+  // auto focus column name input
+  useEffect(() => {
+    if (!colModalOpen) return;
+    const t = window.setTimeout(() => colNameInputRef.current?.focus(), 0);
+    return () => window.clearTimeout(t);
+  }, [colModalOpen]);
 
   function closeItemModal() {
     setItemModalOpen(false);
@@ -302,6 +312,18 @@ export default function RoomPage() {
     setItemImageLocalUrl(null);
     setItemImageFile(null);
     setModalImageRemoteUrl(null);
+  }
+
+  function openColModal(col: Column) {
+    setColModalCol(col);
+    setColModalName(col.name ?? "");
+    setColModalOpen(true);
+  }
+
+  function closeColModal() {
+    setColModalOpen(false);
+    setColModalCol(null);
+    setColModalName("");
   }
 
   async function ensureProfileRow() {
@@ -805,8 +827,6 @@ export default function RoomPage() {
       if (ins.error) throw new Error(ins.error.message);
 
       setColumns((prev) => [...prev, ins.data as Column].sort((a, b) => a.position - b.position));
-
-      // keep hhColumns fresh so room picker + cell options stay correct
       setHhColumns((prev) => [...prev, ins.data as Column]);
 
       setNewColumnName("");
@@ -817,8 +837,8 @@ export default function RoomPage() {
     }
   }
 
-  async function renameColumn(colId: string) {
-    const nm = editingColumnName.trim();
+  async function renameColumn(colId: string, nextName: string) {
+    const nm = nextName.trim();
     if (!nm) return;
 
     setBusy(true);
@@ -835,8 +855,7 @@ export default function RoomPage() {
       setColumns((prev) => prev.map((c) => (c.id === colId ? (upd.data as Column) : c)));
       setHhColumns((prev) => prev.map((c) => (c.id === colId ? (upd.data as Column) : c)));
 
-      setEditingColumnId(null);
-      setEditingColumnName("");
+      closeColModal();
     } catch (e: any) {
       setErr(e?.message ?? "Rename failed.");
     } finally {
@@ -1230,57 +1249,8 @@ export default function RoomPage() {
                     gap: 10,
                   }}
                 >
-                  {/* Column header */}
-                  <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
-                    {editingColumnId === col.id ? (
-                      <div style={{ display: "flex", gap: 8, alignItems: "center", width: "100%" }}>
-                        <input
-                          value={editingColumnName}
-                          onChange={(e) => setEditingColumnName(e.target.value)}
-                          style={{
-                            flex: 1,
-                            padding: 8,
-                            borderRadius: 10,
-                            border: `1px solid ${COLORS.border}`,
-                            background: "white",
-                          }}
-                        />
-                        <button
-                          onClick={() => renameColumn(col.id)}
-                          disabled={busy || !editingColumnName.trim()}
-                          style={{
-                            padding: "8px 10px",
-                            borderRadius: 10,
-                            fontWeight: 900,
-                            background: COLORS.blue,
-                            color: "white",
-                            border: "none",
-                            cursor: "pointer",
-                            opacity: busy || !editingColumnName.trim() ? 0.6 : 1,
-                          }}
-                        >
-                          Save
-                        </button>
-                        <button
-                          onClick={() => {
-                            setEditingColumnId(null);
-                            setEditingColumnName("");
-                          }}
-                          style={{
-                            padding: "8px 10px",
-                            borderRadius: 10,
-                            border: `1px solid ${COLORS.border}`,
-                            background: "white",
-                            cursor: "pointer",
-                          }}
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    ) : (
-                      <div style={{ fontWeight: 900 }}>{col.name}</div>
-                    )}
-                  </div>
+                  {/* Column header (no inline edit) */}
+                  <div style={{ fontWeight: 900 }}>{col.name}</div>
 
                   {/* Cells */}
                   <div style={{ display: "grid", gap: 10 }}>
@@ -1355,7 +1325,7 @@ export default function RoomPage() {
                               <>
                                 <div style={{ fontWeight: 900 }}>{cell.code}</div>
 
-                                {/* ✅ Cell actions: Add Item / Edit / Delete as emoji, no boxes */}
+                                {/* Cell actions as emoji */}
                                 <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
                                   <IconEmoji title="Add item" emoji="➕" onClick={() => openAddItem(cell.id)} disabled={busy} />
                                   <IconEmoji
@@ -1404,7 +1374,7 @@ export default function RoomPage() {
                                         overflow: "hidden",
                                         textOverflow: "ellipsis",
                                         whiteSpace: "nowrap",
-                                        fontWeight: 500, // ✅ no bold
+                                        fontWeight: 500,
                                         fontSize: 12,
                                         color: COLORS.ink,
                                         letterSpacing: 0.1,
@@ -1422,8 +1392,8 @@ export default function RoomPage() {
                     })}
                   </div>
 
-                  {/* ✅ Column footer: Add cell (row 1), Edit/Del emoji (row 2) */}
-                  <div style={{ marginTop: "auto", paddingTop: 8, display: "grid", gap: 8 }}>
+                  {/* Column footer: row1 Add cell, row2 centered emojis */}
+                  <div style={{ marginTop: "auto", paddingTop: 8, display: "grid", gap: 10 }}>
                     <button
                       onClick={() => addCell(col.id)}
                       disabled={busy}
@@ -1440,20 +1410,10 @@ export default function RoomPage() {
                       + Add cell
                     </button>
 
-                    {editingColumnId !== col.id ? (
-                      <div style={{ display: "flex", justifyContent: "flex-end", gap: 12, paddingRight: 2 }}>
-                        <IconEmoji
-                          title="Edit column"
-                          emoji="✏️"
-                          onClick={() => {
-                            setEditingColumnId(col.id);
-                            setEditingColumnName(col.name);
-                          }}
-                          disabled={busy}
-                        />
-                        <IconEmoji title="Delete column" emoji="🗑️" onClick={() => deleteColumn(col)} disabled={busy} />
-                      </div>
-                    ) : null}
+                    <div style={{ display: "flex", justifyContent: "center", gap: 16, paddingBottom: 2 }}>
+                      <IconEmoji title="Edit column" emoji="✏️" onClick={() => openColModal(col)} disabled={busy} />
+                      <IconEmoji title="Delete column" emoji="🗑️" onClick={() => deleteColumn(col)} disabled={busy} />
+                    </div>
                   </div>
                 </div>
               ))}
@@ -1461,6 +1421,114 @@ export default function RoomPage() {
           </>
         )}
       </div>
+
+      {/* ✅ Column rename modal */}
+      {colModalOpen ? (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,.35)",
+            display: "flex",
+            justifyContent: "center",
+            alignItems: "center",
+            padding: 16,
+            zIndex: 60,
+          }}
+          onClick={() => closeColModal()}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: "min(520px, 100%)",
+              background: "white",
+              borderRadius: 18,
+              border: `1px solid ${COLORS.border}`,
+              padding: 14,
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
+              <div style={{ fontWeight: 900, fontSize: 16 }}>Edit column</div>
+              <button
+                onClick={() => closeColModal()}
+                style={{
+                  padding: "6px 8px",
+                  borderRadius: 10,
+                  border: `1px solid ${COLORS.border}`,
+                  background: "white",
+                  cursor: "pointer",
+                }}
+              >
+                Close
+              </button>
+            </div>
+
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (busy) return;
+                if (!colModalCol) return;
+                void renameColumn(colModalCol.id, colModalName);
+              }}
+              style={{ marginTop: 12 }}
+            >
+              <div style={{ display: "grid", gap: 10 }}>
+                <div style={{ display: "grid", gap: 6 }}>
+                  <div style={{ fontWeight: 900 }}>Column name</div>
+                  <input
+                    ref={colNameInputRef}
+                    value={colModalName}
+                    onChange={(e) => setColModalName(e.target.value)}
+                    placeholder="e.g. Pantry"
+                    style={{
+                      padding: 10,
+                      borderRadius: 12,
+                      border: `1px solid ${COLORS.border}`,
+                      background: "white",
+                    }}
+                  />
+                </div>
+
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+                  <button
+                    type="submit"
+                    disabled={busy || !colModalName.trim()}
+                    style={{
+                      padding: "10px 12px",
+                      borderRadius: 12,
+                      fontWeight: 900,
+                      background: COLORS.blue,
+                      color: "white",
+                      border: "none",
+                      cursor: "pointer",
+                      opacity: busy || !colModalName.trim() ? 0.6 : 1,
+                    }}
+                  >
+                    Save
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => closeColModal()}
+                    style={{
+                      padding: "10px 12px",
+                      borderRadius: 12,
+                      border: `1px solid ${COLORS.border}`,
+                      background: "white",
+                      cursor: "pointer",
+                    }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+
+                {busy ? <div style={{ color: COLORS.muted }}>Working…</div> : null}
+                <div style={{ color: COLORS.muted, fontSize: 12 }}>Tip: Press Enter to save, Esc to close.</div>
+              </div>
+            </form>
+          </div>
+        </div>
+      ) : null}
 
       {/* Item modal */}
       {itemModalOpen ? (
