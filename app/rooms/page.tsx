@@ -1,558 +1,530 @@
-"use client";
+'use client';
 
-import { useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
+import React, { useEffect, useMemo, useState } from 'react';
+import { useRouter } from 'next/navigation';
+
 import AuthGate from "@/src/components/AuthGate";
 import { supabase } from "@/src/lib/supabase";
+import HouseholdTopBar from "@/src/components/HouseholdTopBar";
 
-// ====== 你确认过的 items_v2 字段 ======
-const ITEMS_TABLE = "items_v2";
-const ITEM_ID_FIELD = "id";
-const ITEM_HOUSEHOLD_FIELD = "household_id";
-const ITEM_CELL_FIELD = "cell_id";
+type UUID = string;
 
-// localStorage key（你已确认）
-const ACTIVE_HOUSEHOLD_KEY = "active_household_id";
+type Household = { id: UUID; name: string };
+type Room = { id: UUID; household_id: UUID; name: string; position: number | null };
 
-type Household = { id: string; name: string; join_code: string | null };
-type Room = { id: string; household_id: string; name: string; position?: number };
-type Column = { id: string; room_id: string; name: string; position: number };
-type Cell = { id: string; column_id: string; code: string; position: number };
+const ACTIVE_HOUSEHOLD_KEY = 'active_household_id';
 
-const COLORS = {
-  oatBg: "#F4EBDD",
-  oatCard: "#FBF6EC",
-  blue: "#2D6CDF",
-  ink: "#1E2430",
-  border: "rgba(30,36,48,.12)",
-  muted: "rgba(30,36,48,.65)",
+const THEME = {
+  oatBg: 'bg-[#F7F1E6]',
+  oatCard: 'bg-[#FBF7EF]',
+  borderSoft: 'border-black/10',
+  blueBorderSoft: 'border-[#2563EB]/25',
 };
 
-function safeGetLS(key: string): string | null {
-  try {
-    return localStorage.getItem(key);
-  } catch {
-    return null;
-  }
-}
-function safeSetLS(key: string, val: string | null) {
-  try {
-    if (!val) localStorage.removeItem(key);
-    else localStorage.setItem(key, val);
-  } catch {}
+function cx(...classes: Array<string | false | null | undefined>) {
+  return classes.filter(Boolean).join(' ');
 }
 
-export default function RoomsPage() {
-  const router = useRouter();
-
-  const [session, setSession] = useState<any>(null);
-  const user = session?.user ?? null;
-
-  const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-
-  const [defaultHouseholdId, setDefaultHouseholdId] = useState<string | null>(null);
-  const [activeHouseholdId, setActiveHouseholdId] = useState<string | null>(null);
-
-  const [household, setHousehold] = useState<Household | null>(null);
-  const [rooms, setRooms] = useState<Room[]>([]);
-
-  // Create room
-  const [newRoomName, setNewRoomName] = useState("");
-
-  // Edit room
-  const [editingRoomId, setEditingRoomId] = useState<string | null>(null);
-  const [editingRoomName, setEditingRoomName] = useState("");
-
-  useEffect(() => {
-    (async () => {
-      const { data } = await supabase.auth.getSession();
-      setSession(data.session ?? null);
-    })();
-    const { data: sub } = supabase.auth.onAuthStateChange((_evt, s) => setSession(s));
-    return () => sub.subscription.unsubscribe();
-  }, []);
-
-  async function ensureProfileRow() {
-    if (!user?.id) return;
-    await supabase.from("profiles").upsert({ user_id: user.id }, { onConflict: "user_id" });
-  }
-
-  async function loadRoomsContext() {
-    if (!user?.id) return;
-
-    setLoading(true);
-    setErr(null);
-
-    try {
-      await ensureProfileRow();
-
-      // membership
-      const memRes = await supabase.from("household_members").select("household_id").eq("user_id", user.id);
-      if (memRes.error) throw new Error(memRes.error.message);
-      const mems = memRes.data ?? [];
-      const myHids = new Set(mems.map((m: any) => m.household_id as string));
-
-      // default household
-      const profRes = await supabase
-        .from("profiles")
-        .select("default_household_id")
-        .eq("user_id", user.id)
-        .maybeSingle();
-      if (profRes.error) throw new Error(profRes.error.message);
-
-      const def = (profRes.data?.default_household_id as string | null) ?? null;
-      setDefaultHouseholdId(def);
-
-      // local active household
-      let active = safeGetLS(ACTIVE_HOUSEHOLD_KEY);
-      if (active && !myHids.has(active)) {
-        safeSetLS(ACTIVE_HOUSEHOLD_KEY, null);
-        active = null;
-      }
-
-      let hid: string | null = active || def;
-
-      if (!hid) {
-        if (mems.length === 0) {
-          router.replace("/onboarding");
-          return;
-        }
-        if (mems.length === 1) {
-          hid = mems[0].household_id;
-          const rpc = await supabase.rpc("set_default_household", { p_household_id: hid });
-          if (rpc.error) throw new Error(rpc.error.message);
-          setDefaultHouseholdId(hid);
-        } else {
-          router.replace("/households");
-          return;
-        }
-      }
-
-      setActiveHouseholdId(hid);
-
-      // household
-      const hRes = await supabase.from("households").select("id,name,join_code").eq("id", hid).single();
-      if (hRes.error) throw new Error(hRes.error.message);
-      setHousehold(hRes.data as Household);
-
-      // rooms
-      const rRes = await supabase
-        .from("rooms")
-        .select("id,household_id,name,position")
-        .eq("household_id", hid)
-        .order("position", { ascending: true });
-      if (rRes.error) throw new Error(rRes.error.message);
-      setRooms((rRes.data as Room[]) ?? []);
-    } catch (e: any) {
-      setErr(e?.message ?? "Failed to load rooms.");
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  useEffect(() => {
-    if (!user?.id) return;
-    loadRoomsContext();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.id]);
-
-  const modeLabel = useMemo(() => {
-    if (!household?.id) return "";
-    if (defaultHouseholdId && household.id === defaultHouseholdId) return "default";
-    return "temporary";
-  }, [household?.id, defaultHouseholdId]);
-
-  // ====== Room create / edit / delete ======
-
-  async function createRoom() {
-    if (!activeHouseholdId) return;
-    const nm = newRoomName.trim();
-    if (!nm) return;
-
-    setBusy(true);
-    setErr(null);
-
-    try {
-      const nextPos = (rooms.reduce((m, r) => Math.max(m, r.position ?? 0), 0) || 0) + 1;
-      const ins = await supabase
-        .from("rooms")
-        .insert({ household_id: activeHouseholdId, name: nm, position: nextPos })
-        .select("id,household_id,name,position")
-        .single();
-
-      if (ins.error) throw new Error(ins.error.message);
-
-      setRooms((prev) => [...prev, ins.data as Room].sort((a, b) => (a.position ?? 0) - (b.position ?? 0)));
-      setNewRoomName("");
-    } catch (e: any) {
-      setErr(e?.message ?? "Create room failed.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function saveRoomName(roomId: string) {
-    const nm = editingRoomName.trim();
-    if (!nm) return;
-
-    setBusy(true);
-    setErr(null);
-
-    try {
-      const upd = await supabase
-        .from("rooms")
-        .update({ name: nm })
-        .eq("id", roomId)
-        .select("id,household_id,name,position")
-        .single();
-
-      if (upd.error) throw new Error(upd.error.message);
-
-      setRooms((prev) => prev.map((r) => (r.id === roomId ? (upd.data as Room) : r)));
-      setEditingRoomId(null);
-      setEditingRoomName("");
-    } catch (e: any) {
-      setErr(e?.message ?? "Update room failed.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  /**
-   * ✅ 删除 room：默认级联删除
-   * - room_columns where room_id=...
-   * - room_cells where column_id in (...)
-   * - items_v2 where cell_id in (...)
-   * - 然后删 cells/columns/room
-   */
-  async function deleteRoom(room: Room) {
-    const ok = window.confirm(
-      `Delete room "${room.name}"?\n\nThis will delete ALL columns, cells, and items inside this room.`
-    );
-    if (!ok) return;
-
-    setBusy(true);
-    setErr(null);
-
-    try {
-      // 1) columns in room
-      const colRes = await supabase
-        .from("room_columns")
-        .select("id,room_id,name,position")
-        .eq("room_id", room.id);
-
-      if (colRes.error) throw new Error(colRes.error.message);
-      const cols = (colRes.data as Column[]) ?? [];
-      const colIds = cols.map((c) => c.id);
-
-      // 2) cells in those columns
-      let cellIds: string[] = [];
-      if (colIds.length > 0) {
-        const cellRes = await supabase
-          .from("room_cells")
-          .select("id,column_id,code,position")
-          .in("column_id", colIds);
-
-        if (cellRes.error) throw new Error(cellRes.error.message);
-        const cs = (cellRes.data as Cell[]) ?? [];
-        cellIds = cs.map((c) => c.id);
-      }
-
-      // 3) delete items in those cells
-      if (cellIds.length > 0) {
-        const delItems = await supabase.from(ITEMS_TABLE).delete().in(ITEM_CELL_FIELD, cellIds);
-        if (delItems.error) throw new Error(delItems.error.message);
-
-        const delCells = await supabase.from("room_cells").delete().in("id", cellIds);
-        if (delCells.error) throw new Error(delCells.error.message);
-      }
-
-      // 4) delete columns
-      if (colIds.length > 0) {
-        const delCols = await supabase.from("room_columns").delete().in("id", colIds);
-        if (delCols.error) throw new Error(delCols.error.message);
-      }
-
-      // 5) delete room
-      const delRoom = await supabase.from("rooms").delete().eq("id", room.id);
-      if (delRoom.error) throw new Error(delRoom.error.message);
-
-      setRooms((prev) => prev.filter((r) => r.id !== room.id));
-    } catch (e: any) {
-      setErr(e?.message ?? "Delete room failed.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  // ====== early return (after hooks) ======
-  if (!session) return <AuthGate onAuthed={(s) => setSession(s)} />;
-
+function Modal({
+  open,
+  title,
+  onClose,
+  children,
+  widthClass = 'max-w-xl',
+}: {
+  open: boolean;
+  title: string;
+  onClose: () => void;
+  children: React.ReactNode;
+  widthClass?: string;
+}) {
+  if (!open) return null;
   return (
-    <div style={{ minHeight: "100vh", background: COLORS.oatBg, color: COLORS.ink }}>
-      <div style={{ padding: 16, maxWidth: 1000, margin: "0 auto" }}>
-        {/* Top bar */}
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 12 }}>
-          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-            <div style={{ fontWeight: 900, fontSize: 18 }}>Rooms</div>
-
+    <div className="fixed inset-0 z-[60]">
+      <div className="absolute inset-0 bg-black/40" onClick={onClose} />
+      <div className={cx('absolute left-1/2 top-1/2 w-[92vw] -translate-x-1/2 -translate-y-1/2', widthClass)}>
+        <div className={cx('rounded-2xl shadow-xl border', THEME.borderSoft, THEME.oatCard)}>
+          <div className="px-5 py-4 border-b border-black/10 flex items-center justify-between gap-3">
+            <div className="text-base font-semibold">{title}</div>
             <button
-              onClick={() => router.push("/households")}
-              style={{
-                padding: "8px 10px",
-                borderRadius: 12,
-                border: `1px solid ${COLORS.border}`,
-                background: "white",
-                cursor: "pointer",
-                fontWeight: 900,
-              }}
+              onClick={onClose}
+              className="px-2 py-1 rounded-lg border border-black/10 hover:bg-black/5 text-sm"
+              aria-label="Close"
+              title="Close"
             >
-              Switch household
-            </button>
-
-            <button
-              onClick={() => loadRoomsContext()}
-              disabled={busy}
-              style={{
-                padding: "8px 10px",
-                borderRadius: 12,
-                border: `1px solid ${COLORS.border}`,
-                background: "white",
-                cursor: "pointer",
-                opacity: busy ? 0.6 : 1,
-              }}
-            >
-              Refresh
+              ✕
             </button>
           </div>
-
-          <button
-            onClick={async () => {
-              safeSetLS(ACTIVE_HOUSEHOLD_KEY, null);
-              await supabase.auth.signOut();
-              router.replace("/");
-            }}
-            style={{
-              padding: "8px 10px",
-              borderRadius: 12,
-              border: `1px solid ${COLORS.border}`,
-              background: "white",
-              cursor: "pointer",
-              fontWeight: 900,
-            }}
-          >
-            Sign out
-          </button>
+          <div className="p-5">{children}</div>
         </div>
-
-        {/* Household info */}
-        {household ? (
-          <div style={{ marginBottom: 12, color: COLORS.muted }}>
-            Household: <span style={{ fontWeight: 900, color: COLORS.ink }}>{household.name}</span>{" "}
-            <span style={{ fontWeight: 900 }}>({modeLabel})</span>
-            {household.join_code ? (
-              <>
-                {" "}
-                · Join code: <span style={{ fontWeight: 900, color: COLORS.ink }}>{household.join_code}</span>
-              </>
-            ) : null}
-          </div>
-        ) : null}
-
-        {err ? (
-          <div style={{ marginBottom: 12, color: "crimson", fontWeight: 900 }}>
-            {err}
-          </div>
-        ) : null}
-
-        {loading ? (
-          <div style={{ opacity: 0.85 }}>Loading…</div>
-        ) : (
-          <>
-            {/* Create room */}
-            <div
-              style={{
-                background: COLORS.oatCard,
-                border: `1px solid ${COLORS.border}`,
-                borderRadius: 16,
-                padding: 14,
-                marginBottom: 12,
-              }}
-            >
-              <div style={{ fontWeight: 900, marginBottom: 8 }}>Create a room</div>
-              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                <input
-                  value={newRoomName}
-                  onChange={(e) => setNewRoomName(e.target.value)}
-                  placeholder='Examples: Kitchen, Living Room, Bathroom 1'
-                  style={{
-                    flex: "1 1 260px",
-                    padding: 10,
-                    borderRadius: 12,
-                    border: `1px solid ${COLORS.border}`,
-                    background: "white",
-                  }}
-                />
-                <button
-                  onClick={createRoom}
-                  disabled={busy || !newRoomName.trim()}
-                  style={{
-                    padding: "10px 12px",
-                    borderRadius: 12,
-                    fontWeight: 900,
-                    background: COLORS.blue,
-                    color: "white",
-                    border: "none",
-                    cursor: "pointer",
-                    opacity: busy || !newRoomName.trim() ? 0.6 : 1,
-                  }}
-                >
-                  Add
-                </button>
-              </div>
-            </div>
-
-            {/* Rooms list */}
-            <div style={{ display: "grid", gap: 12 }}>
-              {rooms.length === 0 ? (
-                <div style={{ color: COLORS.muted }}>No rooms yet. Create one above.</div>
-              ) : (
-                rooms.map((r) => (
-                  <div
-                    key={r.id}
-                    style={{
-                      background: "white",
-                      border: `1px solid ${COLORS.border}`,
-                      borderRadius: 16,
-                      padding: 14,
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                      gap: 12,
-                      flexWrap: "wrap",
-                    }}
-                  >
-                    {/* Left: name / edit */}
-                    <div style={{ minWidth: 220, flex: "1 1 260px" }}>
-                      {editingRoomId === r.id ? (
-                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                          <input
-                            value={editingRoomName}
-                            onChange={(e) => setEditingRoomName(e.target.value)}
-                            style={{
-                              flex: "1 1 220px",
-                              padding: 10,
-                              borderRadius: 12,
-                              border: `1px solid ${COLORS.border}`,
-                              background: "white",
-                              fontWeight: 900,
-                            }}
-                          />
-                          <button
-                            onClick={() => saveRoomName(r.id)}
-                            disabled={busy || !editingRoomName.trim()}
-                            style={{
-                              padding: "10px 12px",
-                              borderRadius: 12,
-                              fontWeight: 900,
-                              background: COLORS.blue,
-                              color: "white",
-                              border: "none",
-                              cursor: "pointer",
-                              opacity: busy || !editingRoomName.trim() ? 0.6 : 1,
-                            }}
-                          >
-                            Save
-                          </button>
-                          <button
-                            onClick={() => {
-                              setEditingRoomId(null);
-                              setEditingRoomName("");
-                            }}
-                            style={{
-                              padding: "10px 12px",
-                              borderRadius: 12,
-                              border: `1px solid ${COLORS.border}`,
-                              background: "white",
-                              cursor: "pointer",
-                            }}
-                          >
-                            Cancel
-                          </button>
-                        </div>
-                      ) : (
-                        <>
-                          <div style={{ fontWeight: 900, fontSize: 16 }}>{r.name}</div>
-                          <div style={{ color: COLORS.muted, fontSize: 12 }}>room_id: {r.id}</div>
-                        </>
-                      )}
-                    </div>
-
-                    {/* Right: actions */}
-                    {editingRoomId !== r.id ? (
-                      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-                        <button
-                          onClick={() => router.push(`/rooms/${r.id}`)}
-                          style={{
-                            padding: "10px 12px",
-                            borderRadius: 12,
-                            border: `1px solid ${COLORS.border}`,
-                            background: COLORS.oatCard,
-                            cursor: "pointer",
-                            fontWeight: 900,
-                          }}
-                        >
-                          Open
-                        </button>
-
-                        <button
-                          onClick={() => {
-                            setEditingRoomId(r.id);
-                            setEditingRoomName(r.name);
-                          }}
-                          style={{
-                            padding: "10px 12px",
-                            borderRadius: 12,
-                            border: `1px solid ${COLORS.border}`,
-                            background: "white",
-                            cursor: "pointer",
-                            fontWeight: 900,
-                          }}
-                        >
-                          Edit
-                        </button>
-
-                        <button
-                          onClick={() => deleteRoom(r)}
-                          disabled={busy}
-                          style={{
-                            padding: "10px 12px",
-                            borderRadius: 12,
-                            border: `1px solid rgba(220,0,0,.25)`,
-                            background: "rgba(220,0,0,.06)",
-                            color: "crimson",
-                            cursor: "pointer",
-                            fontWeight: 900,
-                            opacity: busy ? 0.6 : 1,
-                          }}
-                        >
-                          Del
-                        </button>
-                      </div>
-                    ) : null}
-                  </div>
-                ))
-              )}
-            </div>
-
-            <div style={{ marginTop: 14, color: COLORS.muted, fontSize: 12 }}>
-              Tip: Delete room will remove all columns/cells/items in that room. If you want “archive room” instead, tell me and I’ll add it.
-            </div>
-          </>
-        )}
       </div>
     </div>
   );
 }
+
+function ConfirmModal({
+  open,
+  title,
+  description,
+  confirmText = '删除',
+  cancelText = '取消',
+  destructive = true,
+  onConfirm,
+  onCancel,
+}: {
+  open: boolean;
+  title: string;
+  description: string;
+  confirmText?: string;
+  cancelText?: string;
+  destructive?: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <Modal open={open} title={title} onClose={onCancel} widthClass="max-w-lg">
+      <div className="text-sm text-black/80 whitespace-pre-wrap">{description}</div>
+      <div className="mt-5 flex items-center justify-end gap-2">
+        <button className="px-3 py-2 rounded-xl border border-black/10 hover:bg-black/5 text-sm" onClick={onCancel}>
+          {cancelText}
+        </button>
+        <button
+          className={cx(
+            'px-3 py-2 rounded-xl text-sm border',
+            destructive ? 'bg-red-600 text-white border-red-600 hover:bg-red-700' : 'bg-black text-white border-black hover:bg-black/90'
+          )}
+          onClick={onConfirm}
+        >
+          {confirmText}
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+function SmallIconButton({
+  title,
+  onClick,
+  children,
+  className,
+}: {
+  title: string;
+  onClick: () => void;
+  children: React.ReactNode;
+  className?: string;
+}) {
+  return (
+    <button
+      type="button"
+      title={title}
+      aria-label={title}
+      onClick={onClick}
+      className={cx(
+        'h-8 w-8 inline-flex items-center justify-center rounded-lg border border-black/10 hover:bg-black/5 text-sm select-none',
+        className
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+function Toast({ message }: { message: string }) {
+  return (
+    <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[80]">
+      <div className="px-4 py-2 rounded-2xl bg-black text-white text-sm shadow-lg">{message}</div>
+    </div>
+  );
+}
+
+export default function Page() {
+  const router = useRouter();
+
+  const [userEmail, setUserEmail] = useState('');
+
+  const [activeHouseholdId, setActiveHouseholdId] = useState<UUID | null>(null);
+  const [households, setHouseholds] = useState<Household[]>([]);
+  const [activeHousehold, setActiveHousehold] = useState<Household | null>(null);
+
+  const [rooms, setRooms] = useState<Room[]>([]);
+
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [toast, setToast] = useState('');
+
+  const [switchHouseholdOpen, setSwitchHouseholdOpen] = useState(false);
+
+  // room CRUD modals
+  const [addRoomOpen, setAddRoomOpen] = useState(false);
+  const [editRoomOpen, setEditRoomOpen] = useState(false);
+  const [deleteRoomConfirmOpen, setDeleteRoomConfirmOpen] = useState(false);
+
+  const [roomDraftName, setRoomDraftName] = useState('');
+  const [targetRoomId, setTargetRoomId] = useState<UUID | null>(null);
+
+  // toast auto-hide
+  React.useEffect(() => {
+    if (!toast) return;
+    const t = window.setTimeout(() => setToast(''), 2200);
+    return () => window.clearTimeout(t);
+  }, [toast]);
+
+  // init user + active household id (localStorage -> profile fallback)
+  useEffect(() => {
+    const init = async () => {
+      setLoading(true);
+      try {
+        const { data: userRes } = await supabase.auth.getUser();
+        const user = userRes?.user;
+        setUserEmail(user?.email ?? '');
+
+        const stored = typeof window !== 'undefined' ? window.localStorage.getItem(ACTIVE_HOUSEHOLD_KEY) : null;
+        if (stored) {
+          setActiveHouseholdId(stored);
+          return;
+        }
+
+        if (user?.id) {
+          const { data: profile, error: pErr } = await supabase
+            .from('profiles')
+            .select('default_household_id')
+            .eq('id', user.id)
+            .maybeSingle();
+
+          if (!pErr && profile?.default_household_id) {
+            setActiveHouseholdId(profile.default_household_id);
+            window.localStorage.setItem(ACTIVE_HOUSEHOLD_KEY, profile.default_household_id);
+          }
+        }
+      } finally {
+        setLoading(false);
+      }
+    };
+    init();
+  }, []);
+
+  // load households
+  useEffect(() => {
+    const loadHouseholds = async () => {
+      const { data: mData, error: mErr } = await supabase
+        .from('household_members')
+        .select('households ( id, name )');
+
+      if (mErr) {
+        console.error(mErr);
+        setHouseholds([]);
+        return;
+      }
+
+      const list: Household[] =
+        (mData || [])
+          .map((x: any) => x?.households)
+          .filter(Boolean)
+          .map((h: any) => ({ id: h.id, name: h.name })) ?? [];
+
+      const seen = new Set<string>();
+      const dedup = list.filter((h) => {
+        if (seen.has(h.id)) return false;
+        seen.add(h.id);
+        return true;
+      });
+
+      setHouseholds(dedup);
+
+      if (!activeHouseholdId && dedup.length > 0) {
+        const first = dedup[0].id;
+        setActiveHouseholdId(first);
+        window.localStorage.setItem(ACTIVE_HOUSEHOLD_KEY, first);
+      }
+    };
+
+    loadHouseholds();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeHouseholdId]);
+
+  useEffect(() => {
+    if (!activeHouseholdId) {
+      setActiveHousehold(null);
+      return;
+    }
+    setActiveHousehold(households.find((x) => x.id === activeHouseholdId) ?? null);
+  }, [activeHouseholdId, households]);
+
+  const loadRooms = async (opts?: { silent?: boolean }) => {
+    const silent = opts?.silent ?? false;
+    if (!silent) setLoading(true);
+
+    try {
+      if (!activeHouseholdId) return;
+
+      const { data, error } = await supabase
+        .from('rooms')
+        .select('id, household_id, name, position')
+        .eq('household_id', activeHouseholdId)
+        .order('position', { ascending: true });
+
+      if (error) console.error(error);
+      setRooms((data as Room[]) ?? []);
+    } finally {
+      if (!silent) setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!activeHouseholdId) return;
+    loadRooms();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeHouseholdId]);
+
+  const onRefresh = async () => {
+    if (!activeHouseholdId) return;
+    setRefreshing(true);
+    try {
+      await loadRooms({ silent: true });
+      setToast('已刷新');
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  const onSignOut = async () => {
+    await supabase.auth.signOut();
+    router.refresh();
+  };
+
+  const doSwitchHousehold = (hid: UUID) => {
+    window.localStorage.setItem(ACTIVE_HOUSEHOLD_KEY, hid);
+    setActiveHouseholdId(hid);
+    setSwitchHouseholdOpen(false);
+    setToast('已切换 household');
+  };
+
+  // room CRUD
+  const openAddRoom = () => {
+    setRoomDraftName('');
+    setAddRoomOpen(true);
+  };
+
+  const createRoom = async () => {
+    const name = roomDraftName.trim();
+    if (!name) return;
+    if (!activeHouseholdId) return;
+
+    const maxPos = Math.max(-1, ...rooms.map((r) => r.position ?? 0));
+    const position = (Number.isFinite(maxPos) ? maxPos : 0) + 1;
+
+    const { error } = await supabase.from('rooms').insert({
+      household_id: activeHouseholdId,
+      name,
+      position,
+    });
+
+    if (error) {
+      console.error(error);
+      setToast('新增 room 失败');
+      return;
+    }
+
+    setAddRoomOpen(false);
+    setToast('已新增 room');
+    await loadRooms({ silent: true });
+  };
+
+  const openEditRoom = (room: Room) => {
+    setTargetRoomId(room.id);
+    setRoomDraftName(room.name ?? '');
+    setEditRoomOpen(true);
+  };
+
+  const saveEditRoom = async () => {
+    if (!targetRoomId) return;
+    const name = roomDraftName.trim();
+    if (!name) return;
+
+    const { error } = await supabase.from('rooms').update({ name }).eq('id', targetRoomId);
+    if (error) {
+      console.error(error);
+      setToast('更新 room 失败');
+      return;
+    }
+
+    setEditRoomOpen(false);
+    setTargetRoomId(null);
+    setToast('已更新 room');
+    await loadRooms({ silent: true });
+  };
+
+  const openDeleteRoom = (roomId: UUID) => {
+    setTargetRoomId(roomId);
+    setDeleteRoomConfirmOpen(true);
+  };
+
+  const confirmDeleteRoom = async () => {
+    if (!targetRoomId) return;
+
+    // 注意：rooms 删除会影响 room_columns/room_cells/items 的级联情况取决于你数据库外键设置。
+    // 这里先做“提示 + 执行 delete rooms”。
+    const { error } = await supabase.from('rooms').delete().eq('id', targetRoomId);
+    if (error) {
+      console.error(error);
+      setToast('删除 room 失败');
+      return;
+    }
+
+    setDeleteRoomConfirmOpen(false);
+    setTargetRoomId(null);
+    setToast('已删除 room');
+    await loadRooms({ silent: true });
+  };
+
+  const filteredRooms = useMemo(() => {
+    // 轻量过滤（不引入 fuse），更稳定也更快
+    return rooms;
+  }, [rooms]);
+
+  return (
+    <AuthGate>
+      <div className={cx('min-h-screen', THEME.oatBg)}>
+        <div className="max-w-[1200px] mx-auto px-4 py-5">
+          <HouseholdTopBar
+            householdName={activeHousehold?.name ?? 'Household'}
+            userEmail={userEmail}
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            onOpenSwitchHousehold={() => setSwitchHouseholdOpen(true)}
+            onSignOut={onSignOut}
+          />
+
+          <div className="mt-4 flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-xl font-semibold truncate">All rooms</div>
+              <div className="text-xs text-black/60 mt-0.5">Click a room to open.</div>
+            </div>
+
+            <button
+              type="button"
+              className={cx('px-3 py-2 rounded-xl border text-sm hover:bg-black/5', THEME.blueBorderSoft)}
+              onClick={openAddRoom}
+              title="Add room"
+            >
+              Add room
+            </button>
+          </div>
+
+          <div className="mt-4">
+            {loading ? (
+              <div className="text-sm text-black/60 py-6">Loading rooms…</div>
+            ) : filteredRooms.length === 0 ? (
+              <div className={cx('rounded-2xl border p-5', THEME.borderSoft, THEME.oatCard)}>
+                <div className="text-sm text-black/70">No rooms yet.</div>
+                <button type="button" className="mt-3 px-3 py-2 rounded-xl border border-black bg-black text-white hover:bg-black/90 text-sm" onClick={openAddRoom}>
+                  Create your first room
+                </button>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {filteredRooms.map((r) => (
+                  <div key={r.id} className={cx('rounded-2xl border p-4', THEME.borderSoft, THEME.oatCard)}>
+                    <div className="flex items-start justify-between gap-2">
+                      <button
+                        type="button"
+                        className="text-left min-w-0 flex-1"
+                        onClick={() => router.push(`/rooms/${r.id}`)}
+                        title="Open room"
+                      >
+                        <div className="text-base font-semibold truncate">{r.name}</div>
+                        <div className="text-xs text-black/60 mt-1">Open →</div>
+                      </button>
+
+                      <div className="flex items-center gap-2">
+                        <SmallIconButton title="Edit room" onClick={() => openEditRoom(r)}>
+                          ✏️
+                        </SmallIconButton>
+                        <SmallIconButton title="Delete room" onClick={() => openDeleteRoom(r.id)} className="hover:bg-red-50">
+                          🗑️
+                        </SmallIconButton>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Switch household */}
+        <Modal open={switchHouseholdOpen} title="Switch household" onClose={() => setSwitchHouseholdOpen(false)} widthClass="max-w-lg">
+          <div className="text-sm text-black/70">选择一个 household：</div>
+          <div className="mt-3 flex flex-col gap-2">
+            {households.map((h) => (
+              <button
+                key={h.id}
+                type="button"
+                onClick={() => doSwitchHousehold(h.id)}
+                className={cx(
+                  'px-3 py-2 rounded-xl border text-left hover:bg-black/5',
+                  h.id === activeHouseholdId ? 'border-black/30 bg-black/5' : 'border-black/10'
+                )}
+              >
+                <div className="text-sm">{h.name}</div>
+                {h.id === activeHouseholdId && <div className="text-xs text-black/60 mt-0.5">Current</div>}
+              </button>
+            ))}
+          </div>
+        </Modal>
+
+        {/* Add room */}
+        <Modal open={addRoomOpen} title="Add room" onClose={() => setAddRoomOpen(false)} widthClass="max-w-lg">
+          <div className="text-sm text-black/70">Room name</div>
+          <input
+            value={roomDraftName}
+            onChange={(e) => setRoomDraftName(e.target.value)}
+            className="mt-2 w-full px-3 py-2 rounded-xl border border-black/10 bg-white text-sm outline-none focus:ring-2 focus:ring-black/10"
+            placeholder="e.g., Kitchen"
+          />
+          <div className="mt-5 flex items-center justify-end gap-2">
+            <button className="px-3 py-2 rounded-xl border border-black/10 hover:bg-black/5 text-sm" onClick={() => setAddRoomOpen(false)}>
+              Cancel
+            </button>
+            <button className="px-3 py-2 rounded-xl border border-black bg-black text-white hover:bg-black/90 text-sm" onClick={createRoom}>
+              Create
+            </button>
+          </div>
+        </Modal>
+
+        {/* Edit room */}
+        <Modal open={editRoomOpen} title="Edit room" onClose={() => setEditRoomOpen(false)} widthClass="max-w-lg">
+          <div className="text-sm text-black/70">Room name</div>
+          <input
+            value={roomDraftName}
+            onChange={(e) => setRoomDraftName(e.target.value)}
+            className="mt-2 w-full px-3 py-2 rounded-xl border border-black/10 bg-white text-sm outline-none focus:ring-2 focus:ring-black/10"
+          />
+          <div className="mt-5 flex items-center justify-end gap-2">
+            <button className="px-3 py-2 rounded-xl border border-black/10 hover:bg-black/5 text-sm" onClick={() => setEditRoomOpen(false)}>
+              Cancel
+            </button>
+            <button className="px-3 py-2 rounded-xl border border-black bg-black text-white hover:bg-black/90 text-sm" onClick={saveEditRoom}>
+              Save
+            </button>
+          </div>
+        </Modal>
+
+        {/* Delete room */}
+        <ConfirmModal
+          open={deleteRoomConfirmOpen}
+          title="Delete room?"
+          description="删除 room 可能会影响该 room 下的 columns/cells/items（取决于数据库外键/级联设置）。该操作不可撤销。"
+          onCancel={() => {
+            setDeleteRoomConfirmOpen(false);
+            setTargetRoomId(null);
+          }}
+          onConfirm={confirmDeleteRoom}
+        />
+
+        {toast && <Toast message={toast} />}
+      </div>
+    </AuthGate>
+  );
+}
+
