@@ -876,14 +876,16 @@ export default function RoomPage() {
     return "temporary";
   }, [household?.id, defaultHouseholdId]);
 
-  if (!session) return <AuthGate onAuthed={(s) => setSession(s)} />;
+// ✅ 不要在 early return 之后再调用任何 Hook
+const modalImageUrl =
+  itemImageLocalUrl
+    ? itemImageLocalUrl
+    : editingItem?.image_path
+      ? resolveImageUrl(editingItem.image_path)
+      : null;
 
-  // ✅ modal 内部当前要显示的大图 URL：优先本地选择的文件 preview，其次 DB 里的 image_path
-  const modalImageUrl = useMemo(() => {
-    if (itemImageLocalUrl) return itemImageLocalUrl;
-    if (editingItem?.image_path) return resolveImageUrl(editingItem.image_path);
-    return null;
-  }, [itemImageLocalUrl, editingItem?.image_path]);
+if (!session) return <AuthGate onAuthed={(s) => setSession(s)} />;
+
 
   return (
     <div style={{ minHeight: "100vh", background: COLORS.oatBg, color: COLORS.ink }}>
