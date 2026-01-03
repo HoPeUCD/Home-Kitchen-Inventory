@@ -20,7 +20,7 @@ const ITEM_IMG_FIELD = "image_path";
 const ACTIVE_HOUSEHOLD_KEY = "active_household_id";
 
 /** ✅ 图片上传：Supabase Storage bucket 名字
- *  如果你之前创建的 bucket 不是 item-images，请改这里
+ *  如果你实际 bucket 不是 item-images，请改这里
  */
 const STORAGE_BUCKET = "item-images";
 
@@ -222,6 +222,9 @@ export default function RoomPage() {
   const [itemImageFile, setItemImageFile] = useState<File | null>(null);
   const [itemImageLocalUrl, setItemImageLocalUrl] = useState<string | null>(null);
 
+  // ✅ 关键修复：remote 预览 URL（Signed URL 或 Public URL）
+  const [modalImageRemoteUrl, setModalImageRemoteUrl] = useState<string | null>(null);
+
   const cellRefMap = useRef<Record<string, HTMLDivElement | null>>({});
 
   useEffect(() => {
@@ -237,9 +240,7 @@ export default function RoomPage() {
   useEffect(() => {
     if (!itemModalOpen) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        closeItemModal();
-      }
+      if (e.key === "Escape") closeItemModal();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -258,10 +259,11 @@ export default function RoomPage() {
     setItemModalOpen(false);
     setEditingItem(null);
 
-    // reset image states
     if (itemImageLocalUrl) URL.revokeObjectURL(itemImageLocalUrl);
     setItemImageLocalUrl(null);
     setItemImageFile(null);
+
+    setModalImageRemoteUrl(null);
   }
 
   async function ensureProfileRow() {
@@ -447,6 +449,59 @@ export default function RoomPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id, roomId]);
 
+  // ✅ 关键修复：弹窗打开时，若有 editingItem.image_path（且不是本地文件预览），生成 Signed URL 预览
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadPreviewUrl() {
+      if (!itemModalOpen) {
+        setModalImageRemoteUrl(null);
+        return;
+      }
+
+      // 本地选了文件 => 用本地预览
+      if (itemImageLocalUrl) {
+        setModalImageRemoteUrl(null);
+        return;
+      }
+
+      const path = editingItem?.image_path ?? null;
+      if (!path) {
+        setModalImageRemoteUrl(null);
+        return;
+      }
+
+      // 若 DB 存的是完整 URL，直接用
+      if (isUrl(path)) {
+        if (!cancelled) setModalImageRemoteUrl(path);
+        return;
+      }
+
+      try {
+        // 1) 优先 Signed URL（适用于 private bucket）
+        const { data: signed, error: signedErr } = await supabase.storage
+          .from(STORAGE_BUCKET)
+          .createSignedUrl(path, 60 * 60);
+
+        if (!signedErr && signed?.signedUrl) {
+          if (!cancelled) setModalImageRemoteUrl(signed.signedUrl);
+          return;
+        }
+
+        // 2) fallback：Public URL（适用于 public bucket）
+        const { data: pub } = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(path);
+        if (!cancelled) setModalImageRemoteUrl(pub?.publicUrl ?? null);
+      } catch {
+        if (!cancelled) setModalImageRemoteUrl(null);
+      }
+    }
+
+    loadPreviewUrl();
+    return () => {
+      cancelled = true;
+    };
+  }, [itemModalOpen, itemImageLocalUrl, editingItem?.image_path]);
+
   // Current room columns with cells
   const columnsWithCells = useMemo(() => {
     const byCol: Record<string, Cell[]> = {};
@@ -572,28 +627,18 @@ export default function RoomPage() {
     }));
   }, [locationRoomId, hhCells, hhIndex]);
 
-  /** ✅ 解析 image_path -> 可显示 URL
-   *  - 如果 image_path 已经是完整 URL，就直接用
-   *  - 否则当作 Storage object path，走 getPublicUrl
-   *  注意：若 bucket 不是 public，你需要改成 createSignedUrl（这会更安全）
-   */
-  function resolveImageUrl(imagePath?: string | null): string | null {
-    if (!imagePath) return null;
-    if (isUrl(imagePath)) return imagePath;
-
-    const { data } = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(imagePath);
-    return data?.publicUrl ?? null;
-  }
-
   function resetItemModalFields() {
     setItemName("");
     setItemQty(1);
     setItemExpire("");
     setItemCellId("");
     setLocationRoomId("");
+
     if (itemImageLocalUrl) URL.revokeObjectURL(itemImageLocalUrl);
     setItemImageLocalUrl(null);
     setItemImageFile(null);
+
+    setModalImageRemoteUrl(null);
   }
 
   function openAddItem(cellId: string) {
@@ -625,14 +670,15 @@ export default function RoomPage() {
     if (!itemImageFile) return null;
     if (!activeHouseholdId) return null;
 
-    const ext = itemImageFile.name.split(".").pop() || "jpg";
     const safeName = sanitizeFilename(itemImageFile.name);
     const uuid = typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : String(Date.now());
+
+    // ✅ 你的存储路径结构：household_id/uuid_filename.png
     const objectPath = `${activeHouseholdId}/${uuid}_${safeName}`;
 
     const up = await supabase.storage.from(STORAGE_BUCKET).upload(objectPath, itemImageFile, {
       upsert: true,
-      contentType: itemImageFile.type || `image/${ext}`,
+      contentType: itemImageFile.type || "image/*",
     });
 
     if (up.error) {
@@ -710,7 +756,6 @@ export default function RoomPage() {
       if (del.error) throw new Error(del.error.message);
 
       setItems((prev) => prev.filter((x) => x.id !== itemId));
-
       closeItemModal();
     } catch (e: any) {
       setErr(e?.message ?? "Delete failed.");
@@ -876,16 +921,11 @@ export default function RoomPage() {
     return "temporary";
   }, [household?.id, defaultHouseholdId]);
 
-// ✅ 不要在 early return 之后再调用任何 Hook
-const modalImageUrl =
-  itemImageLocalUrl
-    ? itemImageLocalUrl
-    : editingItem?.image_path
-      ? resolveImageUrl(editingItem.image_path)
-      : null;
+  // ✅ 不用 Hook：避免 hooks 数量变化问题
+  const modalImageUrl = itemImageLocalUrl ?? modalImageRemoteUrl ?? null;
 
-if (!session) return <AuthGate onAuthed={(s) => setSession(s)} />;
-
+  // ✅ 注意：所有 Hooks 都在上面了，这里可以安全 early return
+  if (!session) return <AuthGate onAuthed={(s) => setSession(s)} />;
 
   return (
     <div style={{ minHeight: "100vh", background: COLORS.oatBg, color: COLORS.ink }}>
@@ -1318,7 +1358,7 @@ if (!session) return <AuthGate onAuthed={(s) => setSession(s)} />;
         )}
       </div>
 
-      {/* ✅ Item modal：改回“居中弹出窗口”的样式 + Enter 提交 + 大图 preview + 图片上传 */}
+      {/* ✅ Item modal：居中弹出 + Signed URL 预览 + 图片上传 */}
       {itemModalOpen ? (
         <div
           style={{
@@ -1341,7 +1381,6 @@ if (!session) return <AuthGate onAuthed={(s) => setSession(s)} />;
               borderRadius: 18,
               border: `1px solid ${COLORS.border}`,
               padding: 14,
-              // ✅ 轻量移动端兜底：内容可滚动，避免小屏卡死
               maxHeight: "90vh",
               overflowY: "auto",
             }}
@@ -1356,7 +1395,7 @@ if (!session) return <AuthGate onAuthed={(s) => setSession(s)} />;
               </button>
             </div>
 
-            {/* ✅ 大图 preview：只在弹窗里显示 */}
+            {/* ✅ 大图 preview：优先本地文件预览，否则 Signed URL/Public URL */}
             <div style={{ marginTop: 12 }}>
               {modalImageUrl ? (
                 <div
@@ -1378,6 +1417,10 @@ if (!session) return <AuthGate onAuthed={(s) => setSession(s)} />;
                       display: "block",
                       background: "white",
                     }}
+                    onError={() => {
+                      // 如果你希望更强的 debug，可打开这一行
+                      // console.warn("Image failed to load:", modalImageUrl);
+                    }}
                   />
                 </div>
               ) : (
@@ -1397,7 +1440,6 @@ if (!session) return <AuthGate onAuthed={(s) => setSession(s)} />;
               )}
             </div>
 
-            {/* ✅ form：Enter 提交（新增/更新都一样） */}
             <form
               onSubmit={(e) => {
                 e.preventDefault();
@@ -1477,7 +1519,7 @@ if (!session) return <AuthGate onAuthed={(s) => setSession(s)} />;
                   </div>
                 </div>
 
-                {/* ✅ 图片上传（回来了） */}
+                {/* ✅ 图片上传 */}
                 <div style={{ display: "grid", gap: 6 }}>
                   <div style={{ fontWeight: 900 }}>Image</div>
                   <input
@@ -1494,40 +1536,15 @@ if (!session) return <AuthGate onAuthed={(s) => setSession(s)} />;
                       } else {
                         setItemImageLocalUrl(null);
                       }
+
+                      // 选新文件后，remote URL 不需要
+                      setModalImageRemoteUrl(null);
                     }}
                     style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
                   />
                   <div style={{ color: COLORS.muted, fontSize: 12 }}>
-                    Selecting a file will upload it on Save.
-                    <br />
-                    Bucket: <b>{STORAGE_BUCKET}</b> (change in code if yours differs)
+                    Bucket: <b>{STORAGE_BUCKET}</b>. Preview uses Signed URL first (works even if bucket is private).
                   </div>
-
-                  {/* 可选：移除图片（只是把 DB 字段清空，不删 storage 文件） */}
-                  {editingItem?.image_path ? (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        // 仅清空当前 editingItem 的 image_path（等你点 Save 才写入）
-                        setEditingItem((prev) => (prev ? { ...prev, image_path: null } : prev));
-                        if (itemImageLocalUrl) URL.revokeObjectURL(itemImageLocalUrl);
-                        setItemImageLocalUrl(null);
-                        setItemImageFile(null);
-                      }}
-                      style={{
-                        width: "fit-content",
-                        padding: "8px 10px",
-                        borderRadius: 12,
-                        border: `1px solid rgba(220,0,0,.25)`,
-                        background: "rgba(220,0,0,.06)",
-                        color: "crimson",
-                        fontWeight: 900,
-                        cursor: "pointer",
-                      }}
-                    >
-                      Remove current image
-                    </button>
-                  ) : null}
                 </div>
 
                 {/* ✅ 两级联动 location */}
@@ -1624,9 +1641,7 @@ if (!session) return <AuthGate onAuthed={(s) => setSession(s)} />;
                 </div>
 
                 {busy ? <div style={{ color: COLORS.muted }}>Working…</div> : null}
-                <div style={{ color: COLORS.muted, fontSize: 12 }}>
-                  Tip: Press Enter to {editingItem ? "save" : "add"}.
-                </div>
+                <div style={{ color: COLORS.muted, fontSize: 12 }}>Tip: Press Enter to {editingItem ? "save" : "add"}.</div>
               </div>
             </form>
           </div>
@@ -1636,9 +1651,6 @@ if (!session) return <AuthGate onAuthed={(s) => setSession(s)} />;
   );
 }
 
-/**
- * ✅ 小组件：当 room 变化导致 itemCellId 不在该 room options 里时，自动选第一格
- */
 function AutoFixCellSelection(props: {
   roomCellOptions: { id: string; code: string; label: string }[];
   itemCellId: string;
@@ -1649,9 +1661,7 @@ function AutoFixCellSelection(props: {
   useEffect(() => {
     if (roomCellOptions.length === 0) return;
     const exists = roomCellOptions.some((x) => x.id === itemCellId);
-    if (!exists) {
-      setItemCellId(roomCellOptions[0].id);
-    }
+    if (!exists) setItemCellId(roomCellOptions[0].id);
   }, [roomCellOptions, itemCellId, setItemCellId]);
 
   return null;
