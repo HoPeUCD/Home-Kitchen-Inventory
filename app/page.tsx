@@ -1,20 +1,27 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
+import type { Session } from "@supabase/supabase-js";
 import { supabase } from "@/src/lib/supabase";
 import { useRouter } from "next/navigation";
 import AuthGate from "@/src/components/AuthGate";
 
+function cx(...classes: Array<string | false | null | undefined>) {
+  return classes.filter(Boolean).join(" ");
+}
+
 export default function Home() {
   const router = useRouter();
-  const [session, setSession] = useState<any>(null);
-  const [err, setErr] = useState<string | null>(null);
 
+  const [session, setSession] = useState<Session | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [status, setStatus] = useState<string>("Preparing…");
+
+  // theme（与其他页面保持一致的 oat）
+  const oatBg = "bg-[#F7F1E6]";
+
+  // 监听 auth 状态（可选，但能让 sign out 后状态同步）
   useEffect(() => {
-    (async () => {
-      const { data } = await supabase.auth.getSession();
-      setSession(data.session ?? null);
-    })();
     const { data: sub } = supabase.auth.onAuthStateChange((_evt, s) => setSession(s));
     return () => sub.subscription.unsubscribe();
   }, []);
@@ -24,33 +31,56 @@ export default function Home() {
 
     (async () => {
       setErr(null);
+      setStatus("Checking profile…");
 
-      const { data: profile, error } = await supabase
+      const userId = session.user.id;
+
+      // profiles schema 兼容：先尝试 id = userId，再 fallback user_id = userId
+      const profById = await supabase
         .from("profiles")
         .select("default_household_id")
-        .eq("user_id", session.user.id)
+        .eq("id", userId)
         .maybeSingle();
 
-      if (error) {
-        setErr(error.message);
-        return;
+      let defaultHouseholdId: string | null = null;
+
+      if (profById.error) {
+        const profByUserId = await supabase
+          .from("profiles")
+          .select("default_household_id")
+          .eq("user_id", userId)
+          .maybeSingle();
+
+        if (profByUserId.error) {
+          setErr(profByUserId.error.message);
+          setStatus("Failed");
+          return;
+        }
+
+        defaultHouseholdId = (profByUserId.data as any)?.default_household_id ?? null;
+      } else {
+        defaultHouseholdId = (profById.data as any)?.default_household_id ?? null;
       }
 
-      if (!profile?.default_household_id) {
+      if (!defaultHouseholdId) {
+        setStatus("No default household. Redirecting…");
         router.replace("/onboarding");
         return;
       }
 
-      // 你可以选择跳 rooms 列表 或者直接跳某个 room
+      setStatus("Redirecting…");
       router.replace("/rooms");
     })();
   }, [session?.user?.id, router]);
 
-  if (!session) return <AuthGate onAuthed={(s) => setSession(s)} />;
-
   return (
-    <div style={{ padding: 16 }}>
-      {err ? <div style={{ color: "crimson" }}>{err}</div> : <div>Redirecting…</div>}
-    </div>
+    <AuthGate onAuthed={(s) => setSession(s)}>
+      <div className={cx("min-h-screen flex items-center justify-center", oatBg)}>
+        <div className="px-4 py-3 rounded-2xl border border-black/10 bg-white/60 text-sm text-black/70">
+          {err ? <span className="text-red-700">{err}</span> : <span>{status}</span>}
+        </div>
+      </div>
+    </AuthGate>
   );
 }
+
