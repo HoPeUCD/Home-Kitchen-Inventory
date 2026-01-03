@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import AuthGate from "@/src/components/AuthGate";
 import { supabase } from "@/src/lib/supabase";
@@ -165,6 +165,46 @@ function sanitizeFilename(name: string): string {
 }
 function isUrl(s?: string | null): boolean {
   return !!s && /^https?:\/\//i.test(s);
+}
+
+/** ✅ 小 emoji icon button（无边框/透明背景） */
+function IconBtn(props: {
+  title: string;
+  onClick: () => void;
+  disabled?: boolean;
+  danger?: boolean;
+  children: React.ReactNode;
+}) {
+  const { title, onClick, disabled, danger, children } = props;
+  return (
+    <button
+      type="button"
+      title={title}
+      aria-label={title}
+      onClick={(e) => {
+        e.stopPropagation();
+        onClick();
+      }}
+      disabled={disabled}
+      style={{
+        width: 26,
+        height: 26,
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        borderRadius: 10,
+        border: "none",
+        background: "transparent",
+        cursor: disabled ? "not-allowed" : "pointer",
+        opacity: disabled ? 0.4 : 1,
+        fontSize: 16,
+        lineHeight: "1",
+        color: danger ? "crimson" : COLORS.ink,
+      }}
+    >
+      <span style={{ transform: "translateY(-0.5px)" }}>{children}</span>
+    </button>
+  );
 }
 
 export default function RoomPage() {
@@ -594,12 +634,7 @@ export default function RoomPage() {
       .map((it) => ({ it, loc: hhIndex.get(it.cell_id) }));
   }, [search, items, hhIndex]);
 
-  /** ✅（2）Location cell 列表：彻底修复“当前房间读不到”的问题
-   *  不再依赖 hhIndex 的 roomId 过滤，而是：
-   *  - 用 hhColumns 找到该 room 的 columnIds
-   *  - 用 hhCells 过滤 column_id in columnIds
-   *  - label 用 column name + cell code
-   */
+  /** ✅（2）Location cell 列表：彻底修复“当前房间读不到”的问题 */
   const roomCellOptions = useMemo(() => {
     const rid = locationRoomId;
     if (!rid) return [];
@@ -927,14 +962,26 @@ export default function RoomPage() {
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
             <button
               onClick={() => router.push("/rooms")}
-              style={{ padding: "8px 10px", borderRadius: 12, fontWeight: 900, border: `1px solid ${COLORS.border}`, background: "white" }}
+              style={{
+                padding: "8px 10px",
+                borderRadius: 12,
+                fontWeight: 900,
+                border: `1px solid ${COLORS.border}`,
+                background: "white",
+              }}
             >
               Rooms
             </button>
 
             <button
               onClick={() => router.push("/households")}
-              style={{ padding: "8px 10px", borderRadius: 12, fontWeight: 900, border: `1px solid ${COLORS.border}`, background: "white" }}
+              style={{
+                padding: "8px 10px",
+                borderRadius: 12,
+                fontWeight: 900,
+                border: `1px solid ${COLORS.border}`,
+                background: "white",
+              }}
             >
               Switch household
             </button>
@@ -946,7 +993,13 @@ export default function RoomPage() {
             <button
               onClick={() => loadContextAndData()}
               disabled={busy}
-              style={{ padding: "8px 10px", borderRadius: 12, border: `1px solid ${COLORS.border}`, background: "white", opacity: busy ? 0.6 : 1 }}
+              style={{
+                padding: "8px 10px",
+                borderRadius: 12,
+                border: `1px solid ${COLORS.border}`,
+                background: "white",
+                opacity: busy ? 0.6 : 1,
+              }}
             >
               Refresh
             </button>
@@ -982,7 +1035,12 @@ export default function RoomPage() {
             <div style={{ marginTop: 8 }}>
               <button
                 onClick={() => loadContextAndData()}
-                style={{ padding: "8px 10px", borderRadius: 12, border: `1px solid ${COLORS.border}`, background: "white" }}
+                style={{
+                  padding: "8px 10px",
+                  borderRadius: 12,
+                  border: `1px solid ${COLORS.border}`,
+                  background: "white",
+                }}
               >
                 Retry
               </button>
@@ -995,7 +1053,15 @@ export default function RoomPage() {
         ) : (
           <>
             {/* Expiring soon */}
-            <div style={{ background: COLORS.oatCard, border: `1px solid ${COLORS.border}`, borderRadius: 16, padding: 14, marginBottom: 12 }}>
+            <div
+              style={{
+                background: COLORS.oatCard,
+                border: `1px solid ${COLORS.border}`,
+                borderRadius: 16,
+                padding: 14,
+                marginBottom: 12,
+              }}
+            >
               <div style={{ fontWeight: 900, marginBottom: 8 }}>Expiring soon</div>
 
               <div style={{ display: "grid", gap: 10, gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))" }}>
@@ -1032,7 +1098,15 @@ export default function RoomPage() {
             </div>
 
             {/* Search */}
-            <div style={{ background: COLORS.oatCard, border: `1px solid ${COLORS.border}`, borderRadius: 16, padding: 14, marginBottom: 12 }}>
+            <div
+              style={{
+                background: COLORS.oatCard,
+                border: `1px solid ${COLORS.border}`,
+                borderRadius: 16,
+                padding: 14,
+                marginBottom: 12,
+              }}
+            >
               <div style={{ fontWeight: 900, marginBottom: 8 }}>Search items</div>
               <input
                 value={search}
@@ -1049,7 +1123,9 @@ export default function RoomPage() {
                       {filteredItemsSummary.map(({ it, loc }) => (
                         <div key={it.id} style={{ cursor: "pointer" }} onClick={() => goToCell(it)}>
                           <span style={{ fontWeight: 900, color: COLORS.ink }}>{it.name}</span>{" "}
-                          <span>— {loc ? loc.label : "Unknown"} · qty {it.qty}</span>
+                          <span>
+                            — {loc ? loc.label : "Unknown"} · qty {it.qty}
+                          </span>
                         </div>
                       ))}
                     </div>
@@ -1059,7 +1135,15 @@ export default function RoomPage() {
             </div>
 
             {/* Add column */}
-            <div style={{ background: COLORS.oatCard, border: `1px solid ${COLORS.border}`, borderRadius: 16, padding: 14, marginBottom: 12 }}>
+            <div
+              style={{
+                background: COLORS.oatCard,
+                border: `1px solid ${COLORS.border}`,
+                borderRadius: 16,
+                padding: 14,
+                marginBottom: 12,
+              }}
+            >
               <div style={{ fontWeight: 900, marginBottom: 8 }}>Add column</div>
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                 <input
@@ -1089,7 +1173,7 @@ export default function RoomPage() {
 
             {/* Columns */}
             <div style={{ display: "flex", gap: 12, alignItems: "flex-start", overflowX: "auto", paddingBottom: 6 }}>
-              {columnsWithCells.map(({ col, cells }) => (
+              {columnsWithCells.map(({ col, cells: colCells }) => (
                 <div
                   key={col.id}
                   style={{
@@ -1135,7 +1219,13 @@ export default function RoomPage() {
                             setEditingColumnId(null);
                             setEditingColumnName("");
                           }}
-                          style={{ padding: "8px 10px", borderRadius: 10, border: `1px solid ${COLORS.border}`, background: "white", cursor: "pointer" }}
+                          style={{
+                            padding: "8px 10px",
+                            borderRadius: 10,
+                            border: `1px solid ${COLORS.border}`,
+                            background: "white",
+                            cursor: "pointer",
+                          }}
                         >
                           Cancel
                         </button>
@@ -1149,7 +1239,13 @@ export default function RoomPage() {
                               setEditingColumnId(col.id);
                               setEditingColumnName(col.name);
                             }}
-                            style={{ padding: "6px 8px", borderRadius: 10, border: `1px solid ${COLORS.border}`, background: "white", cursor: "pointer" }}
+                            style={{
+                              padding: "6px 8px",
+                              borderRadius: 10,
+                              border: `1px solid ${COLORS.border}`,
+                              background: "white",
+                              cursor: "pointer",
+                            }}
                           >
                             Edit
                           </button>
@@ -1174,7 +1270,7 @@ export default function RoomPage() {
 
                   {/* Cells */}
                   <div style={{ display: "grid", gap: 10 }}>
-                    {cells.map((cell) => {
+                    {colCells.map((cell) => {
                       const list = itemsByCell[cell.id] || [];
                       const isEditingThis = editingCellId === cell.id;
 
@@ -1232,12 +1328,28 @@ export default function RoomPage() {
                             ) : (
                               <>
                                 <div style={{ fontWeight: 900 }}>{cell.code}</div>
-                                <button
-                                  onClick={() => openAddItem(cell.id)}
-                                  style={{ padding: "6px 8px", borderRadius: 10, border: `1px solid ${COLORS.border}`, background: "white", cursor: "pointer" }}
-                                >
-                                  + Item
-                                </button>
+
+                                {/* ✅ 三个小 emoji：Add / Edit / Del（无底部框框） */}
+                                <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                                  <IconBtn title="Add item" onClick={() => openAddItem(cell.id)} disabled={busy}>
+                                    ➕
+                                  </IconBtn>
+
+                                  <IconBtn
+                                    title="Edit cell"
+                                    onClick={() => {
+                                      setEditingCellId(cell.id);
+                                      setEditingCellCode(cell.code);
+                                    }}
+                                    disabled={busy}
+                                  >
+                                    ✏️
+                                  </IconBtn>
+
+                                  <IconBtn title="Delete cell" onClick={() => deleteCell(cell)} disabled={busy} danger>
+                                    🗑️
+                                  </IconBtn>
+                                </div>
                               </>
                             )}
                           </div>
@@ -1284,51 +1396,6 @@ export default function RoomPage() {
                                 ))
                             )}
                           </div>
-
-                          {/* ✅（3）cell 底部 Edit/Del 改成小 icon */}
-                          {!isEditingThis ? (
-                            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 2 }}>
-                              <button
-                                onClick={() => {
-                                  setEditingCellId(cell.id);
-                                  setEditingCellCode(cell.code);
-                                }}
-                                title="Edit cell"
-                                style={{
-                                  width: 32,
-                                  height: 32,
-                                  borderRadius: 10,
-                                  border: `1px solid ${COLORS.border}`,
-                                  background: "white",
-                                  cursor: "pointer",
-                                  fontWeight: 900,
-                                  lineHeight: "32px",
-                                  textAlign: "center",
-                                }}
-                              >
-                                ✎
-                              </button>
-
-                              <button
-                                onClick={() => deleteCell(cell)}
-                                title="Delete cell"
-                                style={{
-                                  width: 32,
-                                  height: 32,
-                                  borderRadius: 10,
-                                  border: `1px solid rgba(220,0,0,.25)`,
-                                  background: "rgba(220,0,0,.06)",
-                                  color: "crimson",
-                                  cursor: "pointer",
-                                  fontWeight: 900,
-                                  lineHeight: "32px",
-                                  textAlign: "center",
-                                }}
-                              >
-                                🗑
-                              </button>
-                            </div>
-                          ) : null}
                         </div>
                       );
                     })}
@@ -1575,11 +1642,7 @@ export default function RoomPage() {
                     </select>
 
                     {locationRoomId ? (
-                      <AutoFixCellSelection
-                        roomCellOptions={roomCellOptions}
-                        itemCellId={itemCellId}
-                        setItemCellId={setItemCellId}
-                      />
+                      <AutoFixCellSelection roomCellOptions={roomCellOptions} itemCellId={itemCellId} setItemCellId={setItemCellId} />
                     ) : null}
                   </div>
                 </div>
