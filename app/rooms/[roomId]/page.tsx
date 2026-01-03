@@ -22,7 +22,7 @@ const COLORS = {
 type Household = { id: string; name: string; join_code: string | null };
 type Room = { id: string; household_id: string; name: string; position?: number };
 
-// ✅ 注意：这里移除了 household_id（因为你表里没有）
+// ✅ 你的 room_columns：用 room_id 归属 room
 type Column = {
   id: string;
   room_id: string;
@@ -30,19 +30,20 @@ type Column = {
   position: number;
 };
 
+// ✅ 你的 room_cells：没有 room_id；通过 column_id 归属 column，再通过 column.room_id 归属 room
 type Cell = {
   id: string;
-  room_id: string;
   column_id: string;
   code: string;
   position: number;
 };
 
+// ✅ items_v2：你之前说 cell_id 是 uuid（room_cells.id），并且 items_v2 有 room_id / household_id
 type Item = {
   id: string;
   household_id: string;
   room_id: string;
-  cell_id: string; // uuid -> room_cells.id
+  cell_id: string;
   name: string;
   quantity: number;
   expire_date?: string | null;
@@ -103,6 +104,7 @@ function sortItemsByExpiry(a: Item, b: Item): number {
   return a.name.localeCompare(b.name);
 }
 
+// --- 模糊搜索（客户端） ---
 function normalize(s: string): string {
   return (s || "").toLowerCase().trim();
 }
@@ -135,6 +137,7 @@ function fuzzyMatch(query: string, text: string): boolean {
   }
   if (hits > 0 && hits >= Math.max(1, Math.ceil(qTokens.length * 0.5))) return true;
 
+  // 轻量拼写容错
   if (q.length <= 6) {
     const dist = levenshtein(q, t.slice(0, Math.min(t.length, 12)));
     if (dist <= 2) return true;
@@ -215,7 +218,6 @@ export default function RoomPage() {
         .select("default_household_id")
         .eq("user_id", user.id)
         .maybeSingle();
-
       if (profRes.error) throw new Error(profRes.error.message);
       const def = (profRes.data?.default_household_id as string | null) ?? null;
       setDefaultHouseholdId(def);
@@ -256,7 +258,6 @@ export default function RoomPage() {
         .eq("id", roomId)
         .eq("household_id", hid)
         .maybeSingle();
-
       if (roomRes.error) throw new Error(roomRes.error.message);
       if (!roomRes.data) {
         setRoom(null);
@@ -267,33 +268,37 @@ export default function RoomPage() {
       }
       setRoom(roomRes.data as Room);
 
-      // ✅ 修复点：room_columns 不再 select/eq household_id
+      // 1) columns by room_id
       const colRes = await supabase
         .from("room_columns")
         .select("id,room_id,name,position")
         .eq("room_id", roomId)
         .order("position", { ascending: true });
-
       if (colRes.error) throw new Error(colRes.error.message);
-      setColumns((colRes.data as Column[]) ?? []);
+      const cols = (colRes.data as Column[]) ?? [];
+      setColumns(cols);
 
-      // ✅ 修复点：room_cells 不再 select/eq household_id
-      const cellRes = await supabase
-        .from("room_cells")
-        .select("id,room_id,column_id,code,position")
-        .eq("room_id", roomId)
-        .order("position", { ascending: true });
+      // 2) cells by column_id IN (colIds)
+      const colIds = cols.map((c) => c.id);
+      if (colIds.length === 0) {
+        setCells([]);
+      } else {
+        const cellRes = await supabase
+          .from("room_cells")
+          .select("id,column_id,code,position")
+          .in("column_id", colIds)
+          .order("column_id", { ascending: true })
+          .order("position", { ascending: true });
+        if (cellRes.error) throw new Error(cellRes.error.message);
+        setCells((cellRes.data as Cell[]) ?? []);
+      }
 
-      if (cellRes.error) throw new Error(cellRes.error.message);
-      setCells((cellRes.data as Cell[]) ?? []);
-
-      // items_v2 仍然用 household_id + room_id（你这里是有 household_id 的）
+      // 3) items by household + room
       const itemRes = await supabase
         .from("items_v2")
         .select("id,household_id,room_id,cell_id,name,quantity,expire_date,image_url")
         .eq("room_id", roomId)
         .eq("household_id", hid);
-
       if (itemRes.error) throw new Error(itemRes.error.message);
       setItems((itemRes.data as Item[]) ?? []);
     } catch (e: any) {
@@ -445,6 +450,7 @@ export default function RoomPage() {
     }
   }
 
+  // ✅ 删除 item：不需要确认
   async function deleteItem(itemId: string) {
     setBusy(true);
     setErr(null);
@@ -493,7 +499,6 @@ export default function RoomPage() {
     try {
       const nextPos = (columns.reduce((m, c) => Math.max(m, c.position ?? 0), 0) || 0) + 1;
 
-      // ✅ 修复点：insert 不再带 household_id
       const ins = await supabase
         .from("room_columns")
         .insert({ room_id: roomId, name: nm, position: nextPos })
@@ -566,20 +571,19 @@ export default function RoomPage() {
   }
 
   async function addCell(colId: string) {
-    if (!roomId) return;
-
     const existing = cells.filter((c) => c.column_id === colId);
     const nextPos = (existing.reduce((m, c) => Math.max(m, c.position ?? 0), 0) || 0) + 1;
-    const code = `C${nextPos}`; // 你想更漂亮可以改
+
+    // 你如果想让 code 是 K11/K12 那种，也可以在这里改生成规则
+    const code = `C${nextPos}`;
 
     setBusy(true);
     setErr(null);
     try {
-      // ✅ 修复点：insert 不再带 household_id
       const ins = await supabase
         .from("room_cells")
-        .insert({ room_id: roomId, column_id: colId, code, position: nextPos })
-        .select("id,room_id,column_id,code,position")
+        .insert({ column_id: colId, code, position: nextPos })
+        .select("id,column_id,code,position")
         .single();
 
       if (ins.error) throw new Error(ins.error.message);
@@ -591,6 +595,7 @@ export default function RoomPage() {
     }
   }
 
+  // ✅ 删除 cell：需要确认，并默认删内部 items
   async function deleteCell(cell: Cell) {
     const ok = window.confirm(`Delete cell "${cell.code}"?\n\nThis will delete ALL items inside this cell.`);
     if (!ok) return;
@@ -623,7 +628,7 @@ export default function RoomPage() {
         return { id: c.id, label };
       })
       .filter((x) => (q ? x.label.toLowerCase().includes(q) : true))
-      .slice(0, 50);
+      .slice(0, 60);
   }, [moveQuery, columns, cells]);
 
   const modeLabel = useMemo(() => {
@@ -637,20 +642,34 @@ export default function RoomPage() {
   return (
     <div style={{ minHeight: "100vh", background: COLORS.oatBg, color: COLORS.ink }}>
       <div style={{ padding: 16, maxWidth: 1200, margin: "0 auto" }}>
+        {/* Top bar */}
         <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 12 }}>
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
             <button
               onClick={() => router.push("/rooms")}
-              style={{ padding: "8px 10px", borderRadius: 12, fontWeight: 900, border: `1px solid ${COLORS.border}`, background: "white" }}
+              style={{
+                padding: "8px 10px",
+                borderRadius: 12,
+                fontWeight: 900,
+                border: `1px solid ${COLORS.border}`,
+                background: "white",
+              }}
             >
               Back
             </button>
 
+            {/* ✅ 你要的：左上角 Switch household */}
             <button
               onClick={() => router.push("/households")}
-              style={{ padding: "8px 10px", borderRadius: 12, fontWeight: 900, border: `1px solid ${COLORS.border}`, background: "white" }}
+              style={{
+                padding: "8px 10px",
+                borderRadius: 12,
+                fontWeight: 900,
+                border: `1px solid ${COLORS.border}`,
+                background: "white",
+              }}
             >
-              Change household
+              Switch household
             </button>
 
             <div style={{ fontWeight: 900, fontSize: 18 }}>{room?.name ?? "Room"}</div>
@@ -658,10 +677,18 @@ export default function RoomPage() {
 
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
             <button
-              onClick={() => router.push("/households")}
-              style={{ padding: "8px 10px", borderRadius: 12, border: `1px solid ${COLORS.border}`, background: "white" }}
+              onClick={() => loadContextAndData()}
+              disabled={busy}
+              style={{
+                padding: "8px 10px",
+                borderRadius: 12,
+                border: `1px solid ${COLORS.border}`,
+                background: "white",
+                cursor: "pointer",
+                opacity: busy ? 0.6 : 1,
+              }}
             >
-              Households
+              Refresh
             </button>
             <button
               onClick={async () => {
@@ -707,6 +734,7 @@ export default function RoomPage() {
           <div style={{ opacity: 0.8 }}>Loading…</div>
         ) : (
           <>
+            {/* Compact expiring lists */}
             <div style={{ background: COLORS.oatCard, border: `1px solid ${COLORS.border}`, borderRadius: 16, padding: 14, marginBottom: 12 }}>
               <div style={{ fontWeight: 900, marginBottom: 8 }}>Expiring soon</div>
 
@@ -757,6 +785,7 @@ export default function RoomPage() {
               </div>
             </div>
 
+            {/* Search */}
             <div style={{ background: COLORS.oatCard, border: `1px solid ${COLORS.border}`, borderRadius: 16, padding: 14, marginBottom: 12 }}>
               <div style={{ fontWeight: 900, marginBottom: 8 }}>Search items</div>
               <input
@@ -765,6 +794,7 @@ export default function RoomPage() {
                 placeholder="Type an item name (fuzzy match supported)"
                 style={{ width: "100%", padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}`, background: "white" }}
               />
+
               {search.trim() ? (
                 <div style={{ marginTop: 10, color: COLORS.muted }}>
                   {filteredItemsSummary.length === 0 ? (
@@ -790,6 +820,7 @@ export default function RoomPage() {
               ) : null}
             </div>
 
+            {/* Add column */}
             <div style={{ background: COLORS.oatCard, border: `1px solid ${COLORS.border}`, borderRadius: 16, padding: 14, marginBottom: 12 }}>
               <div style={{ fontWeight: 900, marginBottom: 8 }}>Add column</div>
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
@@ -815,24 +846,10 @@ export default function RoomPage() {
                 >
                   Add
                 </button>
-                <button
-                  onClick={() => loadContextAndData()}
-                  disabled={busy}
-                  style={{
-                    padding: "10px 12px",
-                    borderRadius: 12,
-                    fontWeight: 900,
-                    background: "white",
-                    border: `1px solid ${COLORS.border}`,
-                    cursor: "pointer",
-                    opacity: busy ? 0.6 : 1,
-                  }}
-                >
-                  Refresh
-                </button>
               </div>
             </div>
 
+            {/* Columns layout (mobile friendly horizontal scroll) */}
             <div style={{ display: "flex", gap: 12, alignItems: "flex-start", overflowX: "auto", paddingBottom: 6 }}>
               {columnsWithCells.map(({ col, cells }) => (
                 <div
@@ -850,6 +867,7 @@ export default function RoomPage() {
                     gap: 10,
                   }}
                 >
+                  {/* Column header */}
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
                     {editingColumnId === col.id ? (
                       <div style={{ display: "flex", gap: 8, alignItems: "center", width: "100%" }}>
@@ -916,6 +934,7 @@ export default function RoomPage() {
                     )}
                   </div>
 
+                  {/* Cells */}
                   <div style={{ display: "grid", gap: 10 }}>
                     {cells.map((cell) => {
                       const list = itemsByCell[cell.id] || [];
@@ -953,6 +972,7 @@ export default function RoomPage() {
                             </div>
                           </div>
 
+                          {/* Items chips */}
                           <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 6 }}>
                             {list.length === 0 ? (
                               <div style={{ color: COLORS.muted, fontSize: 12 }}>Empty</div>
@@ -976,6 +996,7 @@ export default function RoomPage() {
                                       cursor: "pointer",
                                     }}
                                   >
+                                    {/* ✅ 防止长名字造成 layout 问题：ellipsis */}
                                     <span
                                       style={{
                                         maxWidth: 190,
@@ -999,6 +1020,7 @@ export default function RoomPage() {
                     })}
                   </div>
 
+                  {/* ✅ Add cell button at bottom */}
                   <button
                     onClick={() => addCell(col.id)}
                     disabled={busy}
@@ -1022,6 +1044,7 @@ export default function RoomPage() {
         )}
       </div>
 
+      {/* Item modal */}
       {itemModalOpen ? (
         <div
           style={{
@@ -1086,6 +1109,8 @@ export default function RoomPage() {
                     onChange={(e) => setItemExpire(e.target.value)}
                     style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
                   />
+
+                  {/* 快捷日期 */}
                   <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                     {[
                       { label: "1 week", days: 7 },
@@ -1140,6 +1165,7 @@ export default function RoomPage() {
                 </select>
               </div>
 
+              {/* Move UI */}
               {editingItem ? (
                 <div style={{ display: "grid", gap: 8 }}>
                   <div style={{ fontWeight: 900 }}>Move item (searchable)</div>
