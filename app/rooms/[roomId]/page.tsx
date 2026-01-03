@@ -233,7 +233,7 @@ export default function RoomPage() {
   const [editingCellId, setEditingCellId] = useState<string | null>(null);
   const [editingCellCode, setEditingCellCode] = useState("");
 
-  // ✅ Column rename modal
+  // Column rename modal
   const [colModalOpen, setColModalOpen] = useState(false);
   const [colModalCol, setColModalCol] = useState<Column | null>(null);
   const [colModalName, setColModalName] = useState("");
@@ -457,7 +457,6 @@ export default function RoomPage() {
       setColumns(cols);
 
       const curColIds = cols.map((c) => c.id);
-      let curCells: Cell[] = [];
       if (curColIds.length === 0) {
         setCells([]);
       } else {
@@ -468,8 +467,7 @@ export default function RoomPage() {
           .order("column_id", { ascending: true })
           .order("position", { ascending: true });
         if (cellRes.error) throw new Error(cellRes.error.message);
-        curCells = (cellRes.data as Cell[]) ?? [];
-        setCells(curCells);
+        setCells((cellRes.data as Cell[]) ?? []);
       }
 
       // items for entire household
@@ -535,10 +533,7 @@ export default function RoomPage() {
       }
 
       try {
-        const { data: signed, error: signedErr } = await supabase.storage
-          .from(STORAGE_BUCKET)
-          .createSignedUrl(path, 60 * 60);
-
+        const { data: signed, error: signedErr } = await supabase.storage.from(STORAGE_BUCKET).createSignedUrl(path, 60 * 60);
         if (!signedErr && signed?.signedUrl) {
           if (!cancelled) setModalImageRemoteUrl(signed.signedUrl);
           return;
@@ -828,7 +823,6 @@ export default function RoomPage() {
 
       setColumns((prev) => [...prev, ins.data as Column].sort((a, b) => a.position - b.position));
       setHhColumns((prev) => [...prev, ins.data as Column]);
-
       setNewColumnName("");
     } catch (e: any) {
       setErr(e?.message ?? "Add column failed.");
@@ -983,22 +977,63 @@ export default function RoomPage() {
   return (
     <div style={{ minHeight: "100vh", background: COLORS.oatBg, color: COLORS.ink }}>
       <div style={{ padding: 16, maxWidth: 1600, margin: "0 auto" }}>
-        {/* Header */}
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 12 }}>
-          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-            <button
-              onClick={() => router.push("/rooms")}
-              style={{
-                padding: "8px 10px",
-                borderRadius: 12,
-                fontWeight: 900,
-                border: `1px solid ${COLORS.border}`,
-                background: "white",
-                cursor: "pointer",
-              }}
-            >
-              Rooms
-            </button>
+        {/* Top right actions */}
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+          <button
+            onClick={() => loadContextAndData()}
+            disabled={busy}
+            style={{
+              padding: "8px 10px",
+              borderRadius: 12,
+              border: `1px solid ${COLORS.border}`,
+              background: "white",
+              cursor: "pointer",
+              opacity: busy ? 0.6 : 1,
+            }}
+          >
+            Refresh
+          </button>
+          <button
+            onClick={async () => {
+              safeSetLS(ACTIVE_HOUSEHOLD_KEY, null);
+              await supabase.auth.signOut();
+              window.location.href = "/";
+            }}
+            style={{
+              padding: "8px 10px",
+              borderRadius: 12,
+              border: `1px solid ${COLORS.border}`,
+              background: "white",
+              cursor: "pointer",
+            }}
+          >
+            Sign out
+          </button>
+        </div>
+
+        {/* Household line + Switch household on the right */}
+        {household ? (
+          <div
+            style={{
+              marginBottom: 12,
+              color: COLORS.muted,
+              display: "flex",
+              justifyContent: "space-between",
+              gap: 12,
+              alignItems: "center",
+              flexWrap: "wrap",
+            }}
+          >
+            <div>
+              Household: <span style={{ fontWeight: 900, color: COLORS.ink }}>{household.name}</span>{" "}
+              <span style={{ fontWeight: 900 }}>({modeLabel})</span>
+              {household.join_code ? (
+                <>
+                  {" "}
+                  · Join code: <span style={{ fontWeight: 900, color: COLORS.ink }}>{household.join_code}</span>
+                </>
+              ) : null}
+            </div>
 
             <button
               onClick={() => router.push("/households")}
@@ -1013,54 +1048,6 @@ export default function RoomPage() {
             >
               Switch household
             </button>
-
-            <div style={{ fontWeight: 900, fontSize: 18 }}>{room?.name ?? "Room"}</div>
-          </div>
-
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <button
-              onClick={() => loadContextAndData()}
-              disabled={busy}
-              style={{
-                padding: "8px 10px",
-                borderRadius: 12,
-                border: `1px solid ${COLORS.border}`,
-                background: "white",
-                cursor: "pointer",
-                opacity: busy ? 0.6 : 1,
-              }}
-            >
-              Refresh
-            </button>
-            <button
-              onClick={async () => {
-                safeSetLS(ACTIVE_HOUSEHOLD_KEY, null);
-                await supabase.auth.signOut();
-                router.replace("/");
-              }}
-              style={{
-                padding: "8px 10px",
-                borderRadius: 12,
-                border: `1px solid ${COLORS.border}`,
-                background: "white",
-                cursor: "pointer",
-              }}
-            >
-              Sign out
-            </button>
-          </div>
-        </div>
-
-        {household ? (
-          <div style={{ marginBottom: 10, color: COLORS.muted }}>
-            Household: <span style={{ fontWeight: 900, color: COLORS.ink }}>{household.name}</span>{" "}
-            <span style={{ fontWeight: 900 }}>({modeLabel})</span>
-            {household.join_code ? (
-              <>
-                {" "}
-                · Join code: <span style={{ fontWeight: 900, color: COLORS.ink }}>{household.join_code}</span>
-              </>
-            ) : null}
           </div>
         ) : null}
 
@@ -1106,13 +1093,9 @@ export default function RoomPage() {
                   {expiring0to7.length === 0 ? (
                     <div style={{ color: COLORS.muted }}>None</div>
                   ) : (
-                    <div style={{ display: "grid", gap: 4 }}>
+                    <div style={{ display: "grid", gap: 4, fontFamily: ITEM_FONT_STACK, fontSize: 13 }}>
                       {expiring0to7.slice(0, 40).map(({ it, du }) => (
-                        <div
-                          key={it.id}
-                          style={{ cursor: "pointer", fontFamily: ITEM_FONT_STACK }}
-                          onClick={() => goToCell(it)}
-                        >
+                        <div key={it.id} style={{ cursor: "pointer" }} onClick={() => goToCell(it)}>
                           {expLine(it, du!)}
                         </div>
                       ))}
@@ -1125,13 +1108,9 @@ export default function RoomPage() {
                   {expiring8to30.length === 0 ? (
                     <div style={{ color: COLORS.muted }}>None</div>
                   ) : (
-                    <div style={{ display: "grid", gap: 4 }}>
+                    <div style={{ display: "grid", gap: 4, fontFamily: ITEM_FONT_STACK, fontSize: 13 }}>
                       {expiring8to30.slice(0, 60).map(({ it, du }) => (
-                        <div
-                          key={it.id}
-                          style={{ cursor: "pointer", fontFamily: ITEM_FONT_STACK }}
-                          onClick={() => goToCell(it)}
-                        >
+                        <div key={it.id} style={{ cursor: "pointer" }} onClick={() => goToCell(it)}>
                           {expLine(it, du!)}
                         </div>
                       ))}
@@ -1162,6 +1141,7 @@ export default function RoomPage() {
                   borderRadius: 12,
                   border: `1px solid ${COLORS.border}`,
                   background: "white",
+                  fontFamily: ITEM_FONT_STACK,
                 }}
               />
               {search.trim() ? (
@@ -1169,14 +1149,10 @@ export default function RoomPage() {
                   {filteredItemsSummary.length === 0 ? (
                     <div>No matches.</div>
                   ) : (
-                    <div style={{ display: "grid", gap: 4 }}>
+                    <div style={{ display: "grid", gap: 4, fontFamily: ITEM_FONT_STACK, fontSize: 13 }}>
                       {filteredItemsSummary.map(({ it, loc }) => (
-                        <div
-                          key={it.id}
-                          style={{ cursor: "pointer", fontFamily: ITEM_FONT_STACK }}
-                          onClick={() => goToCell(it)}
-                        >
-                          <span style={{ color: COLORS.ink }}>{it.name}</span>{" "}
+                        <div key={it.id} style={{ cursor: "pointer" }} onClick={() => goToCell(it)}>
+                          <span style={{ color: COLORS.ink, fontWeight: 400 }}>{it.name}</span>{" "}
                           <span>
                             — {loc ? loc.label : "Unknown"} · qty {it.qty}
                           </span>
@@ -1188,7 +1164,7 @@ export default function RoomPage() {
               ) : null}
             </div>
 
-            {/* Add column */}
+            {/* ✅ Room title + back button on the left, Add column on the right (same level) */}
             <div
               style={{
                 background: COLORS.oatCard,
@@ -1196,16 +1172,40 @@ export default function RoomPage() {
                 borderRadius: 16,
                 padding: 14,
                 marginBottom: 12,
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                gap: 14,
+                flexWrap: "wrap",
               }}
             >
-              <div style={{ fontWeight: 900, marginBottom: 8 }}>Add column</div>
-              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+              {/* Left: Rooms button + current room name */}
+              <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                <button
+                  onClick={() => router.push("/rooms")}
+                  style={{
+                    padding: "8px 10px",
+                    borderRadius: 12,
+                    fontWeight: 900,
+                    border: `1px solid ${COLORS.border}`,
+                    background: "white",
+                    cursor: "pointer",
+                  }}
+                >
+                  Rooms
+                </button>
+                <div style={{ fontWeight: 900, fontSize: 20, color: COLORS.ink }}>{room?.name ?? "Room"}</div>
+              </div>
+
+              {/* Right: Add column */}
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", justifyContent: "flex-end" }}>
                 <input
                   value={newColumnName}
                   onChange={(e) => setNewColumnName(e.target.value)}
-                  placeholder="Example: Pantry / Dresser / Shelf"
+                  placeholder="Add column (e.g. Pantry / Shelf)"
                   style={{
-                    flex: "1 1 260px",
+                    width: 320,
+                    maxWidth: "70vw",
                     padding: 10,
                     borderRadius: 12,
                     border: `1px solid ${COLORS.border}`,
@@ -1226,7 +1226,7 @@ export default function RoomPage() {
                     opacity: !newColumnName.trim() || busy ? 0.6 : 1,
                   }}
                 >
-                  Add
+                  Add column
                 </button>
               </div>
             </div>
@@ -1249,8 +1249,18 @@ export default function RoomPage() {
                     gap: 10,
                   }}
                 >
-                  {/* Column header (no inline edit) */}
-                  <div style={{ fontWeight: 900 }}>{col.name}</div>
+                  {/* ✅ Column name centered */}
+                  <div
+                    style={{
+                      textAlign: "center",
+                      fontWeight: 900,
+                      fontSize: 16,
+                      paddingTop: 2,
+                      paddingBottom: 2,
+                    }}
+                  >
+                    {col.name}
+                  </div>
 
                   {/* Cells */}
                   <div style={{ display: "grid", gap: 10 }}>
@@ -1323,7 +1333,18 @@ export default function RoomPage() {
                               </div>
                             ) : (
                               <>
-                                <div style={{ fontWeight: 900 }}>{cell.code}</div>
+                                {/* ✅ Cell name size = item size, but bold */}
+                                <div
+                                  style={{
+                                    fontFamily: ITEM_FONT_STACK,
+                                    fontSize: 12,
+                                    fontWeight: 900,
+                                    letterSpacing: 0.1,
+                                    color: COLORS.ink,
+                                  }}
+                                >
+                                  {cell.code}
+                                </div>
 
                                 {/* Cell actions as emoji */}
                                 <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
@@ -1368,13 +1389,14 @@ export default function RoomPage() {
                                       fontFamily: ITEM_FONT_STACK,
                                     }}
                                   >
+                                    {/* ✅ item name NOT bold */}
                                     <span
                                       style={{
                                         maxWidth: 190,
                                         overflow: "hidden",
                                         textOverflow: "ellipsis",
                                         whiteSpace: "nowrap",
-                                        fontWeight: 500,
+                                        fontWeight: 400,
                                         fontSize: 12,
                                         color: COLORS.ink,
                                         letterSpacing: 0.1,
@@ -1422,7 +1444,7 @@ export default function RoomPage() {
         )}
       </div>
 
-      {/* ✅ Column rename modal */}
+      {/* Column rename modal */}
       {colModalOpen ? (
         <div
           style={{
