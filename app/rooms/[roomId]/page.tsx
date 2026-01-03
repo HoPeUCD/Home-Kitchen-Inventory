@@ -174,7 +174,7 @@ export default function RoomPage() {
   const [cells, setCells] = useState<Cell[]>([]);
   const [items, setItems] = useState<Item[]>([]);
 
-  // ✅ household-level layout (all rooms / columns / cells)
+  // household-level layout (all rooms / columns / cells)
   const [hhRooms, setHhRooms] = useState<Room[]>([]);
   const [hhColumns, setHhColumns] = useState<Column[]>([]);
   const [hhCells, setHhCells] = useState<Cell[]>([]);
@@ -196,8 +196,8 @@ export default function RoomPage() {
   const [itemExpire, setItemExpire] = useState<string>("");
   const [itemCellId, setItemCellId] = useState<string>("");
 
-  const [moveQuery, setMoveQuery] = useState("");
-  const [moveTargetCellId, setMoveTargetCellId] = useState<string>("");
+  // ✅ 新增：两级 location 联动：先选 room，再选 cell
+  const [locationRoomId, setLocationRoomId] = useState<string>("");
 
   const cellRefMap = useRef<Record<string, HTMLDivElement | null>>({});
 
@@ -269,7 +269,7 @@ export default function RoomPage() {
       if (hRes.error) throw new Error(hRes.error.message);
       setHousehold(hRes.data as Household);
 
-      // ✅ Load household-level rooms/columns/cells for cross-room moving
+      // Load household-level rooms/columns/cells
       const hhRoomRes = await supabase
         .from("rooms")
         .select("id,household_id,name,position")
@@ -340,15 +340,15 @@ export default function RoomPage() {
       const cols = (colRes.data as Column[]) ?? [];
       setColumns(cols);
 
-      const colIds = cols.map((c) => c.id);
+      const curColIds = cols.map((c) => c.id);
       let curCells: Cell[] = [];
-      if (colIds.length === 0) {
+      if (curColIds.length === 0) {
         setCells([]);
       } else {
         const cellRes = await supabase
           .from("room_cells")
           .select("id,column_id,code,position")
-          .in("column_id", colIds)
+          .in("column_id", curColIds)
           .order("column_id", { ascending: true })
           .order("position", { ascending: true });
         if (cellRes.error) throw new Error(cellRes.error.message);
@@ -393,7 +393,7 @@ export default function RoomPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id, roomId]);
 
-  // --- layout helpers ---
+  // Current room columns with cells
   const columnsWithCells = useMemo(() => {
     const byCol: Record<string, Cell[]> = {};
     for (const c of cells) {
@@ -418,16 +418,10 @@ export default function RoomPage() {
     return map;
   }, [items, cells]);
 
-  // Household-level index for “where is this cell”
+  // Household-level index: cell -> room/col/code label
   const hhIndex = useMemo(() => {
     const roomById = new Map(hhRooms.map((r) => [r.id, r]));
     const colById = new Map(hhColumns.map((c) => [c.id, c]));
-    const colLabelById = new Map<string, string>();
-
-    for (const col of hhColumns) {
-      const room = roomById.get(col.room_id);
-      colLabelById.set(col.id, `${room?.name ?? "Room"} / ${col.name}`);
-    }
 
     const m = new Map<
       string,
@@ -452,18 +446,7 @@ export default function RoomPage() {
     return m;
   }, [hhRooms, hhColumns, hhCells]);
 
-  // Current-room only index (for quick labels)
-  const cellIndex = useMemo(() => {
-    const m = new Map<string, { colName: string; cellCode: string; colId: string }>();
-    const colById = new Map(columns.map((c) => [c.id, c]));
-    for (const ce of cells) {
-      const col = colById.get(ce.column_id);
-      m.set(ce.id, { colName: col?.name ?? "Column", cellCode: ce.code, colId: ce.column_id });
-    }
-    return m;
-  }, [columns, cells]);
-
-  // 0–7 and 8–30 across household
+  // Expiring list across household
   const expiring0to7 = useMemo(() => {
     return items
       .filter((it) => it.qty > 0)
@@ -490,7 +473,6 @@ export default function RoomPage() {
     const loc = hhIndex.get(it.cell_id);
     if (!loc?.roomId) return;
 
-    // If same room: scroll. Otherwise navigate to that room.
     if (loc.roomId === roomId) {
       const ref = cellRefMap.current[it.cell_id];
       if (ref) ref.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
@@ -499,6 +481,7 @@ export default function RoomPage() {
     router.push(`/rooms/${loc.roomId}`);
   }
 
+  // Search results across household
   const filteredItemsSummary = useMemo(() => {
     const q = search.trim();
     if (!q) return [];
@@ -509,24 +492,58 @@ export default function RoomPage() {
       .map((it) => ({ it, loc: hhIndex.get(it.cell_id) }));
   }, [search, items, hhIndex]);
 
+  // ✅ 两级联动：选择 room 后，只显示该 room 的 cells；cells 按 code 排序
+  const roomCellOptions = useMemo(() => {
+    const rid = locationRoomId;
+    if (!rid) return [];
+
+    // 选出属于这个 room 的 cells（通过 hhIndex 反查）
+    const list = hhCells
+      .map((c) => {
+        const loc = hhIndex.get(c.id);
+        if (!loc || loc.roomId !== rid) return null;
+        return { cell: c, loc };
+      })
+      .filter(Boolean) as { cell: Cell; loc: any }[];
+
+    // 按 code 字母顺序（带 numeric，让 K2 排在 K11 前）
+    list.sort((a, b) => {
+      const c = a.loc.cellCode.localeCompare(b.loc.cellCode, undefined, { numeric: true, sensitivity: "base" });
+      if (c !== 0) return c;
+      return a.loc.colName.localeCompare(b.loc.colName, undefined, { numeric: true, sensitivity: "base" });
+    });
+
+    return list.map(({ cell, loc }) => ({
+      id: cell.id,
+      code: loc.cellCode as string,
+      label: `${loc.colName} / ${loc.cellCode}` as string,
+    }));
+  }, [locationRoomId, hhCells, hhIndex]);
+
   function openAddItem(cellId: string) {
     setEditingItem(null);
     setItemName("");
     setItemQty(1);
     setItemExpire("");
     setItemCellId(cellId);
-    setMoveQuery("");
-    setMoveTargetCellId(cellId);
+
+    // 默认 room：当前页面 room
+    setLocationRoomId(roomId);
+
     setItemModalOpen(true);
   }
+
   function openEditItem(it: Item) {
     setEditingItem(it);
     setItemName(it.name ?? "");
     setItemQty(Number(it.qty ?? 1));
     setItemExpire(it.expires_at ?? "");
     setItemCellId(it.cell_id);
-    setMoveQuery("");
-    setMoveTargetCellId(it.cell_id);
+
+    // 默认 room：该 item 当前所在 room
+    const loc = hhIndex.get(it.cell_id);
+    setLocationRoomId(loc?.roomId || roomId);
+
     setItemModalOpen(true);
   }
 
@@ -574,6 +591,7 @@ export default function RoomPage() {
       }
 
       setItemModalOpen(false);
+      setEditingItem(null);
     } catch (e: any) {
       setErr(e?.message ?? "Save failed.");
     } finally {
@@ -581,53 +599,22 @@ export default function RoomPage() {
     }
   }
 
-  async function deleteItem(itemId: string) {
+  // ✅ Delete：如果在 edit modal 里删当前 item，成功后关闭 modal
+  async function deleteItem(itemId: string, closeModalOnSuccess?: boolean) {
     setBusy(true);
     setErr(null);
     try {
       const del = await supabase.from(ITEMS_TABLE).delete().eq(ITEM_ID_FIELD, itemId);
       if (del.error) throw new Error(del.error.message);
+
       setItems((prev) => prev.filter((x) => x.id !== itemId));
+
+      if (closeModalOnSuccess) {
+        setItemModalOpen(false);
+        setEditingItem(null);
+      }
     } catch (e: any) {
       setErr(e?.message ?? "Delete failed.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function moveItemToSelectedCell() {
-    if (!editingItem) return;
-    const target = moveTargetCellId || itemCellId;
-    if (!target || target === editingItem.cell_id) return;
-
-    setBusy(true);
-    setErr(null);
-    try {
-      const payload: any = {};
-      payload[ITEM_CELL_FIELD] = target;
-
-      const selectCols = [
-        ITEM_ID_FIELD,
-        ITEM_HOUSEHOLD_FIELD,
-        ITEM_CELL_FIELD,
-        ITEM_NAME_FIELD,
-        ITEM_QTY_FIELD,
-        ITEM_EXPIRE_FIELD,
-        ITEM_IMG_FIELD,
-      ].join(",");
-
-      const upd = await supabase
-        .from(ITEMS_TABLE)
-        .update(payload)
-        .eq(ITEM_ID_FIELD, editingItem.id)
-        .select(selectCols)
-        .single();
-      if (upd.error) throw new Error(upd.error.message);
-
-      setItems((prev) => prev.map((x) => (x.id === editingItem.id ? normalizeItemRow(upd.data) : x)));
-      setItemCellId(target);
-    } catch (e: any) {
-      setErr(e?.message ?? "Move failed.");
     } finally {
       setBusy(false);
     }
@@ -664,7 +651,12 @@ export default function RoomPage() {
     setBusy(true);
     setErr(null);
     try {
-      const upd = await supabase.from("room_columns").update({ name: nm }).eq("id", colId).select("id,room_id,name,position").single();
+      const upd = await supabase
+        .from("room_columns")
+        .update({ name: nm })
+        .eq("id", colId)
+        .select("id,room_id,name,position")
+        .single();
       if (upd.error) throw new Error(upd.error.message);
       setColumns((prev) => prev.map((c) => (c.id === colId ? (upd.data as Column) : c)));
       setEditingColumnId(null);
@@ -721,8 +713,6 @@ export default function RoomPage() {
         .single();
       if (ins.error) throw new Error(ins.error.message);
       setCells((prev) => [...prev, ins.data as Cell]);
-
-      // also refresh household cells quickly (append)
       setHhCells((prev) => [...prev, ins.data as Cell]);
     } catch (e: any) {
       setErr(e?.message ?? "Add cell failed.");
@@ -738,10 +728,17 @@ export default function RoomPage() {
     setBusy(true);
     setErr(null);
     try {
-      const upd = await supabase.from("room_cells").update({ code: next }).eq("id", cellId).select("id,column_id,code,position").single();
+      const upd = await supabase
+        .from("room_cells")
+        .update({ code: next })
+        .eq("id", cellId)
+        .select("id,column_id,code,position")
+        .single();
       if (upd.error) throw new Error(upd.error.message);
+
       setCells((prev) => prev.map((c) => (c.id === cellId ? (upd.data as Cell) : c)));
       setHhCells((prev) => prev.map((c) => (c.id === cellId ? (upd.data as Cell) : c)));
+
       setEditingCellId(null);
       setEditingCellCode("");
     } catch (e: any) {
@@ -773,24 +770,6 @@ export default function RoomPage() {
       setBusy(false);
     }
   }
-
-  // ✅ 关键：Move options 改为 household 全量 cells
-  const moveCellOptions = useMemo(() => {
-    const q = normalize(moveQuery);
-
-    // build labels: Room / Column / Cell
-    const roomById = new Map(hhRooms.map((r) => [r.id, r]));
-    const colById = new Map(hhColumns.map((c) => [c.id, c]));
-
-    const options = hhCells.map((c) => {
-      const col = colById.get(c.column_id);
-      const room = roomById.get(col?.room_id ?? "");
-      const label = `${room?.name ?? "Room"} / ${col?.name ?? "Column"} / ${c.code}`;
-      return { id: c.id, label };
-    });
-
-    return options.filter((x) => (q ? x.label.toLowerCase().includes(q) : true)).slice(0, 80);
-  }, [moveQuery, hhRooms, hhColumns, hhCells]);
 
   const modeLabel = useMemo(() => {
     if (!household?.id) return "";
@@ -1075,7 +1054,6 @@ export default function RoomPage() {
                             gap: 8,
                           }}
                         >
-                          {/* Top row: cell code + +Item */}
                           <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
                             {isEditingThis ? (
                               <div style={{ display: "flex", gap: 8, alignItems: "center", width: "100%" }}>
@@ -1124,7 +1102,6 @@ export default function RoomPage() {
                             )}
                           </div>
 
-                          {/* Items chips */}
                           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                             {list.length === 0 ? (
                               <div style={{ color: COLORS.muted, fontSize: 12 }}>Empty</div>
@@ -1167,7 +1144,6 @@ export default function RoomPage() {
                             )}
                           </div>
 
-                          {/* Bottom row: Edit + Del */}
                           {!isEditingThis ? (
                             <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginTop: 2 }}>
                               <button
@@ -1233,7 +1209,7 @@ export default function RoomPage() {
         )}
       </div>
 
-      {/* Item modal (updated: location selects use household-level cells) */}
+      {/* Item modal */}
       {itemModalOpen ? (
         <div
           style={{
@@ -1330,81 +1306,65 @@ export default function RoomPage() {
                 </div>
               </div>
 
-              {/* ✅ Cell dropdown now shows ALL household cells */}
-              <div style={{ display: "grid", gap: 6 }}>
-                <div style={{ fontWeight: 900 }}>Location (any room in this household)</div>
-                <select
-                  value={itemCellId}
-                  onChange={(e) => {
-                    setItemCellId(e.target.value);
-                    setMoveTargetCellId(e.target.value);
-                  }}
-                  style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
-                >
-                  <option value="">Select a cell</option>
-                  {hhCells.map((c) => {
-                    const label = hhIndex.get(c.id)?.label ?? c.code;
-                    return (
-                      <option key={c.id} value={c.id}>
-                        {label}
-                      </option>
-                    );
-                  })}
-                </select>
-              </div>
+              {/* ✅ 两级联动 location */}
+              <div style={{ display: "grid", gap: 10 }}>
+                <div style={{ display: "grid", gap: 6 }}>
+                  <div style={{ fontWeight: 900 }}>Room</div>
+                  <select
+                    value={locationRoomId}
+                    onChange={(e) => {
+                      const rid = e.target.value;
+                      setLocationRoomId(rid);
 
-              {editingItem ? (
-                <div style={{ display: "grid", gap: 8 }}>
-                  <div style={{ fontWeight: 900 }}>Move item (searchable across household)</div>
-                  <input
-                    value={moveQuery}
-                    onChange={(e) => setMoveQuery(e.target.value)}
-                    placeholder="Search location, e.g. Kitchen / Pantry / K11"
-                    style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
-                  />
-                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                    {moveCellOptions.map((opt) => (
-                      <button
-                        key={opt.id}
-                        onClick={() => setMoveTargetCellId(opt.id)}
-                        style={{
-                          padding: "6px 8px",
-                          borderRadius: 999,
-                          border: `1px solid ${COLORS.border}`,
-                          background: moveTargetCellId === opt.id ? COLORS.okBg : "white",
-                          cursor: "pointer",
-                        }}
-                      >
-                        {opt.label}
-                      </button>
-                    ))}
-                  </div>
-                  <button
-                    onClick={moveItemToSelectedCell}
-                    disabled={busy || !moveTargetCellId || moveTargetCellId === editingItem.cell_id}
-                    style={{
-                      padding: "10px 12px",
-                      borderRadius: 12,
-                      fontWeight: 900,
-                      background: COLORS.blue,
-                      color: "white",
-                      border: "none",
-                      cursor: "pointer",
-                      opacity: busy || !moveTargetCellId || moveTargetCellId === editingItem.cell_id ? 0.6 : 1,
+                      // 选新 room 后：自动选该 room 第一格（如果有）
+                      // 这样不会出现 room 变了但 cell 还在旧 room 的情况
+                      setTimeout(() => {
+                        // 依赖 roomCellOptions 的计算需要 state 更新后才稳定，所以用 setTimeout(0)
+                        // 如果你不喜欢 setTimeout，我也可以换成 useEffect 监听 locationRoomId
+                      }, 0);
                     }}
+                    style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
                   >
-                    Move to selected cell
-                  </button>
+                    <option value="">Select a room</option>
+                    {hhRooms.map((r) => (
+                      <option key={r.id} value={r.id}>
+                        {r.name}
+                      </option>
+                    ))}
+                  </select>
                 </div>
-              ) : null}
+
+                <div style={{ display: "grid", gap: 6 }}>
+                  <div style={{ fontWeight: 900 }}>Cell (in selected room)</div>
+                  <select
+                    value={itemCellId}
+                    onChange={(e) => setItemCellId(e.target.value)}
+                    style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
+                    disabled={!locationRoomId}
+                  >
+                    <option value="">Select a cell</option>
+                    {roomCellOptions.map((opt) => (
+                      <option key={opt.id} value={opt.id}>
+                        {opt.code} · {opt.label}
+                      </option>
+                    ))}
+                  </select>
+
+                  {/* 当切换 room 后，如果当前 itemCellId 不属于该 room，自动选第一格 */}
+                  {locationRoomId ? (
+                    <AutoFixCellSelection
+                      roomCellOptions={roomCellOptions}
+                      itemCellId={itemCellId}
+                      setItemCellId={setItemCellId}
+                    />
+                  ) : null}
+                </div>
+              </div>
 
               <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", marginTop: 6 }}>
                 <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                   <button
-                    onClick={async () => {
-                      // If user changed the dropdown, just save normally
-                      await saveItem();
-                    }}
+                    onClick={saveItem}
                     disabled={busy}
                     style={{
                       padding: "10px 12px",
@@ -1422,7 +1382,7 @@ export default function RoomPage() {
 
                   {editingItem ? (
                     <button
-                      onClick={() => deleteItem(editingItem.id)}
+                      onClick={() => deleteItem(editingItem.id, true)}
                       disabled={busy}
                       style={{
                         padding: "10px 12px",
@@ -1455,4 +1415,26 @@ export default function RoomPage() {
       ) : null}
     </div>
   );
+}
+
+/**
+ * ✅ 小组件：当 room 变化导致 itemCellId 不在该 room 的 options 里时，自动选第一格
+ * 这样不会出现“Room=Bathroom，但 Cell 仍然是 Kitchen 的某格”的不一致。
+ */
+function AutoFixCellSelection(props: {
+  roomCellOptions: { id: string; code: string; label: string }[];
+  itemCellId: string;
+  setItemCellId: (v: string) => void;
+}) {
+  const { roomCellOptions, itemCellId, setItemCellId } = props;
+
+  useEffect(() => {
+    if (roomCellOptions.length === 0) return;
+    const exists = roomCellOptions.some((x) => x.id === itemCellId);
+    if (!exists) {
+      setItemCellId(roomCellOptions[0].id);
+    }
+  }, [roomCellOptions, itemCellId, setItemCellId]);
+
+  return null;
 }
