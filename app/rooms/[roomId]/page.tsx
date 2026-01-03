@@ -1,1757 +1,1506 @@
-"use client";
+'use client';
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useParams, useRouter } from 'next/navigation';
+import Fuse from 'fuse.js';
+
 import AuthGate from "@/src/components/AuthGate";
 import { supabase } from "@/src/lib/supabase";
+import HouseholdTopBar from "@/src/components/HouseholdTopBar";
 
-/** =========================
- *  CONFIG: items_v2 fields
- *  ========================= */
-const ITEMS_TABLE = "items_v2";
-const ITEM_ID_FIELD = "id";
-const ITEM_HOUSEHOLD_FIELD = "household_id";
-const ITEM_CELL_FIELD = "cell_id";
-const ITEM_NAME_FIELD = "name";
-const ITEM_QTY_FIELD = "qty";
-const ITEM_EXPIRE_FIELD = "expires_at";
-const ITEM_IMG_FIELD = "image_path";
+type UUID = string;
 
-const ACTIVE_HOUSEHOLD_KEY = "active_household_id";
-const STORAGE_BUCKET = "item-images";
-
-const COLORS = {
-  oatBg: "#F4EBDD",
-  oatCard: "#FBF6EC",
-  blue: "#2D6CDF",
-  ink: "#1E2430",
-  border: "rgba(30,36,48,.12)",
-  muted: "rgba(30,36,48,.65)",
-  expiredBg: "rgba(220, 38, 38, .18)",
-  soonBg: "rgba(234, 179, 8, .22)",
-  okBg: "rgba(45, 108, 223, .10)",
-};
-
-// Fonts (assumes you’ve loaded these via next/font or global CSS; if not loaded, they’ll gracefully fallback)
-const FONT_ITEM = '"Nunito", system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
-const FONT_TITLE = '"Oswald", system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
-
-type Household = { id: string; name: string; join_code: string | null };
-type Room = { id: string; household_id: string; name: string; position?: number };
-type Column = { id: string; room_id: string; name: string; position: number };
-type Cell = { id: string; column_id: string; code: string; position: number };
-
-type Item = {
-  id: string;
-  household_id: string;
-  cell_id: string;
+type Household = { id: UUID; name: string };
+type Room = { id: UUID; household_id: UUID; name: string; position: number | null };
+type Column = { id: UUID; room_id: UUID; name: string; position: number | null };
+type Cell = { id: UUID; column_id: UUID; code: string; position: number | null };
+type ItemV2 = {
+  id: UUID;
+  household_id: UUID;
+  cell_id: UUID;
   name: string;
-  qty: number;
-  expires_at?: string | null;
-  image_path?: string | null;
+  qty: number | null;
+  expires_at: string | null;
+  image_path: string | null;
 };
 
-function safeGetLS(key: string): string | null {
-  try {
-    return localStorage.getItem(key);
-  } catch {
-    return null;
-  }
-}
-function safeSetLS(key: string, val: string | null) {
-  try {
-    if (!val) localStorage.removeItem(key);
-    else localStorage.setItem(key, val);
-  } catch {}
+const ACTIVE_HOUSEHOLD_KEY = 'active_household_id';
+const STORAGE_BUCKET = 'item-images';
+
+const THEME = {
+  oatBg: 'bg-[#F7F1E6]',
+  oatCard: 'bg-[#FBF7EF]',
+  borderSoft: 'border-black/10',
+  blueBorderSoft: 'border-[#2563EB]/25',
+};
+
+function cx(...classes: Array<string | false | null | undefined>) {
+  return classes.filter(Boolean).join(' ');
 }
 
-function toDateOnly(d: string): Date {
-  return new Date(`${d}T00:00:00`);
+// ----- date helpers (treat YYYY-MM-DD as local date) -----
+function parseDateOnlyLocalMidnight(dateOnly: string) {
+  const [y, m, d] = dateOnly.split('-').map((x) => Number(x));
+  return new Date(y, (m || 1) - 1, d || 1, 0, 0, 0, 0);
 }
-function daysUntil(expiresAt?: string | null): number | null {
-  if (!expiresAt) return null;
-  const d = toDateOnly(expiresAt);
+function daysUntil(dateOnly: string) {
   const now = new Date();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const diffMs = d.getTime() - today.getTime();
-  return Math.floor(diffMs / (1000 * 60 * 60 * 24));
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+  const target = parseDateOnlyLocalMidnight(dateOnly);
+  const diffMs = target.getTime() - today.getTime();
+  return Math.round(diffMs / (1000 * 60 * 60 * 24));
 }
-function urgencyRank(it: Item): number {
-  const du = daysUntil(it.expires_at ?? null);
-  if (du === null) return 3;
-  if (du < 0) return 0;
-  if (du <= 30) return 1;
-  return 2;
+function expiryChipClass(expires_at: string | null) {
+  if (!expires_at) return 'bg-white border border-black/10';
+  const d = daysUntil(expires_at.slice(0, 10));
+  if (d < 0) return 'bg-red-500/20 border border-red-500/30';
+  if (d <= 7) return 'bg-orange-500/20 border border-orange-500/30';
+  if (d <= 30) return 'bg-yellow-500/20 border border-yellow-500/30';
+  return 'bg-emerald-500/15 border border-emerald-500/25';
 }
-function chipBg(it: Item): string {
-  const du = daysUntil(it.expires_at ?? null);
-  if (du === null) return COLORS.okBg;
-  if (du < 0) return COLORS.expiredBg;
-  if (du <= 30) return COLORS.soonBg;
-  return COLORS.okBg;
+function formatExpiryLabel(expires_at: string | null) {
+  if (!expires_at) return '';
+  const dateOnly = expires_at.slice(0, 10);
+  const d = daysUntil(dateOnly);
+  if (d < 0) return `已过期 ${Math.abs(d)}d`;
+  if (d === 0) return '今天到期';
+  return `${d}d`;
 }
-function sortItemsByExpiry(a: Item, b: Item): number {
-  const ra = urgencyRank(a);
-  const rb = urgencyRank(b);
-  if (ra !== rb) return ra - rb;
-
-  const da = daysUntil(a.expires_at ?? null);
-  const db = daysUntil(b.expires_at ?? null);
-
-  if (da === null && db !== null) return 1;
-  if (da !== null && db === null) return -1;
-  if (da !== null && db !== null && da !== db) return da - db;
-
-  return a.name.localeCompare(b.name);
+function toDateOnly(expires_at: string | null) {
+  if (!expires_at) return '';
+  return expires_at.slice(0, 10);
 }
 
-// --- fuzzy search ---
-function normalize(s: string): string {
-  return (s || "").toLowerCase().trim();
-}
-function levenshtein(a: string, b: string): number {
-  const m = a.length;
-  const n = b.length;
-  const dp: number[][] = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0));
-  for (let i = 0; i <= m; i++) dp[i][0] = i;
-  for (let j = 0; j <= n; j++) dp[0][j] = j;
-  for (let i = 1; i <= m; i++) {
-    for (let j = 1; j <= n; j++) {
-      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-      dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
-    }
-  }
-  return dp[m][n];
-}
-function fuzzyMatch(query: string, text: string): boolean {
-  const q = normalize(query);
-  const t = normalize(text);
-  if (!q) return true;
-  if (t.includes(q)) return true;
-
-  const qTokens = q.split(/\s+/).filter(Boolean);
-  const tTokens = t.split(/\s+/).filter(Boolean);
-
-  let hits = 0;
-  for (const qt of qTokens) {
-    if (tTokens.some((tt) => tt.includes(qt))) hits++;
-  }
-  if (hits > 0 && hits >= Math.max(1, Math.ceil(qTokens.length * 0.5))) return true;
-
-  if (q.length <= 6) {
-    const dist = levenshtein(q, t.slice(0, Math.min(t.length, 12)));
-    if (dist <= 2) return true;
-  }
-  return false;
-}
-
-function normalizeItemRow(row: any): Item {
-  const qtyNum = Number(row?.[ITEM_QTY_FIELD] ?? 0);
-  return {
-    id: String(row?.[ITEM_ID_FIELD]),
-    household_id: String(row?.[ITEM_HOUSEHOLD_FIELD]),
-    cell_id: String(row?.[ITEM_CELL_FIELD]),
-    name: String(row?.[ITEM_NAME_FIELD] ?? ""),
-    qty: Number.isFinite(qtyNum) ? qtyNum : 0,
-    expires_at: row?.[ITEM_EXPIRE_FIELD] ?? null,
-    image_path: row?.[ITEM_IMG_FIELD] ?? null,
-  };
-}
-
-function isComposingEvent(e: any): boolean {
-  return Boolean(e?.nativeEvent?.isComposing) || Boolean((e as any)?.isComposing);
-}
-
-function sanitizeFilename(name: string): string {
-  return name.replace(/[^\w.\-]+/g, "_");
-}
-function isUrl(s?: string | null): boolean {
-  return !!s && /^https?:\/\//i.test(s);
-}
-
-function IconEmoji(props: { title: string; emoji: string; onClick: () => void; disabled?: boolean; size?: number }) {
-  const { title, emoji, onClick, disabled, size } = props;
+// ----- UI primitives -----
+function Modal({
+  open,
+  title,
+  onClose,
+  children,
+  widthClass = 'max-w-xl',
+}: {
+  open: boolean;
+  title: string;
+  onClose: () => void;
+  children: React.ReactNode;
+  widthClass?: string;
+}) {
+  if (!open) return null;
   return (
-    <span
-      role="button"
-      tabIndex={disabled ? -1 : 0}
-      aria-disabled={disabled ? "true" : "false"}
-      title={title}
-      onClick={() => {
-        if (!disabled) onClick();
-      }}
-      onKeyDown={(e) => {
-        if (disabled) return;
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          onClick();
-        }
-      }}
-      style={{
-        cursor: disabled ? "not-allowed" : "pointer",
-        opacity: disabled ? 0.45 : 1,
-        fontSize: size ?? 16,
-        lineHeight: `${size ?? 16}px`,
-        userSelect: "none",
-      }}
-    >
-      {emoji}
-    </span>
-  );
-}
-
-export default function RoomPage() {
-  const router = useRouter();
-  const params = useParams();
-  const roomId = (params as any)?.roomId as string;
-
-  const [session, setSession] = useState<any>(null);
-  const user = session?.user ?? null;
-
-  const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState<string | null>(null);
-
-  const [defaultHouseholdId, setDefaultHouseholdId] = useState<string | null>(null);
-  const [activeHouseholdId, setActiveHouseholdId] = useState<string | null>(null);
-
-  const [household, setHousehold] = useState<Household | null>(null);
-  const [room, setRoom] = useState<Room | null>(null);
-
-  const [columns, setColumns] = useState<Column[]>([]);
-  const [cells, setCells] = useState<Cell[]>([]);
-  const [items, setItems] = useState<Item[]>([]);
-
-  const [hhRooms, setHhRooms] = useState<Room[]>([]);
-  const [hhColumns, setHhColumns] = useState<Column[]>([]);
-  const [hhCells, setHhCells] = useState<Cell[]>([]);
-
-  const [search, setSearch] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  const [newColumnName, setNewColumnName] = useState("");
-
-  const [editingCellId, setEditingCellId] = useState<string | null>(null);
-  const [editingCellCode, setEditingCellCode] = useState("");
-
-  // Column rename modal
-  const [colModalOpen, setColModalOpen] = useState(false);
-  const [colModalCol, setColModalCol] = useState<Column | null>(null);
-  const [colModalName, setColModalName] = useState("");
-  const colNameInputRef = useRef<HTMLInputElement | null>(null);
-
-  // Item modal
-  const [itemModalOpen, setItemModalOpen] = useState(false);
-  const [editingItem, setEditingItem] = useState<Item | null>(null);
-  const [itemName, setItemName] = useState("");
-  const [itemQty, setItemQty] = useState<number>(1);
-  const [itemExpire, setItemExpire] = useState<string>("");
-  const [itemCellId, setItemCellId] = useState<string>("");
-
-  const [locationRoomId, setLocationRoomId] = useState<string>("");
-
-  // image
-  const [itemImageFile, setItemImageFile] = useState<File | null>(null);
-  const [itemImageLocalUrl, setItemImageLocalUrl] = useState<string | null>(null);
-  const [modalImageRemoteUrl, setModalImageRemoteUrl] = useState<string | null>(null);
-
-  const nameInputRef = useRef<HTMLInputElement | null>(null);
-  const cellRefMap = useRef<Record<string, HTMLDivElement | null>>({});
-
-  useEffect(() => {
-    (async () => {
-      const { data } = await supabase.auth.getSession();
-      setSession(data.session ?? null);
-    })();
-    const { data: sub } = supabase.auth.onAuthStateChange((_evt, s) => setSession(s));
-    return () => sub.subscription.unsubscribe();
-  }, []);
-
-  // ESC handlers for modals
-  useEffect(() => {
-    if (!itemModalOpen && !colModalOpen) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      if (itemModalOpen) closeItemModal();
-      if (colModalOpen) closeColModal();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [itemModalOpen, colModalOpen]);
-
-  useEffect(() => {
-    return () => {
-      if (itemImageLocalUrl) URL.revokeObjectURL(itemImageLocalUrl);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // auto focus item name on add
-  useEffect(() => {
-    if (!itemModalOpen) return;
-    if (editingItem) return;
-    const t = window.setTimeout(() => nameInputRef.current?.focus(), 0);
-    return () => window.clearTimeout(t);
-  }, [itemModalOpen, editingItem]);
-
-  // auto focus column name
-  useEffect(() => {
-    if (!colModalOpen) return;
-    const t = window.setTimeout(() => colNameInputRef.current?.focus(), 0);
-    return () => window.clearTimeout(t);
-  }, [colModalOpen]);
-
-  function closeItemModal() {
-    setItemModalOpen(false);
-    setEditingItem(null);
-
-    if (itemImageLocalUrl) URL.revokeObjectURL(itemImageLocalUrl);
-    setItemImageLocalUrl(null);
-    setItemImageFile(null);
-    setModalImageRemoteUrl(null);
-  }
-
-  function openColModal(col: Column) {
-    setColModalCol(col);
-    setColModalName(col.name ?? "");
-    setColModalOpen(true);
-  }
-
-  function closeColModal() {
-    setColModalOpen(false);
-    setColModalCol(null);
-    setColModalName("");
-  }
-
-  async function ensureProfileRow() {
-    if (!user?.id) return;
-    await supabase.from("profiles").upsert({ user_id: user.id }, { onConflict: "user_id" });
-  }
-
-  async function loadContextAndData() {
-    if (!user?.id) return;
-
-    setLoading(true);
-    setErr(null);
-
-    try {
-      await ensureProfileRow();
-
-      const memRes = await supabase.from("household_members").select("household_id").eq("user_id", user.id);
-      if (memRes.error) throw new Error(memRes.error.message);
-      const mems = memRes.data ?? [];
-      const myHids = new Set(mems.map((m: any) => m.household_id as string));
-
-      const profRes = await supabase.from("profiles").select("default_household_id").eq("user_id", user.id).maybeSingle();
-      if (profRes.error) throw new Error(profRes.error.message);
-
-      const def = (profRes.data?.default_household_id as string | null) ?? null;
-      setDefaultHouseholdId(def);
-
-      let active = safeGetLS(ACTIVE_HOUSEHOLD_KEY);
-      if (active && !myHids.has(active)) {
-        safeSetLS(ACTIVE_HOUSEHOLD_KEY, null);
-        active = null;
-      }
-
-      let hid: string | null = active || def;
-
-      if (!hid) {
-        if (mems.length === 0) {
-          router.replace("/onboarding");
-          return;
-        }
-        if (mems.length === 1) {
-          hid = mems[0].household_id;
-          const rpc = await supabase.rpc("set_default_household", { p_household_id: hid });
-          if (rpc.error) throw new Error(rpc.error.message);
-          setDefaultHouseholdId(hid);
-        } else {
-          router.replace("/households");
-          return;
-        }
-      }
-
-      setActiveHouseholdId(hid);
-
-      const hRes = await supabase.from("households").select("id,name,join_code").eq("id", hid).single();
-      if (hRes.error) throw new Error(hRes.error.message);
-      setHousehold(hRes.data as Household);
-
-      // household rooms/columns/cells
-      const hhRoomRes = await supabase
-        .from("rooms")
-        .select("id,household_id,name,position")
-        .eq("household_id", hid)
-        .order("position", { ascending: true });
-      if (hhRoomRes.error) throw new Error(hhRoomRes.error.message);
-      const allRooms = (hhRoomRes.data as Room[]) ?? [];
-      setHhRooms(allRooms);
-
-      const roomIds = allRooms.map((r) => r.id);
-      let allCols: Column[] = [];
-      let allCells: Cell[] = [];
-
-      if (roomIds.length > 0) {
-        const hhColRes = await supabase
-          .from("room_columns")
-          .select("id,room_id,name,position")
-          .in("room_id", roomIds)
-          .order("room_id", { ascending: true })
-          .order("position", { ascending: true });
-        if (hhColRes.error) throw new Error(hhColRes.error.message);
-        allCols = (hhColRes.data as Column[]) ?? [];
-        setHhColumns(allCols);
-
-        const colIds = allCols.map((c) => c.id);
-        if (colIds.length > 0) {
-          const hhCellRes = await supabase
-            .from("room_cells")
-            .select("id,column_id,code,position")
-            .in("column_id", colIds)
-            .order("column_id", { ascending: true })
-            .order("position", { ascending: true });
-          if (hhCellRes.error) throw new Error(hhCellRes.error.message);
-          allCells = (hhCellRes.data as Cell[]) ?? [];
-          setHhCells(allCells);
-        } else {
-          setHhCells([]);
-        }
-      } else {
-        setHhColumns([]);
-        setHhCells([]);
-      }
-
-      // current room
-      const roomRes = await supabase
-        .from("rooms")
-        .select("id,household_id,name,position")
-        .eq("id", roomId)
-        .eq("household_id", hid)
-        .maybeSingle();
-      if (roomRes.error) throw new Error(roomRes.error.message);
-      if (!roomRes.data) {
-        setRoom(null);
-        setColumns([]);
-        setCells([]);
-        setItems([]);
-        throw new Error("Room not found in the current household. Use All rooms or Switch household.");
-      }
-      setRoom(roomRes.data as Room);
-
-      const colRes = await supabase
-        .from("room_columns")
-        .select("id,room_id,name,position")
-        .eq("room_id", roomId)
-        .order("position", { ascending: true });
-      if (colRes.error) throw new Error(colRes.error.message);
-
-      const cols = (colRes.data as Column[]) ?? [];
-      setColumns(cols);
-
-      const curColIds = cols.map((c) => c.id);
-      if (curColIds.length === 0) {
-        setCells([]);
-      } else {
-        const cellRes = await supabase
-          .from("room_cells")
-          .select("id,column_id,code,position")
-          .in("column_id", curColIds)
-          .order("column_id", { ascending: true })
-          .order("position", { ascending: true });
-        if (cellRes.error) throw new Error(cellRes.error.message);
-        setCells((cellRes.data as Cell[]) ?? []);
-      }
-
-      // items for entire household
-      const hhCellIds = allCells.map((c) => c.id);
-      if (hhCellIds.length === 0) {
-        setItems([]);
-      } else {
-        const selectCols = [
-          ITEM_ID_FIELD,
-          ITEM_HOUSEHOLD_FIELD,
-          ITEM_CELL_FIELD,
-          ITEM_NAME_FIELD,
-          ITEM_QTY_FIELD,
-          ITEM_EXPIRE_FIELD,
-          ITEM_IMG_FIELD,
-        ].join(",");
-
-        const itemRes = await supabase
-          .from(ITEMS_TABLE)
-          .select(selectCols)
-          .eq(ITEM_HOUSEHOLD_FIELD, hid)
-          .in(ITEM_CELL_FIELD, hhCellIds);
-
-        if (itemRes.error) throw new Error(itemRes.error.message);
-        setItems((itemRes.data ?? []).map(normalizeItemRow));
-      }
-    } catch (e: any) {
-      setErr(e?.message ?? "Failed to load room.");
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  useEffect(() => {
-    if (!user?.id || !roomId) return;
-    loadContextAndData();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.id, roomId]);
-
-  // signed url preview
-  useEffect(() => {
-    let cancelled = false;
-
-    async function loadPreviewUrl() {
-      if (!itemModalOpen) {
-        setModalImageRemoteUrl(null);
-        return;
-      }
-      if (itemImageLocalUrl) {
-        setModalImageRemoteUrl(null);
-        return;
-      }
-
-      const path = editingItem?.image_path ?? null;
-      if (!path) {
-        setModalImageRemoteUrl(null);
-        return;
-      }
-
-      if (isUrl(path)) {
-        if (!cancelled) setModalImageRemoteUrl(path);
-        return;
-      }
-
-      try {
-        const { data: signed, error: signedErr } = await supabase.storage.from(STORAGE_BUCKET).createSignedUrl(path, 60 * 60);
-        if (!signedErr && signed?.signedUrl) {
-          if (!cancelled) setModalImageRemoteUrl(signed.signedUrl);
-          return;
-        }
-
-        const { data: pub } = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(path);
-        if (!cancelled) setModalImageRemoteUrl(pub?.publicUrl ?? null);
-      } catch {
-        if (!cancelled) setModalImageRemoteUrl(null);
-      }
-    }
-
-    loadPreviewUrl();
-    return () => {
-      cancelled = true;
-    };
-  }, [itemModalOpen, itemImageLocalUrl, editingItem?.image_path]);
-
-  const columnsWithCells = useMemo(() => {
-    const byCol: Record<string, Cell[]> = {};
-    for (const c of cells) {
-      byCol[c.column_id] = byCol[c.column_id] || [];
-      byCol[c.column_id].push(c);
-    }
-    for (const k of Object.keys(byCol)) byCol[k].sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
-    return columns.map((col) => ({ col, cells: byCol[col.id] || [] }));
-  }, [columns, cells]);
-
-  const itemsByCell = useMemo(() => {
-    const map: Record<string, Item[]> = {};
-    const curCellIds = new Set(cells.map((c) => c.id));
-    for (const it of items) {
-      if (Number(it.qty ?? 0) <= 0) continue;
-      if (!curCellIds.has(it.cell_id)) continue;
-      map[it.cell_id] = map[it.cell_id] || [];
-      map[it.cell_id].push(it);
-    }
-    for (const k of Object.keys(map)) map[k].sort(sortItemsByExpiry);
-    return map;
-  }, [items, cells]);
-
-  // household-level index for expiring/search
-  const hhIndex = useMemo(() => {
-    const roomById = new Map(hhRooms.map((r) => [r.id, r]));
-    const colById = new Map(hhColumns.map((c) => [c.id, c]));
-    const m = new Map<
-      string,
-      { roomId: string; roomName: string; colId: string; colName: string; cellCode: string; label: string }
-    >();
-
-    for (const ce of hhCells) {
-      const col = colById.get(ce.column_id);
-      const room = roomById.get(col?.room_id ?? "");
-      const roomName = room?.name ?? "Room";
-      const colName = col?.name ?? "Column";
-      const label = `${roomName} / ${colName} / ${ce.code}`;
-      m.set(ce.id, {
-        roomId: room?.id ?? "",
-        roomName,
-        colId: col?.id ?? "",
-        colName,
-        cellCode: ce.code,
-        label,
-      });
-    }
-    return m;
-  }, [hhRooms, hhColumns, hhCells]);
-
-  const expiring0to7 = useMemo(() => {
-    return items
-      .filter((it) => it.qty > 0)
-      .map((it) => ({ it, du: daysUntil(it.expires_at ?? null) }))
-      .filter(({ du }) => du !== null && du >= 0 && du <= 7)
-      .sort((a, b) => (a.du! - b.du!) || a.it.name.localeCompare(b.it.name));
-  }, [items]);
-
-  const expiring8to30 = useMemo(() => {
-    return items
-      .filter((it) => it.qty > 0)
-      .map((it) => ({ it, du: daysUntil(it.expires_at ?? null) }))
-      .filter(({ du }) => du !== null && du >= 8 && du <= 30)
-      .sort((a, b) => (a.du! - b.du!) || a.it.name.localeCompare(b.it.name));
-  }, [items]);
-
-  function expLine(it: Item, du: number) {
-    const loc = hhIndex.get(it.cell_id);
-    const where = loc ? `${loc.roomName} / ${loc.colName} / ${loc.cellCode}` : "Unknown";
-    return `${it.name} — ${where} (in ${du}d)`;
-  }
-
-  function goToCell(it: Item) {
-    const loc = hhIndex.get(it.cell_id);
-    if (!loc?.roomId) return;
-
-    if (loc.roomId === roomId) {
-      const ref = cellRefMap.current[it.cell_id];
-      if (ref) ref.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
-      return;
-    }
-    router.push(`/rooms/${loc.roomId}`);
-  }
-
-  const filteredItemsSummary = useMemo(() => {
-    const q = search.trim();
-    if (!q) return [];
-    return items
-      .filter((it) => it.qty > 0)
-      .filter((it) => fuzzyMatch(q, it.name))
-      .slice(0, 50)
-      .map((it) => ({ it, loc: hhIndex.get(it.cell_id) }));
-  }, [search, items, hhIndex]);
-
-  const roomCellOptions = useMemo(() => {
-    const rid = locationRoomId;
-    if (!rid) return [];
-
-    const colsInRoom = hhColumns.filter((c) => c.room_id === rid);
-    const colIdSet = new Set(colsInRoom.map((c) => c.id));
-    const colNameById = new Map(colsInRoom.map((c) => [c.id, c.name]));
-
-    const list = hhCells
-      .filter((ce) => colIdSet.has(ce.column_id))
-      .map((ce) => ({
-        id: ce.id,
-        code: ce.code,
-        colName: colNameById.get(ce.column_id) ?? "Column",
-      }));
-
-    list.sort((a, b) => a.code.localeCompare(b.code, undefined, { numeric: true, sensitivity: "base" }));
-
-    return list.map((x) => ({
-      id: x.id,
-      code: x.code,
-      label: `${x.colName} / ${x.code}`,
-    }));
-  }, [locationRoomId, hhColumns, hhCells]);
-
-  function resetItemModalFields() {
-    setItemName("");
-    setItemQty(1);
-    setItemExpire("");
-    setItemCellId("");
-    setLocationRoomId("");
-
-    if (itemImageLocalUrl) URL.revokeObjectURL(itemImageLocalUrl);
-    setItemImageLocalUrl(null);
-    setItemImageFile(null);
-
-    setModalImageRemoteUrl(null);
-  }
-
-  function openAddItem(cellId: string) {
-    setEditingItem(null);
-    resetItemModalFields();
-
-    setItemCellId(cellId);
-    setLocationRoomId(roomId);
-
-    setItemModalOpen(true);
-  }
-
-  function openEditItem(it: Item) {
-    setEditingItem(it);
-    resetItemModalFields();
-
-    setItemName(it.name ?? "");
-    setItemQty(Number(it.qty ?? 1));
-    setItemExpire(it.expires_at ?? "");
-    setItemCellId(it.cell_id);
-
-    const loc = hhIndex.get(it.cell_id);
-    setLocationRoomId(loc?.roomId || roomId);
-
-    setItemModalOpen(true);
-  }
-
-  async function uploadItemImageIfAny(): Promise<string | null> {
-    if (!itemImageFile) return null;
-    if (!activeHouseholdId) return null;
-
-    const safeName = sanitizeFilename(itemImageFile.name);
-    const uuid = typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : String(Date.now());
-    const objectPath = `${activeHouseholdId}/${uuid}_${safeName}`;
-
-    const up = await supabase.storage.from(STORAGE_BUCKET).upload(objectPath, itemImageFile, {
-      upsert: true,
-      contentType: itemImageFile.type || "image/*",
-    });
-
-    if (up.error) {
-      throw new Error(
-        `Image upload failed: ${up.error.message}. Most common causes: bucket not created, bucket policy/RLS, or not authenticated.`
-      );
-    }
-    return objectPath;
-  }
-
-  async function saveItem() {
-    if (!user?.id || !activeHouseholdId) return;
-
-    const nm = itemName.trim();
-    if (!nm) return setErr("Item name required.");
-    if (!itemCellId) return setErr("Cell required.");
-
-    setBusy(true);
-    setErr(null);
-
-    try {
-      let nextImagePath: string | null | undefined = editingItem?.image_path ?? null;
-      if (itemImageFile) {
-        nextImagePath = await uploadItemImageIfAny();
-      }
-
-      const payload: any = {};
-      payload[ITEM_HOUSEHOLD_FIELD] = activeHouseholdId;
-      payload[ITEM_CELL_FIELD] = itemCellId;
-      payload[ITEM_NAME_FIELD] = nm;
-      payload[ITEM_QTY_FIELD] = Number(itemQty ?? 0);
-      payload[ITEM_EXPIRE_FIELD] = itemExpire ? itemExpire : null;
-      payload[ITEM_IMG_FIELD] = nextImagePath ?? null;
-
-      const selectCols = [
-        ITEM_ID_FIELD,
-        ITEM_HOUSEHOLD_FIELD,
-        ITEM_CELL_FIELD,
-        ITEM_NAME_FIELD,
-        ITEM_QTY_FIELD,
-        ITEM_EXPIRE_FIELD,
-        ITEM_IMG_FIELD,
-      ].join(",");
-
-      if (!editingItem) {
-        const ins = await supabase.from(ITEMS_TABLE).insert(payload).select(selectCols).single();
-        if (ins.error) throw new Error(ins.error.message);
-        setItems((prev) => [...prev, normalizeItemRow(ins.data)]);
-      } else {
-        const upd = await supabase
-          .from(ITEMS_TABLE)
-          .update(payload)
-          .eq(ITEM_ID_FIELD, editingItem.id)
-          .select(selectCols)
-          .single();
-        if (upd.error) throw new Error(upd.error.message);
-        setItems((prev) => prev.map((x) => (x.id === editingItem.id ? normalizeItemRow(upd.data) : x)));
-      }
-
-      closeItemModal();
-    } catch (e: any) {
-      setErr(e?.message ?? "Save failed.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function deleteItem(itemId: string) {
-    setBusy(true);
-    setErr(null);
-    try {
-      const del = await supabase.from(ITEMS_TABLE).delete().eq(ITEM_ID_FIELD, itemId);
-      if (del.error) throw new Error(del.error.message);
-      setItems((prev) => prev.filter((x) => x.id !== itemId));
-      closeItemModal();
-    } catch (e: any) {
-      setErr(e?.message ?? "Delete failed.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function addColumn() {
-    if (!roomId) return;
-    const nm = newColumnName.trim();
-    if (!nm) return;
-
-    setBusy(true);
-    setErr(null);
-    try {
-      const nextPos = (columns.reduce((m, c) => Math.max(m, c.position ?? 0), 0) || 0) + 1;
-      const ins = await supabase
-        .from("room_columns")
-        .insert({ room_id: roomId, name: nm, position: nextPos })
-        .select("id,room_id,name,position")
-        .single();
-      if (ins.error) throw new Error(ins.error.message);
-
-      setColumns((prev) => [...prev, ins.data as Column].sort((a, b) => a.position - b.position));
-      setHhColumns((prev) => [...prev, ins.data as Column]);
-      setNewColumnName("");
-    } catch (e: any) {
-      setErr(e?.message ?? "Add column failed.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function renameColumn(colId: string, nextName: string) {
-    const nm = nextName.trim();
-    if (!nm) return;
-
-    setBusy(true);
-    setErr(null);
-    try {
-      const upd = await supabase
-        .from("room_columns")
-        .update({ name: nm })
-        .eq("id", colId)
-        .select("id,room_id,name,position")
-        .single();
-      if (upd.error) throw new Error(upd.error.message);
-
-      setColumns((prev) => prev.map((c) => (c.id === colId ? (upd.data as Column) : c)));
-      setHhColumns((prev) => prev.map((c) => (c.id === colId ? (upd.data as Column) : c)));
-
-      closeColModal();
-    } catch (e: any) {
-      setErr(e?.message ?? "Rename failed.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function deleteColumn(col: Column) {
-    const ok = window.confirm(`Delete column "${col.name}"?\n\nThis will delete ALL cells under it and their items.`);
-    if (!ok) return;
-
-    setBusy(true);
-    setErr(null);
-    try {
-      const colCells = cells.filter((c) => c.column_id === col.id).map((c) => c.id);
-
-      if (colCells.length > 0) {
-        const delItems = await supabase.from(ITEMS_TABLE).delete().in(ITEM_CELL_FIELD, colCells);
-        if (delItems.error) throw new Error(delItems.error.message);
-
-        const delCells = await supabase.from("room_cells").delete().in("id", colCells);
-        if (delCells.error) throw new Error(delCells.error.message);
-      }
-
-      const delCol = await supabase.from("room_columns").delete().eq("id", col.id);
-      if (delCol.error) throw new Error(delCol.error.message);
-
-      setItems((prev) => prev.filter((it) => !colCells.includes(it.cell_id)));
-      setCells((prev) => prev.filter((c) => c.column_id !== col.id));
-      setHhCells((prev) => prev.filter((c) => !colCells.includes(c.id)));
-
-      setColumns((prev) => prev.filter((c) => c.id !== col.id));
-      setHhColumns((prev) => prev.filter((c) => c.id !== col.id));
-    } catch (e: any) {
-      setErr(e?.message ?? "Delete column failed.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function addCell(colId: string) {
-    const existing = cells.filter((c) => c.column_id === colId);
-    const nextPos = (existing.reduce((m, c) => Math.max(m, c.position ?? 0), 0) || 0) + 1;
-    const code = `C${nextPos}`;
-
-    setBusy(true);
-    setErr(null);
-    try {
-      const ins = await supabase
-        .from("room_cells")
-        .insert({ column_id: colId, code, position: nextPos })
-        .select("id,column_id,code,position")
-        .single();
-      if (ins.error) throw new Error(ins.error.message);
-
-      setCells((prev) => [...prev, ins.data as Cell]);
-      setHhCells((prev) => [...prev, ins.data as Cell]);
-    } catch (e: any) {
-      setErr(e?.message ?? "Add cell failed.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function saveCellCode(cellId: string) {
-    const next = editingCellCode.trim();
-    if (!next) return;
-
-    setBusy(true);
-    setErr(null);
-    try {
-      const upd = await supabase
-        .from("room_cells")
-        .update({ code: next })
-        .eq("id", cellId)
-        .select("id,column_id,code,position")
-        .single();
-      if (upd.error) throw new Error(upd.error.message);
-
-      setCells((prev) => prev.map((c) => (c.id === cellId ? (upd.data as Cell) : c)));
-      setHhCells((prev) => prev.map((c) => (c.id === cellId ? (upd.data as Cell) : c)));
-
-      setEditingCellId(null);
-      setEditingCellCode("");
-    } catch (e: any) {
-      setErr(e?.message ?? "Edit cell failed.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function deleteCell(cell: Cell) {
-    const ok = window.confirm(`Delete cell "${cell.code}"?\n\nThis will delete ALL items inside this cell.`);
-    if (!ok) return;
-
-    setBusy(true);
-    setErr(null);
-    try {
-      const delItems = await supabase.from(ITEMS_TABLE).delete().eq(ITEM_CELL_FIELD, cell.id);
-      if (delItems.error) throw new Error(delItems.error.message);
-
-      const delCell = await supabase.from("room_cells").delete().eq("id", cell.id);
-      if (delCell.error) throw new Error(delCell.error.message);
-
-      setItems((prev) => prev.filter((it) => it.cell_id !== cell.id));
-      setCells((prev) => prev.filter((c) => c.id !== cell.id));
-      setHhCells((prev) => prev.filter((c) => c.id !== cell.id));
-    } catch (e: any) {
-      setErr(e?.message ?? "Delete cell failed.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  const modeLabel = useMemo(() => {
-    if (!household?.id) return "";
-    if (defaultHouseholdId && household.id === defaultHouseholdId) return "default";
-    return "temporary";
-  }, [household?.id, defaultHouseholdId]);
-
-  const modalImageUrl = itemImageLocalUrl ?? modalImageRemoteUrl ?? null;
-
-  if (!session) return <AuthGate onAuthed={(s) => setSession(s)} />;
-
-  // Base sizes
-  const ITEM_NAME_PX = 12; // item name
-  const CELL_NAME_PX = ITEM_NAME_PX + 2; // per request: +2pt
-
-  return (
-    <div style={{ minHeight: "100vh", background: COLORS.oatBg, color: COLORS.ink }}>
-      <div style={{ padding: 16, maxWidth: 1600, margin: "0 auto" }}>
-        {/* Top action row: Refresh | Switch household | Sign out */}
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
-          <div style={{ width: "100%", display: "flex", justifyContent: "flex-end", gap: 10, flexWrap: "wrap" }}>
+    <div className="fixed inset-0 z-[60]">
+      <div className="absolute inset-0 bg-black/40" onClick={onClose} />
+      <div className={cx('absolute left-1/2 top-1/2 w-[92vw] -translate-x-1/2 -translate-y-1/2', widthClass)}>
+        <div className={cx('rounded-2xl shadow-xl border', THEME.borderSoft, THEME.oatCard)}>
+          <div className="px-5 py-4 border-b border-black/10 flex items-center justify-between gap-3">
+            <div className="text-base font-semibold">{title}</div>
             <button
-              onClick={() => loadContextAndData()}
-              disabled={busy}
-              style={{
-                padding: "8px 10px",
-                borderRadius: 12,
-                border: `1px solid ${COLORS.border}`,
-                background: "white",
-                cursor: "pointer",
-                opacity: busy ? 0.6 : 1,
-              }}
+              onClick={onClose}
+              className="px-2 py-1 rounded-lg border border-black/10 hover:bg-black/5 text-sm"
+              aria-label="Close"
+              title="Close"
             >
-              Refresh
-            </button>
-
-            <button
-              onClick={() => router.push("/households")}
-              style={{
-                padding: "8px 10px",
-                borderRadius: 12,
-                fontWeight: 900,
-                border: `1px solid ${COLORS.border}`,
-                background: "white",
-                cursor: "pointer",
-              }}
-            >
-              Switch household
-            </button>
-
-            <button
-              onClick={async () => {
-                safeSetLS(ACTIVE_HOUSEHOLD_KEY, null);
-                await supabase.auth.signOut();
-                window.location.href = "/";
-              }}
-              style={{
-                padding: "8px 10px",
-                borderRadius: 12,
-                border: `1px solid ${COLORS.border}`,
-                background: "white",
-                cursor: "pointer",
-              }}
-            >
-              Sign out
+              ✕
             </button>
           </div>
+          <div className="p-5">{children}</div>
         </div>
-
-        {/* Household line */}
-        {household ? (
-          <div style={{ marginBottom: 12, color: COLORS.muted, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-            <div>
-              Household: <span style={{ fontWeight: 900, color: COLORS.ink }}>{household.name}</span>{" "}
-              <span style={{ fontWeight: 900 }}>({modeLabel})</span>
-              {household.join_code ? (
-                <>
-                  {" "}
-                  · Join code: <span style={{ fontWeight: 900, color: COLORS.ink }}>{household.join_code}</span>
-                </>
-              ) : null}
-            </div>
-          </div>
-        ) : null}
-
-        {err ? (
-          <div style={{ marginBottom: 12, color: "crimson", fontWeight: 900 }}>
-            {err}
-            <div style={{ marginTop: 8 }}>
-              <button
-                onClick={() => loadContextAndData()}
-                style={{
-                  padding: "8px 10px",
-                  borderRadius: 12,
-                  border: `1px solid ${COLORS.border}`,
-                  background: "white",
-                  cursor: "pointer",
-                }}
-              >
-                Retry
-              </button>
-            </div>
-          </div>
-        ) : null}
-
-        {loading ? (
-          <div style={{ opacity: 0.8 }}>Loading…</div>
-        ) : (
-          <>
-            {/* Expiring soon */}
-            <div style={{ background: COLORS.oatCard, border: `1px solid ${COLORS.border}`, borderRadius: 16, padding: 14, marginBottom: 12 }}>
-              <div style={{ fontWeight: 900, marginBottom: 8 }}>Expiring soon</div>
-
-              <div style={{ display: "grid", gap: 10, gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))" }}>
-                <div>
-                  <div style={{ fontWeight: 900, marginBottom: 6 }}>Within 7 days</div>
-                  {expiring0to7.length === 0 ? (
-                    <div style={{ color: COLORS.muted }}>None</div>
-                  ) : (
-                    <div style={{ display: "grid", gap: 4, fontFamily: FONT_ITEM, fontSize: 13 }}>
-                      {expiring0to7.slice(0, 40).map(({ it, du }) => (
-                        <div key={it.id} style={{ cursor: "pointer" }} onClick={() => goToCell(it)}>
-                          {expLine(it, du!)}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-                <div>
-                  <div style={{ fontWeight: 900, marginBottom: 6 }}>8 to 30 days</div>
-                  {expiring8to30.length === 0 ? (
-                    <div style={{ color: COLORS.muted }}>None</div>
-                  ) : (
-                    <div style={{ display: "grid", gap: 4, fontFamily: FONT_ITEM, fontSize: 13 }}>
-                      {expiring8to30.slice(0, 60).map(({ it, du }) => (
-                        <div key={it.id} style={{ cursor: "pointer" }} onClick={() => goToCell(it)}>
-                          {expLine(it, du!)}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-
-            {/* Search */}
-            <div style={{ background: COLORS.oatCard, border: `1px solid ${COLORS.border}`, borderRadius: 16, padding: 14, marginBottom: 12 }}>
-              <div style={{ fontWeight: 900, marginBottom: 8 }}>Search items</div>
-              <input
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Type an item name (fuzzy match supported)"
-                style={{
-                  width: "100%",
-                  padding: 10,
-                  borderRadius: 12,
-                  border: `1px solid ${COLORS.border}`,
-                  background: "white",
-                  fontFamily: FONT_ITEM,
-                }}
-              />
-              {search.trim() ? (
-                <div style={{ marginTop: 10, color: COLORS.muted }}>
-                  {filteredItemsSummary.length === 0 ? (
-                    <div>No matches.</div>
-                  ) : (
-                    <div style={{ display: "grid", gap: 4, fontFamily: FONT_ITEM, fontSize: 13 }}>
-                      {filteredItemsSummary.map(({ it, loc }) => (
-                        <div key={it.id} style={{ cursor: "pointer" }} onClick={() => goToCell(it)}>
-                          <span style={{ color: COLORS.ink, fontWeight: 400 }}>{it.name}</span>{" "}
-                          <span>
-                            — {loc ? loc.label : "Unknown"} · qty {it.qty}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              ) : null}
-            </div>
-
-            {/* Room title + All rooms + Add column */}
-            <div
-              style={{
-                background: COLORS.oatCard,
-                border: `1px solid ${COLORS.border}`,
-                borderRadius: 16,
-                padding: 14,
-                marginBottom: 12,
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                gap: 14,
-                flexWrap: "wrap",
-              }}
-            >
-              {/* Left */}
-              <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-                <button
-                  onClick={() => router.push("/rooms")}
-                  style={{
-                    padding: "8px 10px",
-                    borderRadius: 12,
-                    fontWeight: 900,
-                    border: `1px solid ${COLORS.border}`,
-                    background: "white",
-                    cursor: "pointer",
-                  }}
-                >
-                  All rooms
-                </button>
-
-                <div style={{ fontWeight: 900, fontSize: 20, color: COLORS.ink }}>{room?.name ?? "Room"}</div>
-              </div>
-
-              {/* Right: Add column */}
-              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", justifyContent: "flex-end" }}>
-                <input
-                  value={newColumnName}
-                  onChange={(e) => setNewColumnName(e.target.value)}
-                  placeholder="Add column (e.g. Pantry / Shelf)"
-                  style={{
-                    width: 320,
-                    maxWidth: "70vw",
-                    padding: 10,
-                    borderRadius: 12,
-                    border: `1px solid ${COLORS.border}`,
-                    background: "white",
-                  }}
-                />
-                <button
-                  onClick={addColumn}
-                  disabled={!newColumnName.trim() || busy}
-                  style={{
-                    padding: "10px 12px",
-                    borderRadius: 12,
-                    fontWeight: 900,
-                    background: COLORS.blue,
-                    color: "white",
-                    border: "none",
-                    cursor: "pointer",
-                    opacity: !newColumnName.trim() || busy ? 0.6 : 1,
-                  }}
-                >
-                  Add column
-                </button>
-              </div>
-            </div>
-
-            {/* Columns */}
-            <div style={{ display: "flex", gap: 12, alignItems: "flex-start", overflowX: "auto", paddingBottom: 6 }}>
-              {columnsWithCells.map(({ col, cells: colCells }) => (
-                <div
-                  key={col.id}
-                  style={{
-                    minWidth: 300,
-                    maxWidth: 340,
-                    flex: "0 0 auto",
-                    background: COLORS.oatCard,
-                    border: `1px solid ${COLORS.border}`,
-                    borderRadius: 16,
-                    padding: 12,
-                    display: "flex",
-                    flexDirection: "column",
-                    gap: 10,
-                  }}
-                >
-                  {/* Column header: keep title centered while actions on right */}
-                  <div
-                    style={{
-                      display: "grid",
-                      gridTemplateColumns: "1fr auto 1fr",
-                      alignItems: "center",
-                      gap: 8,
-                      paddingTop: 2,
-                      paddingBottom: 2,
-                    }}
-                  >
-                    <div /> {/* left spacer */}
-
-                    <div
-                      style={{
-                        textAlign: "center",
-                        fontFamily: FONT_TITLE,
-                        fontWeight: 700,
-                        fontSize: 18,
-                        color: COLORS.blue,
-                        letterSpacing: 0.4,
-                      }}
-                    >
-                      {col.name}
-                    </div>
-
-                    <div style={{ display: "flex", justifyContent: "flex-end", gap: 12 }}>
-                      <IconEmoji title="Edit column" emoji="✏️" onClick={() => openColModal(col)} disabled={busy} size={16} />
-                      <IconEmoji title="Delete column" emoji="🗑️" onClick={() => deleteColumn(col)} disabled={busy} size={16} />
-                    </div>
-                  </div>
-
-                  {/* Cells */}
-                  <div style={{ display: "grid", gap: 10 }}>
-                    {colCells.map((cell) => {
-                      const list = itemsByCell[cell.id] || [];
-                      const isEditingThis = editingCellId === cell.id;
-
-                      return (
-                        <div
-                          key={cell.id}
-                          ref={(el) => {
-                            cellRefMap.current[cell.id] = el;
-                          }}
-                          style={{
-                            border: `1px solid ${COLORS.border}`,
-                            borderRadius: 14,
-                            background: "white",
-                            padding: 10,
-                            display: "flex",
-                            flexDirection: "column",
-                            gap: 8,
-                          }}
-                        >
-                          {/* Cell header */}
-                          <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
-                            {isEditingThis ? (
-                              <div style={{ display: "flex", gap: 8, alignItems: "center", width: "100%" }}>
-                                <input
-                                  value={editingCellCode}
-                                  onChange={(e) => setEditingCellCode(e.target.value)}
-                                  placeholder="Cell code (e.g. K21)"
-                                  style={{
-                                    flex: 1,
-                                    padding: 8,
-                                    borderRadius: 10,
-                                    border: `1px solid ${COLORS.border}`,
-                                  }}
-                                />
-                                <button
-                                  onClick={() => saveCellCode(cell.id)}
-                                  disabled={busy || !editingCellCode.trim()}
-                                  style={{
-                                    padding: "8px 10px",
-                                    borderRadius: 10,
-                                    fontWeight: 900,
-                                    background: COLORS.blue,
-                                    color: "white",
-                                    border: "none",
-                                    cursor: "pointer",
-                                    opacity: busy || !editingCellCode.trim() ? 0.6 : 1,
-                                  }}
-                                >
-                                  Save
-                                </button>
-                                <button
-                                  onClick={() => {
-                                    setEditingCellId(null);
-                                    setEditingCellCode("");
-                                  }}
-                                  style={{
-                                    padding: "8px 10px",
-                                    borderRadius: 10,
-                                    border: `1px solid ${COLORS.border}`,
-                                    background: "white",
-                                    cursor: "pointer",
-                                  }}
-                                >
-                                  Cancel
-                                </button>
-                              </div>
-                            ) : (
-                              <>
-                                <div
-                                  style={{
-                                    fontFamily: FONT_TITLE,
-                                    fontSize: CELL_NAME_PX,
-                                    fontWeight: 700,
-                                    color: COLORS.blue,
-                                    letterSpacing: 0.35,
-                                  }}
-                                >
-                                  {cell.code}
-                                </div>
-
-                                <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                                  <IconEmoji title="Add item" emoji="➕" onClick={() => openAddItem(cell.id)} disabled={busy} size={16} />
-                                  <IconEmoji
-                                    title="Edit cell"
-                                    emoji="✎"
-                                    onClick={() => {
-                                      setEditingCellId(cell.id);
-                                      setEditingCellCode(cell.code);
-                                    }}
-                                    disabled={busy}
-                                    size={16}
-                                  />
-                                  <IconEmoji title="Delete cell" emoji="🗑️" onClick={() => deleteCell(cell)} disabled={busy} size={16} />
-                                </div>
-                              </>
-                            )}
-                          </div>
-
-                          {/* Item chips */}
-                          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                            {list.length === 0 ? (
-                              <div style={{ color: COLORS.muted, fontSize: 12 }}>Empty</div>
-                            ) : (
-                              list
-                                .filter((it) => (search.trim() ? fuzzyMatch(search, it.name) : true))
-                                .map((it) => (
-                                  <button
-                                    key={it.id}
-                                    onClick={() => openEditItem(it)}
-                                    title={it.name}
-                                    style={{
-                                      maxWidth: "100%",
-                                      display: "inline-flex",
-                                      alignItems: "center",
-                                      gap: 6,
-                                      padding: "6px 8px",
-                                      borderRadius: 999,
-                                      border: `1px solid ${COLORS.border}`,
-                                      background: chipBg(it),
-                                      cursor: "pointer",
-                                      fontFamily: FONT_ITEM,
-                                    }}
-                                  >
-                                    <span
-                                      style={{
-                                        maxWidth: 190,
-                                        overflow: "hidden",
-                                        textOverflow: "ellipsis",
-                                        whiteSpace: "nowrap",
-                                        fontWeight: 400,
-                                        fontSize: ITEM_NAME_PX,
-                                        color: COLORS.ink,
-                                        letterSpacing: 0.1,
-                                      }}
-                                    >
-                                      {it.name}
-                                    </span>
-                                    <span style={{ fontSize: 12, color: COLORS.muted }}>×{it.qty}</span>
-                                  </button>
-                                ))
-                            )}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-
-                  {/* Column footer: Add cell */}
-                  <div style={{ marginTop: "auto", paddingTop: 8 }}>
-                    <button
-                      onClick={() => addCell(col.id)}
-                      disabled={busy}
-                      style={{
-                        width: "100%",
-                        padding: "10px 12px",
-                        borderRadius: 12,
-                        fontWeight: 900,
-                        background: "white",
-                        border: `1px solid ${COLORS.border}`,
-                        cursor: "pointer",
-                        opacity: busy ? 0.6 : 1,
-                      }}
-                    >
-                      + Add cell
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </>
-        )}
       </div>
-
-      {/* Column rename modal */}
-      {colModalOpen ? (
-        <div
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(0,0,0,.35)",
-            display: "flex",
-            justifyContent: "center",
-            alignItems: "center",
-            padding: 16,
-            zIndex: 60,
-          }}
-          onClick={() => closeColModal()}
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            style={{
-              width: "min(520px, 100%)",
-              background: "white",
-              borderRadius: 18,
-              border: `1px solid ${COLORS.border}`,
-              padding: 14,
-            }}
-          >
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
-              <div style={{ fontWeight: 900, fontSize: 16 }}>Edit column</div>
-              <button
-                onClick={() => closeColModal()}
-                style={{ padding: "6px 8px", borderRadius: 10, border: `1px solid ${COLORS.border}`, background: "white", cursor: "pointer" }}
-              >
-                Close
-              </button>
-            </div>
-
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                if (busy) return;
-                if (!colModalCol) return;
-                void renameColumn(colModalCol.id, colModalName);
-              }}
-              style={{ marginTop: 12 }}
-            >
-              <div style={{ display: "grid", gap: 10 }}>
-                <div style={{ display: "grid", gap: 6 }}>
-                  <div style={{ fontWeight: 900 }}>Column name</div>
-                  <input
-                    ref={colNameInputRef}
-                    value={colModalName}
-                    onChange={(e) => setColModalName(e.target.value)}
-                    placeholder="e.g. Pantry"
-                    style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}`, background: "white" }}
-                  />
-                </div>
-
-                <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
-                  <button
-                    type="submit"
-                    disabled={busy || !colModalName.trim()}
-                    style={{
-                      padding: "10px 12px",
-                      borderRadius: 12,
-                      fontWeight: 900,
-                      background: COLORS.blue,
-                      color: "white",
-                      border: "none",
-                      cursor: "pointer",
-                      opacity: busy || !colModalName.trim() ? 0.6 : 1,
-                    }}
-                  >
-                    Save
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => closeColModal()}
-                    style={{ padding: "10px 12px", borderRadius: 12, border: `1px solid ${COLORS.border}`, background: "white", cursor: "pointer" }}
-                  >
-                    Cancel
-                  </button>
-                </div>
-
-                {busy ? <div style={{ color: COLORS.muted }}>Working…</div> : null}
-                <div style={{ color: COLORS.muted, fontSize: 12 }}>Tip: Press Enter to save, Esc to close.</div>
-              </div>
-            </form>
-          </div>
-        </div>
-      ) : null}
-
-      {/* Item modal */}
-      {itemModalOpen ? (
-        <div
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(0,0,0,.35)",
-            display: "flex",
-            justifyContent: "center",
-            alignItems: "center",
-            padding: 16,
-            zIndex: 50,
-          }}
-          onClick={() => closeItemModal()}
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            style={{
-              width: "min(760px, 100%)",
-              background: "white",
-              borderRadius: 18,
-              border: `1px solid ${COLORS.border}`,
-              padding: 14,
-              maxHeight: "90vh",
-              overflowY: "auto",
-            }}
-          >
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
-              <div style={{ fontWeight: 900, fontSize: 16 }}>{editingItem ? "Edit item" : "Add item"}</div>
-              <button
-                onClick={() => closeItemModal()}
-                style={{ padding: "6px 8px", borderRadius: 10, border: `1px solid ${COLORS.border}`, background: "white", cursor: "pointer" }}
-              >
-                Close
-              </button>
-            </div>
-
-            <div style={{ marginTop: 12 }}>
-              {modalImageUrl ? (
-                <div style={{ width: "100%", borderRadius: 14, border: `1px solid ${COLORS.border}`, background: COLORS.oatCard, overflow: "hidden" }}>
-                  <img
-                    src={modalImageUrl}
-                    alt="item preview"
-                    style={{ width: "100%", height: 280, objectFit: "contain", display: "block", background: "white" }}
-                  />
-                </div>
-              ) : (
-                <div style={{ width: "100%", borderRadius: 14, border: `1px solid ${COLORS.border}`, background: COLORS.oatCard, padding: 12, color: COLORS.muted, fontWeight: 900 }}>
-                  No image
-                </div>
-              )}
-            </div>
-
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                if (!busy) void saveItem();
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !isComposingEvent(e)) {
-                  const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
-                  if (tag === "textarea") return;
-                  e.preventDefault();
-                  if (!busy) void saveItem();
-                }
-              }}
-              style={{ marginTop: 12 }}
-            >
-              <div style={{ display: "grid", gap: 10 }}>
-                <div style={{ display: "grid", gap: 6 }}>
-                  <div style={{ fontWeight: 900 }}>Name</div>
-                  <input
-                    ref={nameInputRef}
-                    value={itemName}
-                    onChange={(e) => setItemName(e.target.value)}
-                    placeholder="e.g. Olive oil"
-                    style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}`, fontFamily: FONT_ITEM }}
-                  />
-                </div>
-
-                <div style={{ display: "grid", gap: 6, gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))" }}>
-                  <div style={{ display: "grid", gap: 6 }}>
-                    <div style={{ fontWeight: 900 }}>Quantity</div>
-                    <input type="number" value={itemQty} onChange={(e) => setItemQty(Number(e.target.value))} style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }} />
-                  </div>
-
-                  <div style={{ display: "grid", gap: 6 }}>
-                    <div style={{ fontWeight: 900 }}>Expire date</div>
-                    <input type="date" value={itemExpire} onChange={(e) => setItemExpire(e.target.value)} style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }} />
-                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                      {[
-                        { label: "1 week", days: 7 },
-                        { label: "1 month", days: 30 },
-                        { label: "3 months", days: 90 },
-                        { label: "1 year", days: 365 },
-                      ].map((x) => (
-                        <button
-                          key={x.label}
-                          type="button"
-                          onClick={() => {
-                            const now = new Date();
-                            const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + x.days);
-                            const yyyy = d.getFullYear();
-                            const mm = String(d.getMonth() + 1).padStart(2, "0");
-                            const dd = String(d.getDate()).padStart(2, "0");
-                            setItemExpire(`${yyyy}-${mm}-${dd}`);
-                          }}
-                          style={{ padding: "6px 8px", borderRadius: 999, border: `1px solid ${COLORS.border}`, background: "white", cursor: "pointer" }}
-                        >
-                          +{x.label}
-                        </button>
-                      ))}
-                      <button type="button" onClick={() => setItemExpire("")} style={{ padding: "6px 8px", borderRadius: 999, border: `1px solid ${COLORS.border}`, background: "white", cursor: "pointer" }}>
-                        Clear
-                      </button>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Image */}
-                <div style={{ display: "grid", gap: 6 }}>
-                  <div style={{ fontWeight: 900 }}>Image</div>
-                  <input
-                    type="file"
-                    accept="image/*"
-                    onChange={(e) => {
-                      const f = e.target.files?.[0] ?? null;
-                      setItemImageFile(f);
-
-                      if (itemImageLocalUrl) URL.revokeObjectURL(itemImageLocalUrl);
-                      if (f) {
-                        const url = URL.createObjectURL(f);
-                        setItemImageLocalUrl(url);
-                      } else {
-                        setItemImageLocalUrl(null);
-                      }
-                      setModalImageRemoteUrl(null);
-                    }}
-                    style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
-                  />
-                  <div style={{ color: COLORS.muted, fontSize: 12 }}>Preview uses Signed URL first (works even if bucket is private).</div>
-                </div>
-
-                {/* Location */}
-                <div style={{ display: "grid", gap: 10 }}>
-                  <div style={{ display: "grid", gap: 6 }}>
-                    <div style={{ fontWeight: 900 }}>Room</div>
-                    <select value={locationRoomId} onChange={(e) => setLocationRoomId(e.target.value)} style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}>
-                      <option value="">Select a room</option>
-                      {hhRooms.map((r) => (
-                        <option key={r.id} value={r.id}>
-                          {r.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div style={{ display: "grid", gap: 6 }}>
-                    <div style={{ fontWeight: 900 }}>Cell (in selected room)</div>
-                    <select value={itemCellId} onChange={(e) => setItemCellId(e.target.value)} style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }} disabled={!locationRoomId}>
-                      <option value="">Select a cell</option>
-                      {roomCellOptions.map((opt) => (
-                        <option key={opt.id} value={opt.id}>
-                          {opt.code} · {opt.label}
-                        </option>
-                      ))}
-                    </select>
-
-                    {locationRoomId ? <AutoFixCellSelection roomCellOptions={roomCellOptions} itemCellId={itemCellId} setItemCellId={setItemCellId} /> : null}
-                  </div>
-                </div>
-
-                <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", marginTop: 6 }}>
-                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                    <button
-                      type="submit"
-                      disabled={busy}
-                      style={{ padding: "10px 12px", borderRadius: 12, fontWeight: 900, background: COLORS.blue, color: "white", border: "none", cursor: "pointer", opacity: busy ? 0.6 : 1 }}
-                    >
-                      {editingItem ? "Save changes" : "Add item"}
-                    </button>
-
-                    {editingItem ? (
-                      <button
-                        type="button"
-                        onClick={() => deleteItem(editingItem.id)}
-                        disabled={busy}
-                        style={{
-                          padding: "10px 12px",
-                          borderRadius: 12,
-                          fontWeight: 900,
-                          border: `1px solid rgba(220,0,0,.25)`,
-                          background: "rgba(220,0,0,.06)",
-                          color: "crimson",
-                          cursor: "pointer",
-                          opacity: busy ? 0.6 : 1,
-                        }}
-                      >
-                        Delete item
-                      </button>
-                    ) : null}
-                  </div>
-
-                  <button type="button" onClick={() => closeItemModal()} style={{ padding: "10px 12px", borderRadius: 12, border: `1px solid ${COLORS.border}`, background: "white", cursor: "pointer" }}>
-                    Cancel
-                  </button>
-                </div>
-
-                {busy ? <div style={{ color: COLORS.muted }}>Working…</div> : null}
-                <div style={{ color: COLORS.muted, fontSize: 12 }}>Tip: Press Enter to {editingItem ? "save" : "add"}.</div>
-              </div>
-            </form>
-          </div>
-        </div>
-      ) : null}
     </div>
   );
 }
 
-function AutoFixCellSelection(props: {
-  roomCellOptions: { id: string; code: string; label: string }[];
-  itemCellId: string;
-  setItemCellId: (v: string) => void;
+function ConfirmModal({
+  open,
+  title,
+  description,
+  confirmText = '删除',
+  cancelText = '取消',
+  destructive = true,
+  onConfirm,
+  onCancel,
+}: {
+  open: boolean;
+  title: string;
+  description: string;
+  confirmText?: string;
+  cancelText?: string;
+  destructive?: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
 }) {
-  const { roomCellOptions, itemCellId, setItemCellId } = props;
+  return (
+    <Modal open={open} title={title} onClose={onCancel} widthClass="max-w-lg">
+      <div className="text-sm text-black/80 whitespace-pre-wrap">{description}</div>
+      <div className="mt-5 flex items-center justify-end gap-2">
+        <button className="px-3 py-2 rounded-xl border border-black/10 hover:bg-black/5 text-sm" onClick={onCancel}>
+          {cancelText}
+        </button>
+        <button
+          className={cx(
+            'px-3 py-2 rounded-xl text-sm border',
+            destructive ? 'bg-red-600 text-white border-red-600 hover:bg-red-700' : 'bg-black text-white border-black hover:bg-black/90'
+          )}
+          onClick={onConfirm}
+        >
+          {confirmText}
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+function SmallIconButton({
+  title,
+  onClick,
+  children,
+  className,
+}: {
+  title: string;
+  onClick: () => void;
+  children: React.ReactNode;
+  className?: string;
+}) {
+  return (
+    <button
+      type="button"
+      title={title}
+      aria-label={title}
+      onClick={onClick}
+      className={cx(
+        'h-8 w-8 inline-flex items-center justify-center rounded-lg border border-black/10 hover:bg-black/5 text-sm select-none',
+        className
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+function Toast({ message }: { message: string }) {
+  return (
+    <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[80]">
+      <div className="px-4 py-2 rounded-2xl bg-black text-white text-sm shadow-lg">{message}</div>
+    </div>
+  );
+}
+
+export default function Page() {
+  const router = useRouter();
+  const params = useParams<{ roomId: string }>();
+  const roomId = params?.roomId as string;
+
+  // auth/user
+  const [userEmail, setUserEmail] = useState('');
+
+  // household context
+  const [activeHouseholdId, setActiveHouseholdId] = useState<UUID | null>(null);
+  const [households, setHouseholds] = useState<Household[]>([]);
+  const [activeHousehold, setActiveHousehold] = useState<Household | null>(null);
+
+  // room data
+  const [room, setRoom] = useState<Room | null>(null);
+  const [roomsInHousehold, setRoomsInHousehold] = useState<Room[]>([]);
+  const [columns, setColumns] = useState<Column[]>([]);
+  const [cellsByColumn, setCellsByColumn] = useState<Record<UUID, Cell[]>>({});
+  const [itemsByCell, setItemsByCell] = useState<Record<UUID, ItemV2[]>>({});
+
+  // UI state
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [toast, setToast] = useState('');
+
+  // Search
+  const [search, setSearch] = useState('');
+  const [onlyShowMatches, setOnlyShowMatches] = useState(false);
+
+  // highlight for jump-to-cell
+  const [highlightCellId, setHighlightCellId] = useState<UUID | null>(null);
+
+  // switch household modal
+  const [switchHouseholdOpen, setSwitchHouseholdOpen] = useState(false);
+
+  // Column menu + modals
+  const [columnMenuOpenId, setColumnMenuOpenId] = useState<UUID | null>(null);
+  const [addColumnOpen, setAddColumnOpen] = useState(false);
+  const [editColumnOpen, setEditColumnOpen] = useState(false);
+  const [deleteColumnConfirmOpen, setDeleteColumnConfirmOpen] = useState(false);
+  const [columnDraftName, setColumnDraftName] = useState('');
+  const [targetColumnId, setTargetColumnId] = useState<UUID | null>(null);
+
+  // Cell modals
+  const [addCellOpen, setAddCellOpen] = useState(false);
+  const [editCellOpen, setEditCellOpen] = useState(false);
+  const [deleteCellConfirmOpen, setDeleteCellConfirmOpen] = useState(false);
+  const [cellDraftCode, setCellDraftCode] = useState('');
+  const [targetCellId, setTargetCellId] = useState<UUID | null>(null);
+  const [cellParentColumnId, setCellParentColumnId] = useState<UUID | null>(null);
+
+  // Item modal
+  const [itemModalOpen, setItemModalOpen] = useState(false);
+  const [itemMode, setItemMode] = useState<'add' | 'edit'>('add');
+  const [itemDeleteConfirmOpen, setItemDeleteConfirmOpen] = useState(false);
+  const [targetItemId, setTargetItemId] = useState<UUID | null>(null);
+
+  const [itemDraft, setItemDraft] = useState<{
+    id: UUID | null;
+    name: string;
+    qty: string; // IMPORTANT: string => fixes “0 stuck / 02”
+    expires_at: string; // yyyy-mm-dd
+    imageFile: File | null;
+    image_path: string | null;
+    room_id: UUID | null;
+    cell_id: UUID | null;
+  }>({
+    id: null,
+    name: '',
+    qty: '',
+    expires_at: '',
+    imageFile: null,
+    image_path: null,
+    room_id: null,
+    cell_id: null,
+  });
+
+  const itemNameInputRef = useRef<HTMLInputElement | null>(null);
+
+  // cache: for item location selector (room -> cell)
+  const [cellsForRoomCache, setCellsForRoomCache] = useState<Record<UUID, Array<{ cell: Cell; column: Column }>>>({});
+  const [loadingCellsForRoom, setLoadingCellsForRoom] = useState(false);
+
+  // fonts
+  const fontOswald = { fontFamily: 'Oswald, ui-sans-serif, system-ui' } as const;
+  const fontNunito = { fontFamily: 'Nunito, ui-sans-serif, system-ui' } as const;
+
+  // toast auto-hide
+  useEffect(() => {
+    if (!toast) return;
+    const t = window.setTimeout(() => setToast(''), 2200);
+    return () => window.clearTimeout(t);
+  }, [toast]);
+
+  // init: get user email + household id (localStorage -> profile fallback)
+  useEffect(() => {
+    const init = async () => {
+      setLoading(true);
+      try {
+        const { data: userRes } = await supabase.auth.getUser();
+        const user = userRes?.user;
+        setUserEmail(user?.email ?? '');
+
+        const stored = typeof window !== 'undefined' ? window.localStorage.getItem(ACTIVE_HOUSEHOLD_KEY) : null;
+        if (stored) {
+          setActiveHouseholdId(stored);
+          return;
+        }
+
+        // fallback: profile default_household_id
+        if (user?.id) {
+          const { data: profile, error: pErr } = await supabase
+            .from('profiles')
+            .select('default_household_id')
+            .eq('id', user.id)
+            .maybeSingle();
+
+          if (!pErr && profile?.default_household_id) {
+            setActiveHouseholdId(profile.default_household_id);
+            window.localStorage.setItem(ACTIVE_HOUSEHOLD_KEY, profile.default_household_id);
+          }
+        }
+      } finally {
+        setLoading(false);
+      }
+    };
+    init();
+  }, []);
+
+  // load households list
+  useEffect(() => {
+    const loadHouseholds = async () => {
+      const { data: mData, error: mErr } = await supabase
+        .from('household_members')
+        .select('households ( id, name )');
+
+      if (mErr) {
+        console.error(mErr);
+        setHouseholds([]);
+        return;
+      }
+
+      const list: Household[] =
+        (mData || [])
+          .map((x: any) => x?.households)
+          .filter(Boolean)
+          .map((h: any) => ({ id: h.id, name: h.name })) ?? [];
+
+      const seen = new Set<string>();
+      const dedup = list.filter((h) => {
+        if (seen.has(h.id)) return false;
+        seen.add(h.id);
+        return true;
+      });
+
+      setHouseholds(dedup);
+
+      if (!activeHouseholdId && dedup.length > 0) {
+        const first = dedup[0].id;
+        setActiveHouseholdId(first);
+        window.localStorage.setItem(ACTIVE_HOUSEHOLD_KEY, first);
+      }
+    };
+
+    loadHouseholds();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeHouseholdId]);
 
   useEffect(() => {
-    if (roomCellOptions.length === 0) return;
-    const exists = roomCellOptions.some((x) => x.id === itemCellId);
-    if (!exists) setItemCellId(roomCellOptions[0].id);
-  }, [roomCellOptions, itemCellId, setItemCellId]);
+    if (!activeHouseholdId) {
+      setActiveHousehold(null);
+      return;
+    }
+    setActiveHousehold(households.find((x) => x.id === activeHouseholdId) ?? null);
+  }, [activeHouseholdId, households]);
 
-  return null;
+  // load all room data
+  const loadAll = async (opts?: { silent?: boolean }) => {
+    const silent = opts?.silent ?? false;
+    if (!silent) setLoading(true);
+
+    try {
+      if (!activeHouseholdId) return;
+
+      // rooms for location selector
+      const { data: roomsData, error: roomsErr } = await supabase
+        .from('rooms')
+        .select('id, household_id, name, position')
+        .eq('household_id', activeHouseholdId)
+        .order('position', { ascending: true });
+
+      if (roomsErr) console.error(roomsErr);
+      setRoomsInHousehold((roomsData as Room[]) ?? []);
+
+      // current room
+      const { data: roomData, error: roomErr } = await supabase
+        .from('rooms')
+        .select('id, household_id, name, position')
+        .eq('id', roomId)
+        .maybeSingle();
+
+      if (roomErr) console.error(roomErr);
+      setRoom((roomData as Room) ?? null);
+
+      // columns
+      const { data: colData, error: cErr } = await supabase
+        .from('room_columns')
+        .select('id, room_id, name, position')
+        .eq('room_id', roomId)
+        .order('position', { ascending: true });
+
+      if (cErr) console.error(cErr);
+      const cols = (colData as Column[]) ?? [];
+      setColumns(cols);
+
+      if (cols.length === 0) {
+        setCellsByColumn({});
+        setItemsByCell({});
+        return;
+      }
+
+      // cells
+      const colIds = cols.map((c) => c.id);
+      const { data: cellData, error: cellErr } = await supabase
+        .from('room_cells')
+        .select('id, column_id, code, position')
+        .in('column_id', colIds)
+        .order('position', { ascending: true });
+
+      if (cellErr) console.error(cellErr);
+      const cells = (cellData as Cell[]) ?? [];
+
+      const byCol: Record<UUID, Cell[]> = {};
+      colIds.forEach((id) => (byCol[id] = []));
+      cells.forEach((cell) => {
+        if (!byCol[cell.column_id]) byCol[cell.column_id] = [];
+        byCol[cell.column_id].push(cell);
+      });
+      setCellsByColumn(byCol);
+
+      // items
+      const cellIds = cells.map((x) => x.id);
+      if (cellIds.length === 0) {
+        setItemsByCell({});
+        return;
+      }
+
+      const { data: itemData, error: iErr } = await supabase
+        .from('items_v2')
+        .select('id, household_id, cell_id, name, qty, expires_at, image_path')
+        .eq('household_id', activeHouseholdId)
+        .in('cell_id', cellIds)
+        .order('name', { ascending: true });
+
+      if (iErr) console.error(iErr);
+      const items = (itemData as ItemV2[]) ?? [];
+
+      const byCell: Record<UUID, ItemV2[]> = {};
+      cellIds.forEach((id) => (byCell[id] = []));
+      items.forEach((it) => {
+        if (!byCell[it.cell_id]) byCell[it.cell_id] = [];
+        byCell[it.cell_id].push(it);
+      });
+      setItemsByCell(byCell);
+    } finally {
+      if (!silent) setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!activeHouseholdId) return;
+    loadAll();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeHouseholdId, roomId]);
+
+  const onRefresh = async () => {
+    if (!activeHouseholdId) return;
+    setRefreshing(true);
+    try {
+      await loadAll({ silent: true });
+      setToast('已刷新');
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  const onSignOut = async () => {
+    await supabase.auth.signOut();
+    router.refresh();
+  };
+
+  const doSwitchHousehold = (hid: UUID) => {
+    window.localStorage.setItem(ACTIVE_HOUSEHOLD_KEY, hid);
+    setActiveHouseholdId(hid);
+    setSwitchHouseholdOpen(false);
+    setToast('已切换 household');
+    router.push('/rooms');
+  };
+
+  // derived maps
+  const columnById = useMemo(() => {
+    const m = new Map<UUID, Column>();
+    columns.forEach((c) => m.set(c.id, c));
+    return m;
+  }, [columns]);
+
+  const cellById = useMemo(() => {
+    const m = new Map<UUID, Cell>();
+    Object.values(cellsByColumn).forEach((arr) => arr.forEach((cell) => m.set(cell.id, cell)));
+    return m;
+  }, [cellsByColumn]);
+
+  const cellToColumn = useMemo(() => {
+    const m = new Map<UUID, Column>();
+    Object.entries(cellsByColumn).forEach(([colId, arr]) => {
+      const col = columnById.get(colId as UUID);
+      if (!col) return;
+      arr.forEach((cell) => m.set(cell.id, col));
+    });
+    return m;
+  }, [cellsByColumn, columnById]);
+
+  const allItemsFlat = useMemo(() => {
+    const out: ItemV2[] = [];
+    Object.values(itemsByCell).forEach((arr) => arr.forEach((it) => out.push(it)));
+    return out;
+  }, [itemsByCell]);
+
+  const fuse = useMemo(() => {
+    return new Fuse(allItemsFlat, {
+      keys: ['name'],
+      threshold: 0.35,
+      ignoreLocation: true,
+      minMatchCharLength: 2,
+    });
+  }, [allItemsFlat]);
+
+  const matchedItemIds = useMemo(() => {
+    const q = search.trim();
+    if (!q) return new Set<string>();
+    return new Set(fuse.search(q).slice(0, 400).map((r) => r.item.id));
+  }, [search, fuse]);
+
+  const expiring0to7 = useMemo(() => {
+    return allItemsFlat
+      .filter((it) => it.expires_at)
+      .map((it) => ({ it, d: daysUntil((it.expires_at as string).slice(0, 10)) }))
+      .filter(({ d }) => d >= 0 && d <= 7)
+      .sort((a, b) => a.d - b.d)
+      .map(({ it }) => it);
+  }, [allItemsFlat]);
+
+  const expiring8to30 = useMemo(() => {
+    return allItemsFlat
+      .filter((it) => it.expires_at)
+      .map((it) => ({ it, d: daysUntil((it.expires_at as string).slice(0, 10)) }))
+      .filter(({ d }) => d >= 8 && d <= 30)
+      .sort((a, b) => a.d - b.d)
+      .map(({ it }) => it);
+  }, [allItemsFlat]);
+
+  const shouldShowItem = (itemId: UUID) => {
+    if (!search.trim()) return true;
+    if (!onlyShowMatches) return true;
+    return matchedItemIds.has(itemId);
+  };
+
+  // jump-to-cell
+  const jumpToCell = (cellId: UUID) => {
+    const el = document.getElementById(`cell-${cellId}`);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      setHighlightCellId(cellId);
+      window.setTimeout(() => setHighlightCellId((cur) => (cur === cellId ? null : cur)), 1400);
+    }
+  };
+
+  // column menu click-outside (simple)
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (!columnMenuOpenId) return;
+      const target = e.target as Node | null;
+      const menu = document.getElementById(`col-menu-${columnMenuOpenId}`);
+      const btn = document.getElementById(`col-menu-btn-${columnMenuOpenId}`);
+      if (!menu || !target) return;
+      if (menu.contains(target)) return;
+      if (btn && btn.contains(target)) return;
+      setColumnMenuOpenId(null);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [columnMenuOpenId]);
+
+  // ----- columns CRUD -----
+  const openAddColumn = () => {
+    setColumnDraftName('');
+    setAddColumnOpen(true);
+  };
+
+  const createColumn = async () => {
+    const name = columnDraftName.trim();
+    if (!name) return;
+
+    const maxPos = Math.max(-1, ...columns.map((c) => c.position ?? 0));
+    const position = (Number.isFinite(maxPos) ? maxPos : 0) + 1;
+
+    const { error } = await supabase.from('room_columns').insert({ room_id: roomId, name, position });
+    if (error) {
+      console.error(error);
+      setToast('新增 column 失败');
+      return;
+    }
+    setAddColumnOpen(false);
+    setToast('已新增 column');
+    await loadAll({ silent: true });
+  };
+
+  const openEditColumn = (col: Column) => {
+    setTargetColumnId(col.id);
+    setColumnDraftName(col.name ?? '');
+    setEditColumnOpen(true);
+  };
+
+  const saveEditColumn = async () => {
+    if (!targetColumnId) return;
+    const name = columnDraftName.trim();
+    if (!name) return;
+
+    const { error } = await supabase.from('room_columns').update({ name }).eq('id', targetColumnId);
+    if (error) {
+      console.error(error);
+      setToast('更新 column 失败');
+      return;
+    }
+    setEditColumnOpen(false);
+    setTargetColumnId(null);
+    setToast('已更新 column');
+    await loadAll({ silent: true });
+  };
+
+  const openDeleteColumn = (colId: UUID) => {
+    setTargetColumnId(colId);
+    setDeleteColumnConfirmOpen(true);
+  };
+
+  const confirmDeleteColumn = async () => {
+    if (!targetColumnId) return;
+    const cells = cellsByColumn[targetColumnId] ?? [];
+    const cellIds = cells.map((c) => c.id);
+    const itemCount = cellIds.reduce((acc, cid) => acc + (itemsByCell[cid]?.length ?? 0), 0);
+
+    const { error } = await supabase.from('room_columns').delete().eq('id', targetColumnId);
+    if (error) {
+      console.error(error);
+      setToast('删除 column 失败');
+      return;
+    }
+    setDeleteColumnConfirmOpen(false);
+    setTargetColumnId(null);
+    setToast(`已删除 column（影响 ${cells.length} cells / ${itemCount} items）`);
+    await loadAll({ silent: true });
+  };
+
+  // ----- cells CRUD -----
+  const openAddCell = (columnId: UUID) => {
+    setCellParentColumnId(columnId);
+    setCellDraftCode('');
+    setAddCellOpen(true);
+  };
+
+  const createCell = async () => {
+    if (!cellParentColumnId) return;
+    const code = cellDraftCode.trim();
+    if (!code) return;
+
+    const existing = cellsByColumn[cellParentColumnId] ?? [];
+    const maxPos = Math.max(-1, ...existing.map((c) => c.position ?? 0));
+    const position = (Number.isFinite(maxPos) ? maxPos : 0) + 1;
+
+    const { error } = await supabase.from('room_cells').insert({ column_id: cellParentColumnId, code, position });
+    if (error) {
+      console.error(error);
+      setToast('新增 cell 失败');
+      return;
+    }
+    setAddCellOpen(false);
+    setCellParentColumnId(null);
+    setToast('已新增 cell');
+    await loadAll({ silent: true });
+  };
+
+  const openEditCell = (cell: Cell) => {
+    setTargetCellId(cell.id);
+    setCellDraftCode(cell.code ?? '');
+    setEditCellOpen(true);
+  };
+
+  const saveEditCell = async () => {
+    if (!targetCellId) return;
+    const code = cellDraftCode.trim();
+    if (!code) return;
+
+    const { error } = await supabase.from('room_cells').update({ code }).eq('id', targetCellId);
+    if (error) {
+      console.error(error);
+      setToast('更新 cell 失败');
+      return;
+    }
+    setEditCellOpen(false);
+    setTargetCellId(null);
+    setToast('已更新 cell');
+    await loadAll({ silent: true });
+  };
+
+  const openDeleteCell = (cellId: UUID) => {
+    setTargetCellId(cellId);
+    setDeleteCellConfirmOpen(true);
+  };
+
+  const confirmDeleteCell = async () => {
+    if (!targetCellId) return;
+    const itemCount = itemsByCell[targetCellId]?.length ?? 0;
+
+    const { error } = await supabase.from('room_cells').delete().eq('id', targetCellId);
+    if (error) {
+      console.error(error);
+      setToast('删除 cell 失败');
+      return;
+    }
+    setDeleteCellConfirmOpen(false);
+    setTargetCellId(null);
+    setToast(`已删除 cell（影响 ${itemCount} items）`);
+    await loadAll({ silent: true });
+  };
+
+  // ----- item helpers -----
+  const getPublicImageUrl = (path: string | null) => {
+    if (!path) return '';
+    const { data } = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(path);
+    return data?.publicUrl ?? '';
+  };
+
+  const ensureCellsForRoomLoaded = async (rid: UUID) => {
+    if (cellsForRoomCache[rid]) return;
+
+    setLoadingCellsForRoom(true);
+    try {
+      const { data: cols, error: cErr } = await supabase
+        .from('room_columns')
+        .select('id, room_id, name, position')
+        .eq('room_id', rid)
+        .order('position', { ascending: true });
+
+      if (cErr) {
+        console.error(cErr);
+        return;
+      }
+
+      const columnsForRoom = (cols as Column[]) ?? [];
+      const colIds = columnsForRoom.map((c) => c.id);
+      if (colIds.length === 0) {
+        setCellsForRoomCache((prev) => ({ ...prev, [rid]: [] }));
+        return;
+      }
+
+      const { data: cells, error: cellErr } = await supabase
+        .from('room_cells')
+        .select('id, column_id, code, position')
+        .in('column_id', colIds)
+        .order('position', { ascending: true });
+
+      if (cellErr) {
+        console.error(cellErr);
+        return;
+      }
+
+      const cellsList = (cells as Cell[]) ?? [];
+      const colMap = new Map<UUID, Column>();
+      columnsForRoom.forEach((c) => colMap.set(c.id, c));
+
+      const pairs = cellsList
+        .map((cell) => {
+          const col = colMap.get(cell.column_id);
+          if (!col) return null;
+          return { cell, column: col };
+        })
+        .filter(Boolean) as Array<{ cell: Cell; column: Column }>;
+
+      setCellsForRoomCache((prev) => ({ ...prev, [rid]: pairs }));
+    } finally {
+      setLoadingCellsForRoom(false);
+    }
+  };
+
+  const openAddItem = async (cellId?: UUID) => {
+    setItemMode('add');
+
+    const defaultRoomId = room?.id ?? null;
+    const defaultCellId = cellId ?? null;
+
+    if (defaultRoomId) await ensureCellsForRoomLoaded(defaultRoomId);
+
+    setItemDraft({
+      id: null,
+      name: '',
+      qty: '',
+      expires_at: '',
+      imageFile: null,
+      image_path: null,
+      room_id: defaultRoomId,
+      cell_id: defaultCellId,
+    });
+
+    setItemModalOpen(true);
+    window.setTimeout(() => itemNameInputRef.current?.focus(), 50);
+  };
+
+  const openEditItem = async (item: ItemV2) => {
+    setItemMode('edit');
+
+    const currentRoomId = room?.id ?? null;
+    if (currentRoomId) await ensureCellsForRoomLoaded(currentRoomId);
+
+    setItemDraft({
+      id: item.id,
+      name: item.name ?? '',
+      qty: item.qty === null || item.qty === undefined ? '' : String(item.qty),
+      expires_at: toDateOnly(item.expires_at),
+      imageFile: null,
+      image_path: item.image_path ?? null,
+      room_id: currentRoomId,
+      cell_id: item.cell_id,
+    });
+
+    setItemModalOpen(true);
+  };
+
+  const openDeleteItem = (itemId: UUID) => {
+    setTargetItemId(itemId);
+    setItemDeleteConfirmOpen(true);
+  };
+
+  const confirmDeleteItem = async () => {
+    if (!targetItemId) return;
+
+    const { error } = await supabase.from('items_v2').delete().eq('id', targetItemId);
+    if (error) {
+      console.error(error);
+      setToast('删除 item 失败');
+      return;
+    }
+    setItemDeleteConfirmOpen(false);
+    setTargetItemId(null);
+    setToast('已删除 item');
+    await loadAll({ silent: true });
+  };
+
+  const saveItem = async () => {
+    const name = itemDraft.name.trim();
+    if (!name) {
+      setToast('Name 不能为空');
+      return;
+    }
+    if (!activeHouseholdId) {
+      setToast('未选择 household');
+      return;
+    }
+    if (!itemDraft.cell_id) {
+      setToast('请选择 location（cell）');
+      return;
+    }
+
+    const qty = itemDraft.qty.trim() === '' ? null : Number(itemDraft.qty);
+    if (qty !== null && (!Number.isFinite(qty) || qty < 0)) {
+      setToast('Qty 不合法');
+      return;
+    }
+
+    const expires_at = itemDraft.expires_at.trim() ? `${itemDraft.expires_at.trim()}T00:00:00.000Z` : null;
+
+    let image_path = itemDraft.image_path ?? null;
+    if (itemDraft.imageFile) {
+      const file = itemDraft.imageFile;
+      const ext = file.name.split('.').pop() || 'jpg';
+      const fileName = `${activeHouseholdId}/${crypto.randomUUID()}.${ext}`;
+
+      const { error: upErr } = await supabase.storage.from(STORAGE_BUCKET).upload(fileName, file, {
+        cacheControl: '3600',
+        upsert: true,
+      });
+      if (upErr) {
+        console.error(upErr);
+        setToast('图片上传失败');
+        return;
+      }
+      image_path = fileName;
+    }
+
+    if (itemMode === 'add') {
+      const { error } = await supabase.from('items_v2').insert({
+        household_id: activeHouseholdId,
+        cell_id: itemDraft.cell_id,
+        name,
+        qty,
+        expires_at,
+        image_path,
+      });
+
+      if (error) {
+        console.error(error);
+        setToast('新增 item 失败');
+        return;
+      }
+      setItemModalOpen(false);
+      setToast('已新增 item');
+      await loadAll({ silent: true });
+      return;
+    }
+
+    if (!itemDraft.id) return;
+
+    const { error } = await supabase
+      .from('items_v2')
+      .update({
+        cell_id: itemDraft.cell_id,
+        name,
+        qty,
+        expires_at,
+        image_path,
+      })
+      .eq('id', itemDraft.id);
+
+    if (error) {
+      console.error(error);
+      setToast('更新 item 失败');
+      return;
+    }
+    setItemModalOpen(false);
+    setToast('已更新 item');
+    await loadAll({ silent: true });
+  };
+
+  const renderLocationLabel = (cellId: UUID) => {
+    const cell = cellById.get(cellId);
+    const col = cellToColumn.get(cellId);
+    const colName = col?.name ?? '';
+    const cellName = cell?.code ?? '';
+    if (!colName && !cellName) return null;
+
+    return (
+      <button
+        type="button"
+        onClick={() => jumpToCell(cellId)}
+        className="text-xs px-2 py-1 rounded-lg border border-black/10 hover:bg-black/5"
+        title="定位到该 cell"
+      >
+        {colName || 'Column'}{cellName ? ` / ${cellName}` : ''}
+      </button>
+    );
+  };
+
+  const ExpiringSection = ({ title, items }: { title: string; items: ItemV2[] }) => {
+    if (items.length === 0) return null;
+
+    return (
+      <div className={cx('rounded-2xl border', THEME.borderSoft, THEME.oatCard)}>
+        <div className="px-4 py-3 border-b border-black/10 flex items-center justify-between">
+          <div className="text-sm font-semibold">{title}</div>
+          <div className="text-xs text-black/60">{items.length} items</div>
+        </div>
+
+        <div className="p-3">
+          <div className="flex flex-col gap-2">
+            {items.map((it) => (
+              <div key={it.id} className="flex items-center justify-between gap-3">
+                <div className="min-w-0 flex items-center gap-2">
+                  <div className={cx('px-3 py-2 rounded-2xl border min-w-0', expiryChipClass(it.expires_at))}>
+                    <div className="flex items-center gap-2">
+                      <div className="truncate text-sm" style={fontNunito}>
+                        {it.name}
+                      </div>
+                      {it.expires_at && (
+                        <div className="text-[11px] text-black/70 whitespace-nowrap">
+                          {formatExpiryLabel(it.expires_at)}
+                        </div>
+                      )}
+                    </div>
+                    <div className="mt-1 flex items-center gap-2">
+                      {renderLocationLabel(it.cell_id)}
+                      {it.qty !== null && it.qty !== undefined && (
+                        <span className="text-xs text-black/70">× {it.qty}</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <SmallIconButton title="Edit item" onClick={() => openEditItem(it)}>
+                    ✏️
+                  </SmallIconButton>
+                  <SmallIconButton title="Delete item" onClick={() => openDeleteItem(it.id)} className="hover:bg-red-50">
+                    🗑️
+                  </SmallIconButton>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // room row: All rooms + Add column
+  const RoomHeader = () => (
+    <div className="mt-4 flex items-center justify-between gap-3">
+      <div className="min-w-0">
+        <div className="text-xl font-semibold truncate">{room?.name ?? 'Room'}</div>
+      </div>
+
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          className="px-3 py-2 rounded-xl border border-black/10 hover:bg-black/5 text-sm"
+          onClick={() => router.push('/rooms')}
+          title="All rooms"
+        >
+          All rooms
+        </button>
+
+        <button
+          type="button"
+          className={cx('px-3 py-2 rounded-xl border text-sm hover:bg-black/5', THEME.blueBorderSoft)}
+          onClick={openAddColumn}
+          title="Add column"
+        >
+          Add column
+        </button>
+      </div>
+    </div>
+  );
+
+  return (
+    <AuthGate>
+      <div className={cx('min-h-screen', THEME.oatBg)}>
+        <div className="max-w-[1400px] mx-auto px-4 py-5">
+          <HouseholdTopBar
+            householdName={activeHousehold?.name ?? 'Household'}
+            userEmail={userEmail}
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            onOpenSwitchHousehold={() => setSwitchHouseholdOpen(true)}
+            onSignOut={onSignOut}
+          />
+
+          <RoomHeader />
+
+          {/* Search + expiring */}
+          <div className="mt-4 grid grid-cols-1 lg:grid-cols-3 gap-3">
+            <div className={cx('rounded-2xl border p-4', THEME.borderSoft, THEME.oatCard, 'lg:col-span-2')}>
+              <div className="flex items-center gap-3">
+                <input
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Search items (fuzzy)…"
+                  className="w-full px-3 py-2 rounded-xl border border-black/10 bg-white text-sm outline-none focus:ring-2 focus:ring-black/10"
+                />
+                <button
+                  type="button"
+                  className="px-3 py-2 rounded-xl border border-black/10 hover:bg-black/5 text-sm"
+                  onClick={() => setSearch('')}
+                >
+                  Clear
+                </button>
+              </div>
+
+              <div className="mt-3 flex items-center justify-between gap-3">
+                <label className="flex items-center gap-2 text-sm">
+                  <input type="checkbox" checked={onlyShowMatches} onChange={(e) => setOnlyShowMatches(e.target.checked)} />
+                  只显示匹配结果
+                </label>
+
+                {search.trim() && (
+                  <div className="text-xs text-black/60">
+                    匹配：{matchedItemIds.size} items
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-3">
+              <ExpiringSection title="Expiring (0–7d)" items={expiring0to7} />
+              <ExpiringSection title="Expiring (8–30d)" items={expiring8to30} />
+            </div>
+          </div>
+
+          {/* Columns */}
+          <div className="mt-5">
+            {loading ? (
+              <div className="text-sm text-black/60 py-6">Loading room…</div>
+            ) : (
+              <div className="flex gap-4 overflow-x-auto pb-3">
+                {columns.map((col) => {
+                  const cells = cellsByColumn[col.id] ?? [];
+
+                  return (
+                    <div key={col.id} className={cx('min-w-[340px] max-w-[340px] rounded-2xl border', THEME.borderSoft, THEME.oatCard)}>
+                      {/* Column header (left aligned, black) */}
+                      <div className="px-4 py-3 border-b border-black/10 flex items-center justify-between gap-2">
+                        <div className="text-base truncate" style={fontOswald}>
+                          {col.name}
+                        </div>
+
+                        <div className="relative">
+                          <button
+                            id={`col-menu-btn-${col.id}`}
+                            type="button"
+                            className="h-8 w-8 inline-flex items-center justify-center rounded-lg border border-black/10 hover:bg-black/5 text-sm"
+                            title="Column actions"
+                            aria-label="Column actions"
+                            onClick={() => setColumnMenuOpenId((v) => (v === col.id ? null : col.id))}
+                          >
+                            ⚙️
+                          </button>
+
+                          {columnMenuOpenId === col.id && (
+                            <div
+                              id={`col-menu-${col.id}`}
+                              className="absolute right-0 mt-2 w-44 rounded-2xl border border-black/10 bg-white shadow-lg overflow-hidden z-[70]"
+                            >
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setColumnMenuOpenId(null);
+                                  openAddCell(col.id);
+                                }}
+                                className="w-full text-left px-3 py-2 text-sm hover:bg-black/5"
+                              >
+                                ➕ Add cell
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setColumnMenuOpenId(null);
+                                  openEditColumn(col);
+                                }}
+                                className="w-full text-left px-3 py-2 text-sm hover:bg-black/5"
+                              >
+                                ✏️ Edit
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setColumnMenuOpenId(null);
+                                  openDeleteColumn(col.id);
+                                }}
+                                className="w-full text-left px-3 py-2 text-sm hover:bg-red-50 text-red-700"
+                              >
+                                🗑️ Delete
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Cells */}
+                      <div className="p-3 flex flex-col gap-3">
+                        {cells.length === 0 ? (
+                          <div className="text-sm text-black/60 px-1">
+                            No cells yet.
+                            <button type="button" className="ml-2 underline text-black/80" onClick={() => openAddCell(col.id)}>
+                              Add one
+                            </button>
+                          </div>
+                        ) : (
+                          cells.map((cell) => {
+                            const items = itemsByCell[cell.id] ?? [];
+                            const filteredItems = items.filter((it) => shouldShowItem(it.id));
+
+                            return (
+                              <div
+                                key={cell.id}
+                                id={`cell-${cell.id}`}
+                                className={cx(
+                                  'rounded-2xl border p-3',
+                                  THEME.borderSoft,
+                                  highlightCellId === cell.id && 'ring-2 ring-black/20'
+                                )}
+                              >
+                                <div className="flex items-start justify-between gap-2">
+                                  {/* Cell name: Oswald, black, bold, item+2pt */}
+                                  <div
+                                    className="truncate font-bold"
+                                    style={{ ...fontOswald, fontSize: '16px' }}
+                                    title={cell.code}
+                                  >
+                                    {cell.code}
+                                  </div>
+
+                                  <div className="flex items-center gap-2">
+                                    <SmallIconButton title="Add item" onClick={() => openAddItem(cell.id)}>
+                                      ➕
+                                    </SmallIconButton>
+                                    <SmallIconButton title="Edit cell" onClick={() => openEditCell(cell)}>
+                                      ✏️
+                                    </SmallIconButton>
+                                    <SmallIconButton title="Delete cell" onClick={() => openDeleteCell(cell.id)} className="hover:bg-red-50">
+                                      🗑️
+                                    </SmallIconButton>
+                                  </div>
+                                </div>
+
+                                {/* Items */}
+                                <div className="mt-3 flex flex-wrap gap-2">
+                                  {filteredItems.length === 0 ? (
+                                    <div className="text-xs text-black/50">No items</div>
+                                  ) : (
+                                    filteredItems.map((it) => (
+                                      <button
+                                        key={it.id}
+                                        type="button"
+                                        onClick={() => openEditItem(it)}
+                                        className={cx(
+                                          'px-3 py-2 rounded-2xl border text-left hover:shadow-sm transition-shadow',
+                                          expiryChipClass(it.expires_at)
+                                        )}
+                                        title="Click to edit"
+                                      >
+                                        <div className="flex items-center gap-2">
+                                          <div className="text-sm truncate" style={fontNunito}>
+                                            {it.name}
+                                          </div>
+                                          {it.qty !== null && it.qty !== undefined && (
+                                            <div className="text-xs text-black/70">× {it.qty}</div>
+                                          )}
+                                          {it.expires_at && (
+                                            <div className="text-[11px] text-black/70 whitespace-nowrap">
+                                              {formatExpiryLabel(it.expires_at)}
+                                            </div>
+                                          )}
+                                        </div>
+                                      </button>
+                                    ))
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Switch household modal */}
+        <Modal open={switchHouseholdOpen} title="Switch household" onClose={() => setSwitchHouseholdOpen(false)} widthClass="max-w-lg">
+          <div className="text-sm text-black/70">选择一个 household（会返回 All rooms）：</div>
+          <div className="mt-3 flex flex-col gap-2">
+            {households.map((h) => (
+              <button
+                key={h.id}
+                type="button"
+                onClick={() => doSwitchHousehold(h.id)}
+                className={cx(
+                  'px-3 py-2 rounded-xl border text-left hover:bg-black/5',
+                  h.id === activeHouseholdId ? 'border-black/30 bg-black/5' : 'border-black/10'
+                )}
+              >
+                <div className="text-sm">{h.name}</div>
+                {h.id === activeHouseholdId && <div className="text-xs text-black/60 mt-0.5">Current</div>}
+              </button>
+            ))}
+          </div>
+        </Modal>
+
+        {/* Add/Edit Column */}
+        <Modal open={addColumnOpen} title="Add column" onClose={() => setAddColumnOpen(false)} widthClass="max-w-lg">
+          <div className="text-sm text-black/70">Column name</div>
+          <input
+            value={columnDraftName}
+            onChange={(e) => setColumnDraftName(e.target.value)}
+            className="mt-2 w-full px-3 py-2 rounded-xl border border-black/10 bg-white text-sm outline-none focus:ring-2 focus:ring-black/10"
+            placeholder="e.g., Pantry"
+          />
+          <div className="mt-5 flex items-center justify-end gap-2">
+            <button className="px-3 py-2 rounded-xl border border-black/10 hover:bg-black/5 text-sm" onClick={() => setAddColumnOpen(false)}>
+              Cancel
+            </button>
+            <button className="px-3 py-2 rounded-xl border border-black bg-black text-white hover:bg-black/90 text-sm" onClick={createColumn}>
+              Create
+            </button>
+          </div>
+        </Modal>
+
+        <Modal open={editColumnOpen} title="Edit column" onClose={() => setEditColumnOpen(false)} widthClass="max-w-lg">
+          <div className="text-sm text-black/70">Column name</div>
+          <input
+            value={columnDraftName}
+            onChange={(e) => setColumnDraftName(e.target.value)}
+            className="mt-2 w-full px-3 py-2 rounded-xl border border-black/10 bg-white text-sm outline-none focus:ring-2 focus:ring-black/10"
+          />
+          <div className="mt-5 flex items-center justify-end gap-2">
+            <button className="px-3 py-2 rounded-xl border border-black/10 hover:bg-black/5 text-sm" onClick={() => setEditColumnOpen(false)}>
+              Cancel
+            </button>
+            <button className="px-3 py-2 rounded-xl border border-black bg-black text-white hover:bg-black/90 text-sm" onClick={saveEditColumn}>
+              Save
+            </button>
+          </div>
+        </Modal>
+
+        <ConfirmModal
+          open={deleteColumnConfirmOpen}
+          title="Delete column?"
+          description="删除 column 会同时删除其下所有 cells（以及这些 cells 的 items）。该操作不可撤销。"
+          onCancel={() => {
+            setDeleteColumnConfirmOpen(false);
+            setTargetColumnId(null);
+          }}
+          onConfirm={confirmDeleteColumn}
+        />
+
+        {/* Add/Edit Cell */}
+        <Modal open={addCellOpen} title="Add cell" onClose={() => setAddCellOpen(false)} widthClass="max-w-lg">
+          <div className="text-sm text-black/70">Cell name</div>
+          <input
+            value={cellDraftCode}
+            onChange={(e) => setCellDraftCode(e.target.value)}
+            className="mt-2 w-full px-3 py-2 rounded-xl border border-black/10 bg-white text-sm outline-none focus:ring-2 focus:ring-black/10"
+            placeholder="e.g., A1"
+          />
+          <div className="mt-5 flex items-center justify-end gap-2">
+            <button className="px-3 py-2 rounded-xl border border-black/10 hover:bg-black/5 text-sm" onClick={() => setAddCellOpen(false)}>
+              Cancel
+            </button>
+            <button className="px-3 py-2 rounded-xl border border-black bg-black text-white hover:bg-black/90 text-sm" onClick={createCell}>
+              Create
+            </button>
+          </div>
+        </Modal>
+
+        <Modal open={editCellOpen} title="Edit cell" onClose={() => setEditCellOpen(false)} widthClass="max-w-lg">
+          <div className="text-sm text-black/70">Cell name</div>
+          <input
+            value={cellDraftCode}
+            onChange={(e) => setCellDraftCode(e.target.value)}
+            className="mt-2 w-full px-3 py-2 rounded-xl border border-black/10 bg-white text-sm outline-none focus:ring-2 focus:ring-black/10"
+          />
+          <div className="mt-5 flex items-center justify-end gap-2">
+            <button className="px-3 py-2 rounded-xl border border-black/10 hover:bg-black/5 text-sm" onClick={() => setEditCellOpen(false)}>
+              Cancel
+            </button>
+            <button className="px-3 py-2 rounded-xl border border-black bg-black text-white hover:bg-black/90 text-sm" onClick={saveEditCell}>
+              Save
+            </button>
+          </div>
+        </Modal>
+
+        <ConfirmModal
+          open={deleteCellConfirmOpen}
+          title="Delete cell?"
+          description="删除 cell 会同时删除该 cell 的 items。该操作不可撤销。"
+          onCancel={() => {
+            setDeleteCellConfirmOpen(false);
+            setTargetCellId(null);
+          }}
+          onConfirm={confirmDeleteCell}
+        />
+
+        {/* Item modal */}
+        <Modal open={itemModalOpen} title={itemMode === 'add' ? 'Add item' : 'Edit item'} onClose={() => setItemModalOpen(false)} widthClass="max-w-2xl">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {/* left fields */}
+            <div>
+              <div className="text-sm text-black/70">Name</div>
+              <input
+                ref={itemNameInputRef}
+                value={itemDraft.name}
+                onChange={(e) => setItemDraft((p) => ({ ...p, name: e.target.value }))}
+                className="mt-2 w-full px-3 py-2 rounded-xl border border-black/10 bg-white text-sm outline-none focus:ring-2 focus:ring-black/10"
+                placeholder="e.g., Milk"
+              />
+
+              <div className="mt-4 text-sm text-black/70">Qty</div>
+              <input
+                value={itemDraft.qty}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  if (v === '' || /^[0-9]+$/.test(v)) {
+                    setItemDraft((p) => ({ ...p, qty: v }));
+                  }
+                }}
+                inputMode="numeric"
+                className="mt-2 w-full px-3 py-2 rounded-xl border border-black/10 bg-white text-sm outline-none focus:ring-2 focus:ring-black/10"
+                placeholder="(optional)"
+              />
+
+              <div className="mt-4 text-sm text-black/70">Expires at</div>
+              <input
+                type="date"
+                value={itemDraft.expires_at}
+                onChange={(e) => setItemDraft((p) => ({ ...p, expires_at: e.target.value }))}
+                className="mt-2 w-full px-3 py-2 rounded-xl border border-black/10 bg-white text-sm outline-none focus:ring-2 focus:ring-black/10"
+              />
+
+              <div className="mt-4 text-sm text-black/70">Image</div>
+              <input
+                type="file"
+                accept="image/*"
+                onChange={(e) => {
+                  const f = e.target.files?.[0] ?? null;
+                  setItemDraft((p) => ({ ...p, imageFile: f }));
+                }}
+                className="mt-2 w-full text-sm"
+              />
+
+              {itemDraft.image_path && (
+                <div className="mt-3">
+                  <div className="text-xs text-black/60 mb-2">Current image</div>
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={getPublicImageUrl(itemDraft.image_path)}
+                    alt="item"
+                    className="w-full max-w-[260px] rounded-2xl border border-black/10"
+                  />
+                </div>
+              )}
+            </div>
+
+            {/* right location */}
+            <div>
+              <div className="text-sm text-black/70">Location</div>
+
+              <div className="mt-2 text-xs text-black/60">Room</div>
+              <select
+                value={itemDraft.room_id ?? ''}
+                onChange={async (e) => {
+                  const rid = (e.target.value || null) as UUID | null;
+                  setItemDraft((p) => ({ ...p, room_id: rid, cell_id: null }));
+                  if (rid) await ensureCellsForRoomLoaded(rid);
+                }}
+                className="mt-1 w-full px-3 py-2 rounded-xl border border-black/10 bg-white text-sm outline-none focus:ring-2 focus:ring-black/10"
+              >
+                <option value="">Select room…</option>
+                {roomsInHousehold.map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {r.name}
+                  </option>
+                ))}
+              </select>
+
+              <div className="mt-3 text-xs text-black/60">Cell</div>
+              <select
+                value={itemDraft.cell_id ?? ''}
+                onChange={(e) => setItemDraft((p) => ({ ...p, cell_id: (e.target.value || null) as UUID | null }))}
+                disabled={!itemDraft.room_id || loadingCellsForRoom}
+                className={cx(
+                  'mt-1 w-full px-3 py-2 rounded-xl border bg-white text-sm outline-none focus:ring-2 focus:ring-black/10',
+                  'border-black/10',
+                  (!itemDraft.room_id || loadingCellsForRoom) && 'opacity-60'
+                )}
+              >
+                <option value="">{loadingCellsForRoom ? 'Loading cells…' : 'Select cell…'}</option>
+                {(itemDraft.room_id ? (cellsForRoomCache[itemDraft.room_id] ?? []) : []).map(({ cell, column }) => (
+                  <option key={cell.id} value={cell.id}>
+                    {column.name} / {cell.code}
+                  </option>
+                ))}
+              </select>
+
+              <div className="mt-6 rounded-2xl border border-black/10 bg-white p-3">
+                <div className="text-xs text-black/60">Tip</div>
+                <div className="text-sm text-black/80 mt-1">也可以在 cell 右上角 ➕ 直接添加 item（更快）。</div>
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-6 flex items-center justify-between gap-2">
+            <div>
+              {itemMode === 'edit' && itemDraft.id && (
+                <button
+                  type="button"
+                  className="px-3 py-2 rounded-xl border border-red-600 text-red-700 hover:bg-red-50 text-sm"
+                  onClick={() => openDeleteItem(itemDraft.id as UUID)}
+                >
+                  Delete
+                </button>
+              )}
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button className="px-3 py-2 rounded-xl border border-black/10 hover:bg-black/5 text-sm" onClick={() => setItemModalOpen(false)}>
+                Cancel
+              </button>
+              <button className="px-3 py-2 rounded-xl border border-black bg-black text-white hover:bg-black/90 text-sm" onClick={saveItem}>
+                Save
+              </button>
+            </div>
+          </div>
+        </Modal>
+
+        <ConfirmModal
+          open={itemDeleteConfirmOpen}
+          title="Delete item?"
+          description="确定删除该 item 吗？该操作不可撤销。"
+          onCancel={() => {
+            setItemDeleteConfirmOpen(false);
+            setTargetItemId(null);
+          }}
+          onConfirm={confirmDeleteItem}
+        />
+
+        {toast && <Toast message={toast} />}
+      </div>
+    </AuthGate>
+  );
 }
