@@ -8,6 +8,8 @@ import AuthGate from "@/src/components/AuthGate";
 type Household = { id: string; name: string; join_code: string | null };
 type Room = { id: string; household_id: string; name: string; position: number };
 
+const ACTIVE_HOUSEHOLD_KEY = "active_household_id";
+
 export default function RoomsPage() {
   const router = useRouter();
   const [session, setSession] = useState<any>(null);
@@ -18,6 +20,9 @@ export default function RoomsPage() {
 
   const [newRoomName, setNewRoomName] = useState("");
   const [err, setErr] = useState<string | null>(null);
+
+  const [defaultId, setDefaultId] = useState<string | null>(null);
+  const [activeId, setActiveId] = useState<string | null>(null);
 
   const user = session?.user ?? null;
   const userEmail = user?.email ?? "";
@@ -32,13 +37,15 @@ export default function RoomsPage() {
   }, []);
 
   async function signOut() {
+    try {
+      localStorage.removeItem(ACTIVE_HOUSEHOLD_KEY);
+    } catch {}
     await supabase.auth.signOut();
     setSession(null);
     router.replace("/");
   }
 
   async function ensureProfileRow(userId: string) {
-    // 让老用户也有 profiles 行（需要 profiles insert policy；我已在 SQL patch 里给你了）
     await supabase.from("profiles").upsert({ user_id: userId }, { onConflict: "user_id" });
   }
 
@@ -54,12 +61,7 @@ export default function RoomsPage() {
   }
 
   async function getMyMemberships(userId: string) {
-    // 注意：我们把 household_members 的 select policy 改成只读自己行，所以这里不会递归
-    const hm = await supabase
-      .from("household_members")
-      .select("household_id")
-      .eq("user_id", userId);
-
+    const hm = await supabase.from("household_members").select("household_id").eq("user_id", userId);
     if (hm.error) throw new Error(hm.error.message);
     return (hm.data ?? []) as { household_id: string }[];
   }
@@ -70,12 +72,7 @@ export default function RoomsPage() {
   }
 
   async function loadHousehold(hid: string) {
-    const h = await supabase
-      .from("households")
-      .select("id,name,join_code")
-      .eq("id", hid)
-      .single();
-
+    const h = await supabase.from("households").select("id,name,join_code").eq("id", hid).single();
     if (h.error) throw new Error(h.error.message);
     setHousehold(h.data as Household);
   }
@@ -91,6 +88,21 @@ export default function RoomsPage() {
     setRooms((r.data as Room[]) ?? []);
   }
 
+  function readActiveHouseholdFromStorage(): string | null {
+    try {
+      return localStorage.getItem(ACTIVE_HOUSEHOLD_KEY);
+    } catch {
+      return null;
+    }
+  }
+
+  function writeActiveHouseholdToStorage(hid: string | null) {
+    try {
+      if (!hid) localStorage.removeItem(ACTIVE_HOUSEHOLD_KEY);
+      else localStorage.setItem(ACTIVE_HOUSEHOLD_KEY, hid);
+    } catch {}
+  }
+
   useEffect(() => {
     if (!user?.id) return;
 
@@ -100,27 +112,45 @@ export default function RoomsPage() {
       try {
         await ensureProfileRow(user.id);
 
-        let hid = await getDefaultHouseholdId(user.id);
+        const mems = await getMyMemberships(user.id);
+        const myHouseholdIds = new Set(mems.map((m) => m.household_id));
 
-        // 如果没有默认 household：根据 membership 走分流
-        if (!hid) {
-          const mems = await getMyMemberships(user.id);
+        const def = await getDefaultHouseholdId(user.id);
+        setDefaultId(def);
 
+        // 优先用“临时切换”的 active household
+        const storedActive = readActiveHouseholdFromStorage();
+        let chosen: string | null = storedActive;
+
+        // 如果 active 不属于你，清掉
+        if (chosen && !myHouseholdIds.has(chosen)) {
+          writeActiveHouseholdToStorage(null);
+          chosen = null;
+        }
+
+        // 如果没有 active，就用 default
+        if (!chosen) chosen = def;
+
+        // 如果仍然没有，就按 membership 决策
+        if (!chosen) {
           if (mems.length === 0) {
             router.replace("/onboarding");
             return;
           }
           if (mems.length === 1) {
-            hid = mems[0].household_id;
-            await setDefaultHousehold(hid);
+            chosen = mems[0].household_id;
+            await setDefaultHousehold(chosen);
+            setDefaultId(chosen);
           } else {
             router.replace("/households");
             return;
           }
         }
 
-        await loadHousehold(hid);
-        await loadRooms(hid);
+        setActiveId(chosen);
+
+        await loadHousehold(chosen);
+        await loadRooms(chosen);
       } catch (e: any) {
         setErr(e?.message ?? "Failed to load rooms.");
       } finally {
@@ -130,6 +160,11 @@ export default function RoomsPage() {
   }, [user?.id, router]);
 
   const joinCode = household?.join_code ?? null;
+  const modeLabel = useMemo(() => {
+    if (!household?.id) return "";
+    if (defaultId && household.id === defaultId) return "default";
+    return "temporary";
+  }, [household?.id, defaultId]);
 
   async function createRoom() {
     if (!household) return;
@@ -140,14 +175,13 @@ export default function RoomsPage() {
     try {
       const nextPos = (rooms.reduce((m, r) => Math.max(m, r.position ?? 0), 0) || 0) + 1;
 
-      // 如果你的 rooms 表有 created_by 且 NOT NULL，就保留；没有的话删掉这行即可
       const ins = await supabase
         .from("rooms")
         .insert({
           household_id: household.id,
           name: nm,
           position: nextPos,
-          created_by: user.id,
+          created_by: user.id, // 如果你的 rooms 没这个字段，删掉这一行
         } as any)
         .select("id,household_id,name,position")
         .single();
@@ -172,23 +206,45 @@ export default function RoomsPage() {
           <div style={{ opacity: 0.75, marginTop: 4 }}>
             Signed in as <span style={{ fontWeight: 900 }}>{userEmail || user.id}</span>
           </div>
+
           {household && (
-            <div style={{ opacity: 0.75, marginTop: 4 }}>
-              Household: <span style={{ fontWeight: 900 }}>{household.name}</span>
-              {joinCode ? (
-                <>
-                  {" "}
-                  · Join code: <span style={{ fontWeight: 900 }}>{joinCode}</span>
-                </>
+            <div style={{ opacity: 0.75, marginTop: 6, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+              <div>
+                Household: <span style={{ fontWeight: 900 }}>{household.name}</span>{" "}
+                <span style={{ fontWeight: 900, opacity: 0.75 }}>({modeLabel})</span>
+                {joinCode ? (
+                  <>
+                    {" "}
+                    · Join code: <span style={{ fontWeight: 900 }}>{joinCode}</span>
+                  </>
+                ) : null}
+              </div>
+
+              <button
+                onClick={() => router.push("/households")}
+                style={{ padding: "8px 10px", borderRadius: 12, fontWeight: 900 }}
+              >
+                Change
+              </button>
+
+              {modeLabel === "temporary" && defaultId ? (
+                <button
+                  onClick={async () => {
+                    // 取消临时切换，回到默认
+                    writeActiveHouseholdToStorage(null);
+                    router.refresh();
+                    router.replace("/rooms");
+                  }}
+                  style={{ padding: "8px 10px", borderRadius: 12 }}
+                >
+                  Back to default
+                </button>
               ) : null}
             </div>
           )}
         </div>
 
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-          <button onClick={() => router.push("/households")} style={{ padding: 10, borderRadius: 12, fontWeight: 900 }}>
-            Households
-          </button>
           <button onClick={() => router.push("/onboarding")} style={{ padding: 10, borderRadius: 12 }}>
             Create / Join
           </button>

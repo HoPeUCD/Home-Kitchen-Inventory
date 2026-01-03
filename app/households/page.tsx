@@ -5,6 +5,8 @@ import { supabase } from "@/src/lib/supabase";
 import { useRouter } from "next/navigation";
 import AuthGate from "@/src/components/AuthGate";
 
+const ACTIVE_HOUSEHOLD_KEY = "active_household_id";
+
 export default function Households() {
   const router = useRouter();
   const [session, setSession] = useState<any>(null);
@@ -22,6 +24,13 @@ export default function Households() {
     const { data: sub } = supabase.auth.onAuthStateChange((_evt, s) => setSession(s));
     return () => sub.subscription.unsubscribe();
   }, []);
+
+  function writeActiveHouseholdToStorage(hid: string | null) {
+    try {
+      if (!hid) localStorage.removeItem(ACTIVE_HOUSEHOLD_KEY);
+      else localStorage.setItem(ACTIVE_HOUSEHOLD_KEY, hid);
+    } catch {}
+  }
 
   async function load() {
     if (!session?.user?.id) return;
@@ -51,6 +60,9 @@ export default function Households() {
   }, [session?.user?.id]);
 
   async function signOut() {
+    try {
+      localStorage.removeItem(ACTIVE_HOUSEHOLD_KEY);
+    } catch {}
     await supabase.auth.signOut();
     setSession(null);
     router.replace("/");
@@ -62,6 +74,10 @@ export default function Households() {
     try {
       const { error } = await supabase.rpc("set_default_household", { p_household_id: hid });
       if (error) throw error;
+
+      // 设为默认时，顺便清掉临时切换（否则会一直停留在旧 active）
+      writeActiveHouseholdToStorage(null);
+
       setDefaultId(hid);
       router.push("/rooms");
     } catch (e: any) {
@@ -71,10 +87,15 @@ export default function Households() {
     }
   }
 
+  function switchOnly(hid: string) {
+    // 不改 default，只改“当前会话 active household”
+    writeActiveHouseholdToStorage(hid);
+    router.push("/rooms");
+  }
+
   async function deleteHousehold(hid: string, name: string) {
-    // Strong confirmation: confirm + typed name
     const ok = window.confirm(
-      `Delete household "${name}"?\n\nThis will permanently delete rooms, columns, cells, items, invites, and requests under this household (if cascades are enabled).`
+      `Delete household "${name}"?\n\nThis will permanently delete data under this household (if cascades are enabled).`
     );
     if (!ok) return;
 
@@ -90,17 +111,16 @@ export default function Households() {
       const { error } = await supabase.rpc("delete_household", { p_household_id: hid });
       if (error) throw error;
 
-      // refresh list + default
+      // 如果你刚好把 active household 删了，也清掉
+      try {
+        const cur = localStorage.getItem(ACTIVE_HOUSEHOLD_KEY);
+        if (cur === hid) localStorage.removeItem(ACTIVE_HOUSEHOLD_KEY);
+      } catch {}
+
       await load();
 
-      // If deleted household was default, you will now have defaultId null.
-      // Redirect user appropriately:
       if (defaultId === hid) {
-        // After deletion, default_household_id becomes NULL by FK (ON DELETE SET NULL).
-        // If user still has other households, let them pick; otherwise onboarding.
-        const remaining = (rows ?? []).filter((r) => r.households?.id && r.households.id !== hid);
-        if (remaining.length === 0) router.replace("/onboarding");
-        else router.replace("/households");
+        router.replace("/households");
       }
     } catch (e: any) {
       setErr(e?.message ?? "Delete household failed.");
@@ -150,11 +170,19 @@ export default function Households() {
 
                 <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
                   <button
-                    onClick={() => setDefault(h.id)}
+                    onClick={() => switchOnly(h.id)}
                     disabled={busy}
                     style={{ padding: 10, borderRadius: 12, fontWeight: 900 }}
                   >
-                    {isDefault ? "Default" : "Set as default / Switch"}
+                    Switch only
+                  </button>
+
+                  <button
+                    onClick={() => setDefault(h.id)}
+                    disabled={busy}
+                    style={{ padding: 10, borderRadius: 12 }}
+                  >
+                    {isDefault ? "Default" : "Set as default"}
                   </button>
 
                   {isOwner ? (
@@ -170,7 +198,7 @@ export default function Households() {
                         fontWeight: 900,
                       }}
                     >
-                      Delete household
+                      Delete
                     </button>
                   ) : null}
                 </div>
