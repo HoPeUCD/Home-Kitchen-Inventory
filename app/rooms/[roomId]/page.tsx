@@ -32,8 +32,9 @@ const COLORS = {
   okBg: "rgba(45, 108, 223, .10)",
 };
 
-const ITEM_FONT_STACK =
-  '"SF Pro Rounded","Avenir Next Rounded","Quicksand","Nunito","Arial Rounded MT Bold","ui-rounded",system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif';
+// Fonts (assumes you’ve loaded these via next/font or global CSS; if not loaded, they’ll gracefully fallback)
+const FONT_ITEM = '"Nunito", system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
+const FONT_TITLE = '"Oswald", system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
 
 type Household = { id: string; name: string; join_code: string | null };
 type Room = { id: string; household_id: string; name: string; position?: number };
@@ -168,8 +169,8 @@ function isUrl(s?: string | null): boolean {
   return !!s && /^https?:\/\//i.test(s);
 }
 
-function IconEmoji(props: { title: string; emoji: string; onClick: () => void; disabled?: boolean }) {
-  const { title, emoji, onClick, disabled } = props;
+function IconEmoji(props: { title: string; emoji: string; onClick: () => void; disabled?: boolean; size?: number }) {
+  const { title, emoji, onClick, disabled, size } = props;
   return (
     <span
       role="button"
@@ -189,8 +190,8 @@ function IconEmoji(props: { title: string; emoji: string; onClick: () => void; d
       style={{
         cursor: disabled ? "not-allowed" : "pointer",
         opacity: disabled ? 0.45 : 1,
-        fontSize: 16,
-        lineHeight: "16px",
+        fontSize: size ?? 16,
+        lineHeight: `${size ?? 16}px`,
         userSelect: "none",
       }}
     >
@@ -220,7 +221,6 @@ export default function RoomPage() {
   const [cells, setCells] = useState<Cell[]>([]);
   const [items, setItems] = useState<Item[]>([]);
 
-  // household-level layout
   const [hhRooms, setHhRooms] = useState<Room[]>([]);
   const [hhColumns, setHhColumns] = useState<Column[]>([]);
   const [hhCells, setHhCells] = useState<Cell[]>([]);
@@ -247,7 +247,6 @@ export default function RoomPage() {
   const [itemExpire, setItemExpire] = useState<string>("");
   const [itemCellId, setItemCellId] = useState<string>("");
 
-  // room -> cell location
   const [locationRoomId, setLocationRoomId] = useState<string>("");
 
   // image
@@ -255,9 +254,7 @@ export default function RoomPage() {
   const [itemImageLocalUrl, setItemImageLocalUrl] = useState<string | null>(null);
   const [modalImageRemoteUrl, setModalImageRemoteUrl] = useState<string | null>(null);
 
-  // auto focus name for add item
   const nameInputRef = useRef<HTMLInputElement | null>(null);
-
   const cellRefMap = useRef<Record<string, HTMLDivElement | null>>({});
 
   useEffect(() => {
@@ -297,7 +294,7 @@ export default function RoomPage() {
     return () => window.clearTimeout(t);
   }, [itemModalOpen, editingItem]);
 
-  // auto focus column name input
+  // auto focus column name
   useEffect(() => {
     if (!colModalOpen) return;
     const t = window.setTimeout(() => colNameInputRef.current?.focus(), 0);
@@ -345,11 +342,7 @@ export default function RoomPage() {
       const mems = memRes.data ?? [];
       const myHids = new Set(mems.map((m: any) => m.household_id as string));
 
-      const profRes = await supabase
-        .from("profiles")
-        .select("default_household_id")
-        .eq("user_id", user.id)
-        .maybeSingle();
+      const profRes = await supabase.from("profiles").select("default_household_id").eq("user_id", user.id).maybeSingle();
       if (profRes.error) throw new Error(profRes.error.message);
 
       const def = (profRes.data?.default_household_id as string | null) ?? null;
@@ -442,7 +435,7 @@ export default function RoomPage() {
         setColumns([]);
         setCells([]);
         setItems([]);
-        throw new Error("Room not found in the current household. Use Rooms or Switch household.");
+        throw new Error("Room not found in the current household. Use All rooms or Switch household.");
       }
       setRoom(roomRes.data as Room);
 
@@ -579,7 +572,6 @@ export default function RoomPage() {
   const hhIndex = useMemo(() => {
     const roomById = new Map(hhRooms.map((r) => [r.id, r]));
     const colById = new Map(hhColumns.map((c) => [c.id, c]));
-
     const m = new Map<
       string,
       { roomId: string; roomName: string; colId: string; colName: string; cellCode: string; label: string }
@@ -647,7 +639,6 @@ export default function RoomPage() {
       .map((it) => ({ it, loc: hhIndex.get(it.cell_id) }));
   }, [search, items, hhIndex]);
 
-  /** Location cell options */
   const roomCellOptions = useMemo(() => {
     const rid = locationRoomId;
     if (!rid) return [];
@@ -974,66 +965,30 @@ export default function RoomPage() {
 
   if (!session) return <AuthGate onAuthed={(s) => setSession(s)} />;
 
+  // Base sizes
+  const ITEM_NAME_PX = 12; // item name
+  const CELL_NAME_PX = ITEM_NAME_PX + 2; // per request: +2pt
+
   return (
     <div style={{ minHeight: "100vh", background: COLORS.oatBg, color: COLORS.ink }}>
       <div style={{ padding: 16, maxWidth: 1600, margin: "0 auto" }}>
-        {/* Top right actions */}
+        {/* Top action row: Refresh | Switch household | Sign out */}
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
-          <button
-            onClick={() => loadContextAndData()}
-            disabled={busy}
-            style={{
-              padding: "8px 10px",
-              borderRadius: 12,
-              border: `1px solid ${COLORS.border}`,
-              background: "white",
-              cursor: "pointer",
-              opacity: busy ? 0.6 : 1,
-            }}
-          >
-            Refresh
-          </button>
-          <button
-            onClick={async () => {
-              safeSetLS(ACTIVE_HOUSEHOLD_KEY, null);
-              await supabase.auth.signOut();
-              window.location.href = "/";
-            }}
-            style={{
-              padding: "8px 10px",
-              borderRadius: 12,
-              border: `1px solid ${COLORS.border}`,
-              background: "white",
-              cursor: "pointer",
-            }}
-          >
-            Sign out
-          </button>
-        </div>
-
-        {/* Household line + Switch household on the right */}
-        {household ? (
-          <div
-            style={{
-              marginBottom: 12,
-              color: COLORS.muted,
-              display: "flex",
-              justifyContent: "space-between",
-              gap: 12,
-              alignItems: "center",
-              flexWrap: "wrap",
-            }}
-          >
-            <div>
-              Household: <span style={{ fontWeight: 900, color: COLORS.ink }}>{household.name}</span>{" "}
-              <span style={{ fontWeight: 900 }}>({modeLabel})</span>
-              {household.join_code ? (
-                <>
-                  {" "}
-                  · Join code: <span style={{ fontWeight: 900, color: COLORS.ink }}>{household.join_code}</span>
-                </>
-              ) : null}
-            </div>
+          <div style={{ width: "100%", display: "flex", justifyContent: "flex-end", gap: 10, flexWrap: "wrap" }}>
+            <button
+              onClick={() => loadContextAndData()}
+              disabled={busy}
+              style={{
+                padding: "8px 10px",
+                borderRadius: 12,
+                border: `1px solid ${COLORS.border}`,
+                background: "white",
+                cursor: "pointer",
+                opacity: busy ? 0.6 : 1,
+              }}
+            >
+              Refresh
+            </button>
 
             <button
               onClick={() => router.push("/households")}
@@ -1048,6 +1003,39 @@ export default function RoomPage() {
             >
               Switch household
             </button>
+
+            <button
+              onClick={async () => {
+                safeSetLS(ACTIVE_HOUSEHOLD_KEY, null);
+                await supabase.auth.signOut();
+                window.location.href = "/";
+              }}
+              style={{
+                padding: "8px 10px",
+                borderRadius: 12,
+                border: `1px solid ${COLORS.border}`,
+                background: "white",
+                cursor: "pointer",
+              }}
+            >
+              Sign out
+            </button>
+          </div>
+        </div>
+
+        {/* Household line */}
+        {household ? (
+          <div style={{ marginBottom: 12, color: COLORS.muted, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+            <div>
+              Household: <span style={{ fontWeight: 900, color: COLORS.ink }}>{household.name}</span>{" "}
+              <span style={{ fontWeight: 900 }}>({modeLabel})</span>
+              {household.join_code ? (
+                <>
+                  {" "}
+                  · Join code: <span style={{ fontWeight: 900, color: COLORS.ink }}>{household.join_code}</span>
+                </>
+              ) : null}
+            </div>
           </div>
         ) : null}
 
@@ -1076,15 +1064,7 @@ export default function RoomPage() {
         ) : (
           <>
             {/* Expiring soon */}
-            <div
-              style={{
-                background: COLORS.oatCard,
-                border: `1px solid ${COLORS.border}`,
-                borderRadius: 16,
-                padding: 14,
-                marginBottom: 12,
-              }}
-            >
+            <div style={{ background: COLORS.oatCard, border: `1px solid ${COLORS.border}`, borderRadius: 16, padding: 14, marginBottom: 12 }}>
               <div style={{ fontWeight: 900, marginBottom: 8 }}>Expiring soon</div>
 
               <div style={{ display: "grid", gap: 10, gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))" }}>
@@ -1093,7 +1073,7 @@ export default function RoomPage() {
                   {expiring0to7.length === 0 ? (
                     <div style={{ color: COLORS.muted }}>None</div>
                   ) : (
-                    <div style={{ display: "grid", gap: 4, fontFamily: ITEM_FONT_STACK, fontSize: 13 }}>
+                    <div style={{ display: "grid", gap: 4, fontFamily: FONT_ITEM, fontSize: 13 }}>
                       {expiring0to7.slice(0, 40).map(({ it, du }) => (
                         <div key={it.id} style={{ cursor: "pointer" }} onClick={() => goToCell(it)}>
                           {expLine(it, du!)}
@@ -1108,7 +1088,7 @@ export default function RoomPage() {
                   {expiring8to30.length === 0 ? (
                     <div style={{ color: COLORS.muted }}>None</div>
                   ) : (
-                    <div style={{ display: "grid", gap: 4, fontFamily: ITEM_FONT_STACK, fontSize: 13 }}>
+                    <div style={{ display: "grid", gap: 4, fontFamily: FONT_ITEM, fontSize: 13 }}>
                       {expiring8to30.slice(0, 60).map(({ it, du }) => (
                         <div key={it.id} style={{ cursor: "pointer" }} onClick={() => goToCell(it)}>
                           {expLine(it, du!)}
@@ -1121,15 +1101,7 @@ export default function RoomPage() {
             </div>
 
             {/* Search */}
-            <div
-              style={{
-                background: COLORS.oatCard,
-                border: `1px solid ${COLORS.border}`,
-                borderRadius: 16,
-                padding: 14,
-                marginBottom: 12,
-              }}
-            >
+            <div style={{ background: COLORS.oatCard, border: `1px solid ${COLORS.border}`, borderRadius: 16, padding: 14, marginBottom: 12 }}>
               <div style={{ fontWeight: 900, marginBottom: 8 }}>Search items</div>
               <input
                 value={search}
@@ -1141,7 +1113,7 @@ export default function RoomPage() {
                   borderRadius: 12,
                   border: `1px solid ${COLORS.border}`,
                   background: "white",
-                  fontFamily: ITEM_FONT_STACK,
+                  fontFamily: FONT_ITEM,
                 }}
               />
               {search.trim() ? (
@@ -1149,7 +1121,7 @@ export default function RoomPage() {
                   {filteredItemsSummary.length === 0 ? (
                     <div>No matches.</div>
                   ) : (
-                    <div style={{ display: "grid", gap: 4, fontFamily: ITEM_FONT_STACK, fontSize: 13 }}>
+                    <div style={{ display: "grid", gap: 4, fontFamily: FONT_ITEM, fontSize: 13 }}>
                       {filteredItemsSummary.map(({ it, loc }) => (
                         <div key={it.id} style={{ cursor: "pointer" }} onClick={() => goToCell(it)}>
                           <span style={{ color: COLORS.ink, fontWeight: 400 }}>{it.name}</span>{" "}
@@ -1164,7 +1136,7 @@ export default function RoomPage() {
               ) : null}
             </div>
 
-            {/* ✅ Room title + back button on the left, Add column on the right (same level) */}
+            {/* Room title + All rooms + Add column */}
             <div
               style={{
                 background: COLORS.oatCard,
@@ -1179,7 +1151,7 @@ export default function RoomPage() {
                 flexWrap: "wrap",
               }}
             >
-              {/* Left: Rooms button + current room name */}
+              {/* Left */}
               <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
                 <button
                   onClick={() => router.push("/rooms")}
@@ -1192,8 +1164,9 @@ export default function RoomPage() {
                     cursor: "pointer",
                   }}
                 >
-                  Rooms
+                  All rooms
                 </button>
+
                 <div style={{ fontWeight: 900, fontSize: 20, color: COLORS.ink }}>{room?.name ?? "Room"}</div>
               </div>
 
@@ -1249,17 +1222,36 @@ export default function RoomPage() {
                     gap: 10,
                   }}
                 >
-                  {/* ✅ Column name centered */}
+                  {/* Column header: keep title centered while actions on right */}
                   <div
                     style={{
-                      textAlign: "center",
-                      fontWeight: 900,
-                      fontSize: 16,
+                      display: "grid",
+                      gridTemplateColumns: "1fr auto 1fr",
+                      alignItems: "center",
+                      gap: 8,
                       paddingTop: 2,
                       paddingBottom: 2,
                     }}
                   >
-                    {col.name}
+                    <div /> {/* left spacer */}
+
+                    <div
+                      style={{
+                        textAlign: "center",
+                        fontFamily: FONT_TITLE,
+                        fontWeight: 700,
+                        fontSize: 18,
+                        color: COLORS.blue,
+                        letterSpacing: 0.4,
+                      }}
+                    >
+                      {col.name}
+                    </div>
+
+                    <div style={{ display: "flex", justifyContent: "flex-end", gap: 12 }}>
+                      <IconEmoji title="Edit column" emoji="✏️" onClick={() => openColModal(col)} disabled={busy} size={16} />
+                      <IconEmoji title="Delete column" emoji="🗑️" onClick={() => deleteColumn(col)} disabled={busy} size={16} />
+                    </div>
                   </div>
 
                   {/* Cells */}
@@ -1333,22 +1325,20 @@ export default function RoomPage() {
                               </div>
                             ) : (
                               <>
-                                {/* ✅ Cell name size = item size, but bold */}
                                 <div
                                   style={{
-                                    fontFamily: ITEM_FONT_STACK,
-                                    fontSize: 12,
-                                    fontWeight: 900,
-                                    letterSpacing: 0.1,
-                                    color: COLORS.ink,
+                                    fontFamily: FONT_TITLE,
+                                    fontSize: CELL_NAME_PX,
+                                    fontWeight: 700,
+                                    color: COLORS.blue,
+                                    letterSpacing: 0.35,
                                   }}
                                 >
                                   {cell.code}
                                 </div>
 
-                                {/* Cell actions as emoji */}
                                 <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                                  <IconEmoji title="Add item" emoji="➕" onClick={() => openAddItem(cell.id)} disabled={busy} />
+                                  <IconEmoji title="Add item" emoji="➕" onClick={() => openAddItem(cell.id)} disabled={busy} size={16} />
                                   <IconEmoji
                                     title="Edit cell"
                                     emoji="✎"
@@ -1357,8 +1347,9 @@ export default function RoomPage() {
                                       setEditingCellCode(cell.code);
                                     }}
                                     disabled={busy}
+                                    size={16}
                                   />
-                                  <IconEmoji title="Delete cell" emoji="🗑️" onClick={() => deleteCell(cell)} disabled={busy} />
+                                  <IconEmoji title="Delete cell" emoji="🗑️" onClick={() => deleteCell(cell)} disabled={busy} size={16} />
                                 </div>
                               </>
                             )}
@@ -1386,10 +1377,9 @@ export default function RoomPage() {
                                       border: `1px solid ${COLORS.border}`,
                                       background: chipBg(it),
                                       cursor: "pointer",
-                                      fontFamily: ITEM_FONT_STACK,
+                                      fontFamily: FONT_ITEM,
                                     }}
                                   >
-                                    {/* ✅ item name NOT bold */}
                                     <span
                                       style={{
                                         maxWidth: 190,
@@ -1397,7 +1387,7 @@ export default function RoomPage() {
                                         textOverflow: "ellipsis",
                                         whiteSpace: "nowrap",
                                         fontWeight: 400,
-                                        fontSize: 12,
+                                        fontSize: ITEM_NAME_PX,
                                         color: COLORS.ink,
                                         letterSpacing: 0.1,
                                       }}
@@ -1414,12 +1404,13 @@ export default function RoomPage() {
                     })}
                   </div>
 
-                  {/* Column footer: row1 Add cell, row2 centered emojis */}
-                  <div style={{ marginTop: "auto", paddingTop: 8, display: "grid", gap: 10 }}>
+                  {/* Column footer: Add cell */}
+                  <div style={{ marginTop: "auto", paddingTop: 8 }}>
                     <button
                       onClick={() => addCell(col.id)}
                       disabled={busy}
                       style={{
+                        width: "100%",
                         padding: "10px 12px",
                         borderRadius: 12,
                         fontWeight: 900,
@@ -1431,11 +1422,6 @@ export default function RoomPage() {
                     >
                       + Add cell
                     </button>
-
-                    <div style={{ display: "flex", justifyContent: "center", gap: 16, paddingBottom: 2 }}>
-                      <IconEmoji title="Edit column" emoji="✏️" onClick={() => openColModal(col)} disabled={busy} />
-                      <IconEmoji title="Delete column" emoji="🗑️" onClick={() => deleteColumn(col)} disabled={busy} />
-                    </div>
                   </div>
                 </div>
               ))}
@@ -1473,13 +1459,7 @@ export default function RoomPage() {
               <div style={{ fontWeight: 900, fontSize: 16 }}>Edit column</div>
               <button
                 onClick={() => closeColModal()}
-                style={{
-                  padding: "6px 8px",
-                  borderRadius: 10,
-                  border: `1px solid ${COLORS.border}`,
-                  background: "white",
-                  cursor: "pointer",
-                }}
+                style={{ padding: "6px 8px", borderRadius: 10, border: `1px solid ${COLORS.border}`, background: "white", cursor: "pointer" }}
               >
                 Close
               </button>
@@ -1502,12 +1482,7 @@ export default function RoomPage() {
                     value={colModalName}
                     onChange={(e) => setColModalName(e.target.value)}
                     placeholder="e.g. Pantry"
-                    style={{
-                      padding: 10,
-                      borderRadius: 12,
-                      border: `1px solid ${COLORS.border}`,
-                      background: "white",
-                    }}
+                    style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}`, background: "white" }}
                   />
                 </div>
 
@@ -1532,13 +1507,7 @@ export default function RoomPage() {
                   <button
                     type="button"
                     onClick={() => closeColModal()}
-                    style={{
-                      padding: "10px 12px",
-                      borderRadius: 12,
-                      border: `1px solid ${COLORS.border}`,
-                      background: "white",
-                      cursor: "pointer",
-                    }}
+                    style={{ padding: "10px 12px", borderRadius: 12, border: `1px solid ${COLORS.border}`, background: "white", cursor: "pointer" }}
                   >
                     Cancel
                   </button>
@@ -1583,13 +1552,7 @@ export default function RoomPage() {
               <div style={{ fontWeight: 900, fontSize: 16 }}>{editingItem ? "Edit item" : "Add item"}</div>
               <button
                 onClick={() => closeItemModal()}
-                style={{
-                  padding: "6px 8px",
-                  borderRadius: 10,
-                  border: `1px solid ${COLORS.border}`,
-                  background: "white",
-                  cursor: "pointer",
-                }}
+                style={{ padding: "6px 8px", borderRadius: 10, border: `1px solid ${COLORS.border}`, background: "white", cursor: "pointer" }}
               >
                 Close
               </button>
@@ -1597,39 +1560,15 @@ export default function RoomPage() {
 
             <div style={{ marginTop: 12 }}>
               {modalImageUrl ? (
-                <div
-                  style={{
-                    width: "100%",
-                    borderRadius: 14,
-                    border: `1px solid ${COLORS.border}`,
-                    background: COLORS.oatCard,
-                    overflow: "hidden",
-                  }}
-                >
+                <div style={{ width: "100%", borderRadius: 14, border: `1px solid ${COLORS.border}`, background: COLORS.oatCard, overflow: "hidden" }}>
                   <img
                     src={modalImageUrl}
                     alt="item preview"
-                    style={{
-                      width: "100%",
-                      height: 280,
-                      objectFit: "contain",
-                      display: "block",
-                      background: "white",
-                    }}
+                    style={{ width: "100%", height: 280, objectFit: "contain", display: "block", background: "white" }}
                   />
                 </div>
               ) : (
-                <div
-                  style={{
-                    width: "100%",
-                    borderRadius: 14,
-                    border: `1px solid ${COLORS.border}`,
-                    background: COLORS.oatCard,
-                    padding: 12,
-                    color: COLORS.muted,
-                    fontWeight: 900,
-                  }}
-                >
+                <div style={{ width: "100%", borderRadius: 14, border: `1px solid ${COLORS.border}`, background: COLORS.oatCard, padding: 12, color: COLORS.muted, fontWeight: 900 }}>
                   No image
                 </div>
               )}
@@ -1658,34 +1597,19 @@ export default function RoomPage() {
                     value={itemName}
                     onChange={(e) => setItemName(e.target.value)}
                     placeholder="e.g. Olive oil"
-                    style={{
-                      padding: 10,
-                      borderRadius: 12,
-                      border: `1px solid ${COLORS.border}`,
-                      fontFamily: ITEM_FONT_STACK,
-                    }}
+                    style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}`, fontFamily: FONT_ITEM }}
                   />
                 </div>
 
                 <div style={{ display: "grid", gap: 6, gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))" }}>
                   <div style={{ display: "grid", gap: 6 }}>
                     <div style={{ fontWeight: 900 }}>Quantity</div>
-                    <input
-                      type="number"
-                      value={itemQty}
-                      onChange={(e) => setItemQty(Number(e.target.value))}
-                      style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
-                    />
+                    <input type="number" value={itemQty} onChange={(e) => setItemQty(Number(e.target.value))} style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }} />
                   </div>
 
                   <div style={{ display: "grid", gap: 6 }}>
                     <div style={{ fontWeight: 900 }}>Expire date</div>
-                    <input
-                      type="date"
-                      value={itemExpire}
-                      onChange={(e) => setItemExpire(e.target.value)}
-                      style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
-                    />
+                    <input type="date" value={itemExpire} onChange={(e) => setItemExpire(e.target.value)} style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }} />
                     <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                       {[
                         { label: "1 week", days: 7 },
@@ -1704,28 +1628,12 @@ export default function RoomPage() {
                             const dd = String(d.getDate()).padStart(2, "0");
                             setItemExpire(`${yyyy}-${mm}-${dd}`);
                           }}
-                          style={{
-                            padding: "6px 8px",
-                            borderRadius: 999,
-                            border: `1px solid ${COLORS.border}`,
-                            background: "white",
-                            cursor: "pointer",
-                          }}
+                          style={{ padding: "6px 8px", borderRadius: 999, border: `1px solid ${COLORS.border}`, background: "white", cursor: "pointer" }}
                         >
                           +{x.label}
                         </button>
                       ))}
-                      <button
-                        type="button"
-                        onClick={() => setItemExpire("")}
-                        style={{
-                          padding: "6px 8px",
-                          borderRadius: 999,
-                          border: `1px solid ${COLORS.border}`,
-                          background: "white",
-                          cursor: "pointer",
-                        }}
-                      >
+                      <button type="button" onClick={() => setItemExpire("")} style={{ padding: "6px 8px", borderRadius: 999, border: `1px solid ${COLORS.border}`, background: "white", cursor: "pointer" }}>
                         Clear
                       </button>
                     </div>
@@ -1753,20 +1661,14 @@ export default function RoomPage() {
                     }}
                     style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
                   />
-                  <div style={{ color: COLORS.muted, fontSize: 12 }}>
-                    Preview uses Signed URL first (works even if bucket is private).
-                  </div>
+                  <div style={{ color: COLORS.muted, fontSize: 12 }}>Preview uses Signed URL first (works even if bucket is private).</div>
                 </div>
 
                 {/* Location */}
                 <div style={{ display: "grid", gap: 10 }}>
                   <div style={{ display: "grid", gap: 6 }}>
                     <div style={{ fontWeight: 900 }}>Room</div>
-                    <select
-                      value={locationRoomId}
-                      onChange={(e) => setLocationRoomId(e.target.value)}
-                      style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
-                    >
+                    <select value={locationRoomId} onChange={(e) => setLocationRoomId(e.target.value)} style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}>
                       <option value="">Select a room</option>
                       {hhRooms.map((r) => (
                         <option key={r.id} value={r.id}>
@@ -1778,12 +1680,7 @@ export default function RoomPage() {
 
                   <div style={{ display: "grid", gap: 6 }}>
                     <div style={{ fontWeight: 900 }}>Cell (in selected room)</div>
-                    <select
-                      value={itemCellId}
-                      onChange={(e) => setItemCellId(e.target.value)}
-                      style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }}
-                      disabled={!locationRoomId}
-                    >
+                    <select value={itemCellId} onChange={(e) => setItemCellId(e.target.value)} style={{ padding: 10, borderRadius: 12, border: `1px solid ${COLORS.border}` }} disabled={!locationRoomId}>
                       <option value="">Select a cell</option>
                       {roomCellOptions.map((opt) => (
                         <option key={opt.id} value={opt.id}>
@@ -1792,9 +1689,7 @@ export default function RoomPage() {
                       ))}
                     </select>
 
-                    {locationRoomId ? (
-                      <AutoFixCellSelection roomCellOptions={roomCellOptions} itemCellId={itemCellId} setItemCellId={setItemCellId} />
-                    ) : null}
+                    {locationRoomId ? <AutoFixCellSelection roomCellOptions={roomCellOptions} itemCellId={itemCellId} setItemCellId={setItemCellId} /> : null}
                   </div>
                 </div>
 
@@ -1803,16 +1698,7 @@ export default function RoomPage() {
                     <button
                       type="submit"
                       disabled={busy}
-                      style={{
-                        padding: "10px 12px",
-                        borderRadius: 12,
-                        fontWeight: 900,
-                        background: COLORS.blue,
-                        color: "white",
-                        border: "none",
-                        cursor: "pointer",
-                        opacity: busy ? 0.6 : 1,
-                      }}
+                      style={{ padding: "10px 12px", borderRadius: 12, fontWeight: 900, background: COLORS.blue, color: "white", border: "none", cursor: "pointer", opacity: busy ? 0.6 : 1 }}
                     >
                       {editingItem ? "Save changes" : "Add item"}
                     </button>
@@ -1838,17 +1724,7 @@ export default function RoomPage() {
                     ) : null}
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={() => closeItemModal()}
-                    style={{
-                      padding: "10px 12px",
-                      borderRadius: 12,
-                      border: `1px solid ${COLORS.border}`,
-                      background: "white",
-                      cursor: "pointer",
-                    }}
-                  >
+                  <button type="button" onClick={() => closeItemModal()} style={{ padding: "10px 12px", borderRadius: 12, border: `1px solid ${COLORS.border}`, background: "white", cursor: "pointer" }}>
                     Cancel
                   </button>
                 </div>
