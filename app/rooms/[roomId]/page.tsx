@@ -471,6 +471,9 @@ export default function Page() {
   };
 
   const onSignOut = async () => {
+    try {
+      localStorage.removeItem(ACTIVE_HOUSEHOLD_KEY);
+    } catch {}
     await supabase.auth.signOut();
     router.refresh();
   };
@@ -1092,7 +1095,7 @@ export default function Page() {
                     <div key={col.id} className={cx('min-w-[340px] max-w-[340px] rounded-2xl border', THEME.borderSoft, THEME.oatCard)}>
                       {/* Column header (left aligned, black) */}
                       <div className="px-4 py-3 border-b border-black/10 flex items-center justify-between gap-2">
-                        <div className="text-base truncate" style={fontOswald}>
+                        <div className="text-base text-black truncate" style={fontOswald}>
                           {col.name}
                         </div>
 
@@ -1175,7 +1178,7 @@ export default function Page() {
                                 <div className="flex items-start justify-between gap-2">
                                   {/* Cell name: Oswald, black, bold, item+2pt */}
                                   <div
-                                    className="truncate font-bold"
+                                    className="truncate font-bold text-black"
                                     style={{ ...fontOswald, fontSize: '16px' }}
                                     title={cell.code}
                                   >
