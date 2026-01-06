@@ -145,7 +145,7 @@ export default function InviteAcceptPage() {
     setRefreshing(true);
     try {
       await loadHouseholdsForSwitch();
-      setToast("已刷新");
+      setToast("Refreshed");
     } finally {
       setRefreshing(false);
     }
@@ -255,36 +255,44 @@ export default function InviteAcceptPage() {
           onClose={() => setSwitchModalOpen(false)}
           widthClass="max-w-lg"
         >
-          <div className="text-sm text-black/70">选择一个 household（仅切换 active，不改变 default）：</div>
+          <div className="text-sm text-black/70">Select a household (only switches active, does not change default):</div>
 
           <div className="mt-3 flex flex-col gap-2">
             {households.length === 0 ? (
               <div className="text-sm text-black/60">
-                你还没有加入任何 household（或尚未刷新到列表）。
+                You haven't joined any household yet (or the list hasn't been refreshed).
               </div>
             ) : (
-              households.map((h) => {
-                const isActive = activeHouseholdId === h.id;
-                return (
-                  <button
-                    key={h.id}
-                    type="button"
-                    onClick={() => {
-                      writeActiveHouseholdToStorage(h.id);
-                      setSwitchModalOpen(false);
-                      setToast("已切换 household");
-                      router.push("/rooms");
-                    }}
-                    className={cx(
-                      "px-3 py-2 rounded-xl border text-left hover:bg-black/5",
-                      isActive ? "border-black/30 bg-black/5" : "border-black/10"
-                    )}
-                  >
-                    <div className="text-sm">{h.name}</div>
-                    {isActive ? <div className="text-xs text-black/60 mt-0.5">Current active</div> : null}
-                  </button>
-                );
-              })
+              (() => {
+                // Sort: current first, then others alphabetically
+                const sorted = [...households].sort((a, b) => {
+                  if (a.id === activeHouseholdId) return -1;
+                  if (b.id === activeHouseholdId) return 1;
+                  return a.name.localeCompare(b.name);
+                });
+                return sorted.map((h) => {
+                  const isActive = activeHouseholdId === h.id;
+                  return (
+                    <button
+                      key={h.id}
+                      type="button"
+                      onClick={() => {
+                        writeActiveHouseholdToStorage(h.id);
+                        setSwitchModalOpen(false);
+                        setToast("Switched household");
+                        router.push("/rooms");
+                      }}
+                      className={cx(
+                        "px-3 py-2 rounded-xl border text-left hover:bg-black/5",
+                        isActive ? "border-black/30 bg-black/5" : "border-black/10"
+                      )}
+                    >
+                      <div className="text-sm">{h.name}</div>
+                      {isActive ? <div className="text-xs text-black/60 mt-0.5">Current active</div> : null}
+                    </button>
+                  );
+                });
+              })()
             )}
           </div>
 

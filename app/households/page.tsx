@@ -24,6 +24,12 @@ type Row = {
   households?: HouseholdMini | HouseholdMini[] | null;
 };
 
+type HouseholdMember = {
+  user_id: string;
+  role: string;
+  email?: string | null;
+};
+
 function cx(...classes: Array<string | false | null | undefined>) {
   return classes.filter(Boolean).join(" ");
 }
@@ -96,6 +102,9 @@ export default function HouseholdsPage() {
   const [busyId, setBusyId] = useState<string | null>(null);
 
   const [activeHouseholdId, setActiveHouseholdId] = useState<string | null>(null);
+  
+  // Store members for each household: household_id -> HouseholdMember[]
+  const [householdMembers, setHouseholdMembers] = useState<Record<string, HouseholdMember[]>>({});
 
   const [switchModalOpen, setSwitchModalOpen] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -141,25 +150,15 @@ export default function HouseholdsPage() {
 
     const userId = session.user.id;
 
-    // profiles schema 兼容：id / user_id
-    const profById = await supabase
+    // profiles 表使用 user_id 作为主键
+    const profRes = await supabase
       .from("profiles")
       .select("default_household_id")
-      .eq("id", userId)
+      .eq("user_id", userId)
       .maybeSingle();
 
-    if (profById.error) {
-      const profByUserId = await supabase
-        .from("profiles")
-        .select("default_household_id")
-        .eq("user_id", userId)
-        .maybeSingle();
-
-      if (profByUserId.error) return setErr(profByUserId.error.message);
-      setDefaultId(profByUserId.data?.default_household_id ?? null);
-    } else {
-      setDefaultId(profById.data?.default_household_id ?? null);
-    }
+    if (profRes.error) return setErr(profRes.error.message);
+    setDefaultId(profRes.data?.default_household_id ?? null);
 
     const hm = await supabase
       .from("household_members")
@@ -169,7 +168,71 @@ export default function HouseholdsPage() {
     if (hm.error) return setErr(hm.error.message);
 
     // ✅ 这里不做危险的强转；Row 已经兼容 households 为 object 或 array
-    setRows((hm.data ?? []) as unknown as Row[]);
+    const rowsData = (hm.data ?? []) as unknown as Row[];
+    setRows(rowsData);
+
+    // Load all members for each household
+    const householdIds = rowsData
+      .map((r) => normalizeHousehold(r.households)?.id)
+      .filter(Boolean) as string[];
+
+    if (householdIds.length > 0) {
+      const membersMap: Record<string, HouseholdMember[]> = {};
+      
+      // Load all members for all households
+      // Note: RLS policy should allow users to see all members of households they belong to
+      const { data: allMembers, error: membersErr } = await supabase
+        .from("household_members")
+        .select("household_id, user_id, role")
+        .in("household_id", householdIds);
+
+      if (membersErr) {
+        console.error("Error loading household members:", membersErr);
+        setErr(`Failed to load members: ${membersErr.message}`);
+      } else if (allMembers) {
+        // Collect all unique user IDs
+        const uniqueUserIds = [...new Set(allMembers.map((m: any) => m.user_id))];
+        
+        // Get emails for all users using RPC function
+        const emailMap: Record<string, string | null> = {};
+        
+        // For current user, use session email immediately
+        if (session?.user?.email) {
+          emailMap[userId] = session.user.email;
+        }
+        
+        // Get emails for other users via RPC
+        if (uniqueUserIds.length > 0) {
+          const { data: emailData, error: emailErr } = await supabase.rpc('get_member_emails', {
+            p_user_ids: uniqueUserIds
+          });
+          
+          if (emailErr) {
+            console.error("Error fetching member emails:", emailErr);
+            // Continue without emails if RPC fails
+          } else if (emailData) {
+            emailData.forEach((row: { user_id: string; email: string | null }) => {
+              emailMap[row.user_id] = row.email;
+            });
+          }
+        }
+        
+        // Group members by household_id
+        allMembers.forEach((member: any) => {
+          if (!membersMap[member.household_id]) {
+            membersMap[member.household_id] = [];
+          }
+          
+          membersMap[member.household_id].push({
+            user_id: member.user_id,
+            role: member.role ?? "member",
+            email: emailMap[member.user_id] ?? null,
+          });
+        });
+
+        setHouseholdMembers(membersMap);
+      }
+    }
   }
 
   useEffect(() => {
@@ -192,7 +255,7 @@ export default function HouseholdsPage() {
     setRefreshing(true);
     try {
       await load();
-      setToast("已刷新");
+      setToast("Refreshed");
     } finally {
       setRefreshing(false);
     }
@@ -208,17 +271,33 @@ export default function HouseholdsPage() {
   }
 
   async function setDefault(hid: string) {
+    if (!session?.user?.id) {
+      setErr("Not authenticated");
+      return;
+    }
+
     setErr(null);
     setBusyId(hid);
     try {
-      const { error } = await supabase.rpc("set_default_household", { p_household_id: hid });
+      // Directly update profiles table instead of using RPC
+      const { error } = await supabase
+        .from("profiles")
+        .update({ default_household_id: hid })
+        .eq("user_id", session.user.id);
+
       if (error) throw error;
 
       // 设为默认时，清掉临时 active
       writeActiveHouseholdToStorage(null);
 
+      // Update local state
       setDefaultId(hid);
-      router.push("/rooms");
+      
+      // Show success feedback
+      setToast("Set as default household");
+      
+      // Optionally redirect to rooms page
+      // router.push("/rooms");
     } catch (e: any) {
       setErr(e?.message ?? "Set default failed.");
     } finally {
@@ -285,7 +364,7 @@ export default function HouseholdsPage() {
             <div className="min-w-0">
               <div className="text-xl font-semibold truncate">Households</div>
               <div className="text-xs text-black/60 mt-0.5">
-                管理你的 households：切换、设为默认、删除（owner）。
+                Manage your households: switch, set as default, delete (owner only).
               </div>
             </div>
 
@@ -319,64 +398,96 @@ export default function HouseholdsPage() {
               const isDefault = defaultId === h.id;
               const isOwner = (r.role ?? "") === "owner";
               const busy = busyId === h.id;
+              const members = householdMembers[h.id] ?? [];
 
               return (
                 <div key={h.id} className={cx("rounded-2xl border p-4", "border-black/10", oatCard)}>
-                  <div className="flex items-start justify-between gap-3 flex-wrap">
-                    <div className="min-w-0">
-                      <div className="font-semibold truncate">{h.name}</div>
-                      <div className="text-sm text-black/70 mt-1">Role: {r.role ?? "member"}</div>
-                      {h.join_code ? (
-                        <div className="text-sm text-black/70 mt-1">Join code: {h.join_code}</div>
-                      ) : null}
+                  {/* Active and Default badges at the top */}
+                  <div className="flex items-center gap-2 flex-wrap mb-3">
+                    {activeHouseholdId === h.id && (
+                      <span className="text-xs px-2 py-1 rounded-lg border border-black/20 bg-black/5">
+                        Active
+                      </span>
+                    )}
+                    {isDefault && (
+                      <span className="text-xs px-2 py-1 rounded-lg border border-black/20 bg-black/5">
+                        Default
+                      </span>
+                    )}
+                  </div>
 
-                      <div className="mt-2 flex items-center gap-2 flex-wrap">
-                        {activeHouseholdId === h.id ? (
-                          <span className="text-xs px-2 py-1 rounded-lg border border-black/20 bg-black/5">
-                            Active
-                          </span>
-                        ) : null}
-                        {isDefault ? (
-                          <span className="text-xs px-2 py-1 rounded-lg border border-black/20 bg-black/5">
-                            Default
-                          </span>
-                        ) : null}
-                      </div>
-                    </div>
+                  {/* Household basic info */}
+                  <div className="mb-3">
+                    <div className="font-semibold truncate">{h.name}</div>
+                    {h.join_code && (
+                      <div className="text-sm text-black/70 mt-1">Join code: {h.join_code}</div>
+                    )}
+                  </div>
 
-                    <div className="flex items-center gap-2 flex-wrap">
+                  {/* Action buttons */}
+                  <div className="flex items-center gap-2 flex-wrap mb-3">
+                    <button
+                      onClick={() => switchOnly(h.id)}
+                      disabled={busy}
+                      className="px-3 py-2 rounded-xl border border-black/10 hover:bg-black/5 text-sm disabled:opacity-60"
+                    >
+                      Switch only
+                    </button>
+
+                    <button
+                      onClick={() => setDefault(h.id)}
+                      disabled={busy}
+                      className={cx(
+                        "px-3 py-2 rounded-xl border text-sm disabled:opacity-60",
+                        isDefault ? "border-black/30 bg-black/5" : "border-black/10 hover:bg-black/5"
+                      )}
+                    >
+                      {isDefault ? "Default" : "Set as default"}
+                    </button>
+
+                    {isOwner && (
                       <button
-                        onClick={() => switchOnly(h.id)}
+                        onClick={() => deleteHousehold(h.id, h.name)}
                         disabled={busy}
-                        className="px-3 py-2 rounded-xl border border-black/10 hover:bg-black/5 text-sm disabled:opacity-60"
+                        className="px-3 py-2 rounded-xl border border-red-600/30 bg-red-50 text-red-700 hover:bg-red-100 text-sm font-semibold disabled:opacity-60"
                       >
-                        Switch only
+                        Delete
                       </button>
+                    )}
+                  </div>
 
-                      <button
-                        onClick={() => setDefault(h.id)}
-                        disabled={busy}
-                        className={cx(
-                          "px-3 py-2 rounded-xl border text-sm disabled:opacity-60",
-                          isDefault ? "border-black/30 bg-black/5" : "border-black/10 hover:bg-black/5"
-                        )}
-                      >
-                        {isDefault ? "Default" : "Set as default"}
-                      </button>
-
-                      {isOwner ? (
-                        <button
-                          onClick={() => deleteHousehold(h.id, h.name)}
-                          disabled={busy}
-                          className="px-3 py-2 rounded-xl border border-red-600/30 bg-red-50 text-red-700 hover:bg-red-100 text-sm font-semibold disabled:opacity-60"
-                        >
-                          Delete
-                        </button>
-                      ) : null}
+                  {/* Members list */}
+                  <div className="pt-3 border-t border-black/10">
+                    <div className="text-sm font-medium text-black/80 mb-2">Members ({members.length}):</div>
+                    <div className="space-y-1">
+                      {members.length > 0 ? (
+                        members.map((member) => (
+                          <div key={member.user_id} className="flex items-center justify-between gap-2 text-sm">
+                            <div className="flex items-center gap-2">
+                              <span className="text-black/70">
+                                {member.email || member.user_id.slice(0, 8) + "..."}
+                              </span>
+                              {member.user_id === session?.user?.id && (
+                                <span className="text-xs px-1.5 py-0.5 rounded border border-black/20 bg-black/5">You</span>
+                              )}
+                            </div>
+                            <span className={cx(
+                              "text-xs px-2 py-0.5 rounded",
+                              member.role === "owner" 
+                                ? "bg-blue-100 text-blue-800 border border-blue-200" 
+                                : "bg-gray-100 text-gray-700 border border-gray-200"
+                            )}>
+                              {member.role ?? "member"}
+                            </span>
+                          </div>
+                        ))
+                      ) : (
+                        <div className="text-sm text-black/60">No members found</div>
+                      )}
                     </div>
                   </div>
 
-                  {busy ? <div className="text-sm text-black/60 mt-2">Working…</div> : null}
+                  {busy && <div className="text-sm text-black/60 mt-3">Working…</div>}
                 </div>
               );
             })}
@@ -385,16 +496,24 @@ export default function HouseholdsPage() {
 
         {/* Switch household modal */}
         <Modal open={switchModalOpen} title="Switch household" onClose={() => setSwitchModalOpen(false)} widthClass="max-w-lg">
-          <div className="text-sm text-black/70">选择一个 household（仅切换 active，不改变 default）：</div>
+          <div className="text-sm text-black/70">Select a household (only switches active, does not change default):</div>
 
           <div className="mt-3 flex flex-col gap-2">
-            {rows
-              .map((r) => normalizeHousehold(r.households))
-              .filter(Boolean)
-              .map((hh) => {
-                const h = hh as HouseholdMini;
+            {(() => {
+              const householdList = rows
+                .map((r) => normalizeHousehold(r.households))
+                .filter(Boolean)
+                .map((hh) => hh as HouseholdMini);
+              
+              // Sort: current first, then others alphabetically
+              const sorted = householdList.sort((a, b) => {
+                if (a.id === activeHouseholdId) return -1;
+                if (b.id === activeHouseholdId) return 1;
+                return a.name.localeCompare(b.name);
+              });
+              
+              return sorted.map((h) => {
                 const isActive = activeHouseholdId === h.id;
-
                 return (
                   <button
                     key={h.id}
@@ -402,7 +521,7 @@ export default function HouseholdsPage() {
                     onClick={() => {
                       writeActiveHouseholdToStorage(h.id);
                       setSwitchModalOpen(false);
-                      setToast("已切换 household");
+                      setToast("Switched household");
                       router.push("/rooms");
                     }}
                     className={cx(
@@ -414,7 +533,8 @@ export default function HouseholdsPage() {
                     {isActive ? <div className="text-xs text-black/60 mt-0.5">Current active</div> : null}
                   </button>
                 );
-              })}
+              });
+            })()}
           </div>
 
           <div className="mt-4 flex items-center justify-end">

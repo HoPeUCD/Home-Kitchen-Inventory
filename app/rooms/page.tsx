@@ -66,8 +66,8 @@ function ConfirmModal({
   open,
   title,
   description,
-  confirmText = '删除',
-  cancelText = '取消',
+  confirmText = 'Delete',
+  cancelText = 'Cancel',
   destructive = true,
   onConfirm,
   onCancel,
@@ -178,17 +178,17 @@ export default function Page() {
         const user = userRes?.user;
         setUserEmail(user?.email ?? '');
 
+        // Always read from localStorage first (highest priority)
         const stored = typeof window !== 'undefined' ? window.localStorage.getItem(ACTIVE_HOUSEHOLD_KEY) : null;
         if (stored) {
           setActiveHouseholdId(stored);
-          return;
-        }
-
-        if (user?.id) {
+          // Don't return early - we still need to load households list
+        } else if (user?.id) {
+          // Only fallback to profile if localStorage is empty
           const { data: profile, error: pErr } = await supabase
             .from('profiles')
             .select('default_household_id')
-            .eq('id', user.id)
+            .eq('user_id', user.id)
             .maybeSingle();
 
           if (!pErr && profile?.default_household_id) {
@@ -203,7 +203,7 @@ export default function Page() {
     init();
   }, []);
 
-  // load households
+  // load households list (for switch modal)
   useEffect(() => {
     const loadHouseholds = async () => {
       const { data: mData, error: mErr } = await supabase
@@ -231,7 +231,10 @@ export default function Page() {
 
       setHouseholds(dedup);
 
-      if (!activeHouseholdId && dedup.length > 0) {
+      // Only set default if activeHouseholdId is still null after all initialization
+      // Check localStorage again to make sure we don't override
+      const storedCheck = typeof window !== 'undefined' ? window.localStorage.getItem(ACTIVE_HOUSEHOLD_KEY) : null;
+      if (!activeHouseholdId && !storedCheck && dedup.length > 0) {
         const first = dedup[0].id;
         setActiveHouseholdId(first);
         window.localStorage.setItem(ACTIVE_HOUSEHOLD_KEY, first);
@@ -281,7 +284,7 @@ export default function Page() {
     setRefreshing(true);
     try {
       await loadRooms({ silent: true });
-      setToast('已刷新');
+      setToast('Refreshed');
     } finally {
       setRefreshing(false);
     }
@@ -296,7 +299,7 @@ export default function Page() {
     window.localStorage.setItem(ACTIVE_HOUSEHOLD_KEY, hid);
     setActiveHouseholdId(hid);
     setSwitchHouseholdOpen(false);
-    setToast('已切换 household');
+    setToast('Switched household');
   };
 
   // room CRUD
@@ -321,12 +324,12 @@ export default function Page() {
 
     if (error) {
       console.error(error);
-      setToast('新增 room 失败');
+      setToast('Failed to create room');
       return;
     }
 
     setAddRoomOpen(false);
-    setToast('已新增 room');
+    setToast('Room created');
     await loadRooms({ silent: true });
   };
 
@@ -344,13 +347,13 @@ export default function Page() {
     const { error } = await supabase.from('rooms').update({ name }).eq('id', targetRoomId);
     if (error) {
       console.error(error);
-      setToast('更新 room 失败');
+      setToast('Failed to update room');
       return;
     }
 
     setEditRoomOpen(false);
     setTargetRoomId(null);
-    setToast('已更新 room');
+    setToast('Room updated');
     await loadRooms({ silent: true });
   };
 
@@ -367,13 +370,13 @@ export default function Page() {
     const { error } = await supabase.from('rooms').delete().eq('id', targetRoomId);
     if (error) {
       console.error(error);
-      setToast('删除 room 失败');
+      setToast('Failed to delete room');
       return;
     }
 
     setDeleteRoomConfirmOpen(false);
     setTargetRoomId(null);
-    setToast('已删除 room');
+    setToast('Room deleted');
     await loadRooms({ silent: true });
   };
 
@@ -417,9 +420,6 @@ export default function Page() {
             ) : filteredRooms.length === 0 ? (
               <div className={cx('rounded-2xl border p-5', THEME.borderSoft, THEME.oatCard)}>
                 <div className="text-sm text-black/70">No rooms yet.</div>
-                <button type="button" className="mt-3 px-3 py-2 rounded-xl border border-black bg-black text-white hover:bg-black/90 text-sm" onClick={openAddRoom}>
-                  Create your first room
-                </button>
               </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -454,22 +454,30 @@ export default function Page() {
 
         {/* Switch household */}
         <Modal open={switchHouseholdOpen} title="Switch household" onClose={() => setSwitchHouseholdOpen(false)} widthClass="max-w-lg">
-          <div className="text-sm text-black/70">选择一个 household：</div>
+          <div className="text-sm text-black/70">Select a household:</div>
           <div className="mt-3 flex flex-col gap-2">
-            {households.map((h) => (
-              <button
-                key={h.id}
-                type="button"
-                onClick={() => doSwitchHousehold(h.id)}
-                className={cx(
-                  'px-3 py-2 rounded-xl border text-left hover:bg-black/5',
-                  h.id === activeHouseholdId ? 'border-black/30 bg-black/5' : 'border-black/10'
-                )}
-              >
-                <div className="text-sm">{h.name}</div>
-                {h.id === activeHouseholdId && <div className="text-xs text-black/60 mt-0.5">Current</div>}
-              </button>
-            ))}
+            {(() => {
+              // Sort: current first, then others alphabetically
+              const sorted = [...households].sort((a, b) => {
+                if (a.id === activeHouseholdId) return -1;
+                if (b.id === activeHouseholdId) return 1;
+                return a.name.localeCompare(b.name);
+              });
+              return sorted.map((h) => (
+                <button
+                  key={h.id}
+                  type="button"
+                  onClick={() => doSwitchHousehold(h.id)}
+                  className={cx(
+                    'px-3 py-2 rounded-xl border text-left hover:bg-black/5',
+                    h.id === activeHouseholdId ? 'border-black/30 bg-black/5' : 'border-black/10'
+                  )}
+                >
+                  <div className="text-sm">{h.name}</div>
+                  {h.id === activeHouseholdId && <div className="text-xs text-black/60 mt-0.5">Current</div>}
+                </button>
+              ));
+            })()}
           </div>
         </Modal>
 
@@ -514,7 +522,7 @@ export default function Page() {
         <ConfirmModal
           open={deleteRoomConfirmOpen}
           title="Delete room?"
-          description="删除 room 可能会影响该 room 下的 columns/cells/items（取决于数据库外键/级联设置）。该操作不可撤销。"
+          description="Deleting this room may affect columns/cells/items under it (depending on database foreign key/cascade settings). This action cannot be undone."
           onCancel={() => {
             setDeleteRoomConfirmOpen(false);
             setTargetRoomId(null);

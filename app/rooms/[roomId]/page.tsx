@@ -53,18 +53,19 @@ function daysUntil(dateOnly: string) {
 function expiryChipClass(expires_at: string | null) {
   if (!expires_at) return 'bg-white border border-black/10';
   const d = daysUntil(expires_at.slice(0, 10));
-  if (d < 0) return 'bg-red-500/20 border border-red-500/30';
-  if (d <= 7) return 'bg-orange-500/20 border border-orange-500/30';
-  if (d <= 30) return 'bg-yellow-500/20 border border-yellow-500/30';
-  return 'bg-emerald-500/15 border border-emerald-500/25';
+  if (d < 0) return 'bg-red-500/20 border border-red-500/30'; // Expired: red
+  if (d <= 30) return 'bg-yellow-500/20 border border-yellow-500/30'; // Within 30 days: yellow
+  return 'bg-white border border-black/10'; // Others: no background
 }
 function formatExpiryLabel(expires_at: string | null) {
   if (!expires_at) return '';
   const dateOnly = expires_at.slice(0, 10);
   const d = daysUntil(dateOnly);
-  if (d < 0) return `已过期 ${Math.abs(d)}d`;
-  if (d === 0) return '今天到期';
-  return `${d}d`;
+  // Only show expiry info for items within 30 days
+  if (d < 0) return `Expired ${Math.abs(d)}d ago`;
+  if (d === 0) return 'Expires today';
+  if (d <= 30) return `${d}d`;
+  return ''; // Don't show for items expiring after 30 days
 }
 function toDateOnly(expires_at: string | null) {
   if (!expires_at) return '';
@@ -113,8 +114,8 @@ function ConfirmModal({
   open,
   title,
   description,
-  confirmText = '删除',
-  cancelText = '取消',
+  confirmText = 'Delete',
+  cancelText = 'Cancel',
   destructive = true,
   onConfirm,
   onCancel,
@@ -203,6 +204,15 @@ export default function Page() {
   const [columns, setColumns] = useState<Column[]>([]);
   const [cellsByColumn, setCellsByColumn] = useState<Record<UUID, Cell[]>>({});
   const [itemsByCell, setItemsByCell] = useState<Record<UUID, ItemV2[]>>({});
+  
+  // All items from all households for search
+  const [allHouseholdItems, setAllHouseholdItems] = useState<ItemV2[]>([]);
+  // All rooms from all households (for search results)
+  const [allHouseholdRooms, setAllHouseholdRooms] = useState<Room[]>([]);
+  // All columns from all households (for search results)
+  const [allHouseholdColumns, setAllHouseholdColumns] = useState<Column[]>([]);
+  // All cells from all households (for search results)
+  const [allHouseholdCells, setAllHouseholdCells] = useState<Cell[]>([]);
 
   // UI state
   const [loading, setLoading] = useState(true);
@@ -221,6 +231,9 @@ export default function Page() {
 
   // Column menu + modals
   const [columnMenuOpenId, setColumnMenuOpenId] = useState<UUID | null>(null);
+  
+  // Cell menu + modals
+  const [cellMenuOpenId, setCellMenuOpenId] = useState<UUID | null>(null);
   const [addColumnOpen, setAddColumnOpen] = useState(false);
   const [editColumnOpen, setEditColumnOpen] = useState(false);
   const [deleteColumnConfirmOpen, setDeleteColumnConfirmOpen] = useState(false);
@@ -238,8 +251,7 @@ export default function Page() {
   // Item modal
   const [itemModalOpen, setItemModalOpen] = useState(false);
   const [itemMode, setItemMode] = useState<'add' | 'edit'>('add');
-  const [itemDeleteConfirmOpen, setItemDeleteConfirmOpen] = useState(false);
-  const [targetItemId, setTargetItemId] = useState<UUID | null>(null);
+  const [currentImageUrl, setCurrentImageUrl] = useState<string>('');
 
   const [itemDraft, setItemDraft] = useState<{
     id: UUID | null;
@@ -298,7 +310,7 @@ export default function Page() {
           const { data: profile, error: pErr } = await supabase
             .from('profiles')
             .select('default_household_id')
-            .eq('id', user.id)
+            .eq('user_id', user.id)
             .maybeSingle();
 
           if (!pErr && profile?.default_household_id) {
@@ -346,6 +358,57 @@ export default function Page() {
         setActiveHouseholdId(first);
         window.localStorage.setItem(ACTIVE_HOUSEHOLD_KEY, first);
       }
+
+      // Load all items, rooms, columns, and cells from all households for search
+      if (dedup.length > 0) {
+        const householdIds = dedup.map((h) => h.id);
+        
+        // Load all items
+        const { data: allItemsData, error: itemsErr } = await supabase
+          .from('items_v2')
+          .select('id, household_id, cell_id, name, qty, expires_at, image_path')
+          .in('household_id', householdIds);
+
+        if (!itemsErr && allItemsData) {
+          setAllHouseholdItems(allItemsData as ItemV2[]);
+        }
+
+        // Load all rooms
+        const { data: allRoomsData, error: roomsErr } = await supabase
+          .from('rooms')
+          .select('id, household_id, name, position')
+          .in('household_id', householdIds);
+
+        if (!roomsErr && allRoomsData) {
+          setAllHouseholdRooms(allRoomsData as Room[]);
+        }
+
+        // Load all columns (via rooms)
+        if (allRoomsData && allRoomsData.length > 0) {
+          const roomIds = allRoomsData.map((r: any) => r.id);
+          const { data: allColumnsData, error: colsErr } = await supabase
+            .from('room_columns')
+            .select('id, room_id, name, position')
+            .in('room_id', roomIds);
+
+          if (!colsErr && allColumnsData) {
+            setAllHouseholdColumns(allColumnsData as Column[]);
+          }
+
+          // Load all cells (need to get column IDs first)
+          if (allColumnsData && allColumnsData.length > 0) {
+            const colIds = allColumnsData.map((c: any) => c.id);
+            const { data: allCellsData, error: cellsErr } = await supabase
+              .from('room_cells')
+              .select('id, column_id, code, position')
+              .in('column_id', colIds);
+
+            if (!cellsErr && allCellsData) {
+              setAllHouseholdCells(allCellsData as Cell[]);
+            }
+          }
+        }
+      }
     };
 
     loadHouseholds();
@@ -366,27 +429,47 @@ export default function Page() {
     if (!silent) setLoading(true);
 
     try {
-      if (!activeHouseholdId) return;
-
-      // rooms for location selector
-      const { data: roomsData, error: roomsErr } = await supabase
-        .from('rooms')
-        .select('id, household_id, name, position')
-        .eq('household_id', activeHouseholdId)
-        .order('position', { ascending: true });
-
-      if (roomsErr) console.error(roomsErr);
-      setRoomsInHousehold((roomsData as Room[]) ?? []);
-
-      // current room
+      // First, load the current room to check its household_id
       const { data: roomData, error: roomErr } = await supabase
         .from('rooms')
         .select('id, household_id, name, position')
         .eq('id', roomId)
         .maybeSingle();
 
-      if (roomErr) console.error(roomErr);
-      setRoom((roomData as Room) ?? null);
+      if (roomErr) {
+        console.error(roomErr);
+        if (!silent) setLoading(false);
+        return;
+      }
+
+      const currentRoom = (roomData as Room) ?? null;
+      setRoom(currentRoom);
+
+      // Determine the correct household_id: use room's household_id if available, otherwise use activeHouseholdId
+      let effectiveHouseholdId = activeHouseholdId;
+      if (currentRoom?.household_id) {
+        effectiveHouseholdId = currentRoom.household_id;
+        // If it differs, update state and localStorage
+        if (currentRoom.household_id !== activeHouseholdId) {
+          setActiveHouseholdId(currentRoom.household_id);
+          window.localStorage.setItem(ACTIVE_HOUSEHOLD_KEY, currentRoom.household_id);
+        }
+      }
+
+      if (!effectiveHouseholdId) {
+        if (!silent) setLoading(false);
+        return;
+      }
+
+      // rooms for location selector (use effectiveHouseholdId)
+      const { data: roomsData, error: roomsErr } = await supabase
+        .from('rooms')
+        .select('id, household_id, name, position')
+        .eq('household_id', effectiveHouseholdId)
+        .order('position', { ascending: true });
+
+      if (roomsErr) console.error(roomsErr);
+      setRoomsInHousehold((roomsData as Room[]) ?? []);
 
       // columns
       const { data: colData, error: cErr } = await supabase
@@ -434,7 +517,7 @@ export default function Page() {
       const { data: itemData, error: iErr } = await supabase
         .from('items_v2')
         .select('id, household_id, cell_id, name, qty, expires_at, image_path')
-        .eq('household_id', activeHouseholdId)
+        .eq('household_id', effectiveHouseholdId)
         .in('cell_id', cellIds)
         .order('name', { ascending: true });
 
@@ -464,7 +547,8 @@ export default function Page() {
     setRefreshing(true);
     try {
       await loadAll({ silent: true });
-      setToast('已刷新');
+      await refreshSearchItems();
+      setToast('Refreshed');
     } finally {
       setRefreshing(false);
     }
@@ -480,10 +564,9 @@ export default function Page() {
 
   const doSwitchHousehold = (hid: UUID) => {
     window.localStorage.setItem(ACTIVE_HOUSEHOLD_KEY, hid);
-    setActiveHouseholdId(hid);
     setSwitchHouseholdOpen(false);
-    setToast('已切换 household');
-    router.push('/rooms');
+    // Force full page reload to ensure /rooms page reads the updated localStorage
+    window.location.href = '/rooms';
   };
 
   // derived maps
@@ -509,26 +592,65 @@ export default function Page() {
     return m;
   }, [cellsByColumn, columnById]);
 
+  // Maps for search results (using all household data)
+  const allColumnById = useMemo(() => {
+    const m = new Map<UUID, Column>();
+    allHouseholdColumns.forEach((c) => m.set(c.id, c));
+    return m;
+  }, [allHouseholdColumns]);
+
+  const allCellById = useMemo(() => {
+    const m = new Map<UUID, Cell>();
+    allHouseholdCells.forEach((c) => m.set(c.id, c));
+    return m;
+  }, [allHouseholdCells]);
+
+  const allColumnToRoom = useMemo(() => {
+    const m = new Map<UUID, Room>();
+    allHouseholdColumns.forEach((col) => {
+      const room = allHouseholdRooms.find((r) => r.id === col.room_id);
+      if (room) m.set(col.id, room);
+    });
+    return m;
+  }, [allHouseholdColumns, allHouseholdRooms]);
+
+  const allCellToColumn = useMemo(() => {
+    const m = new Map<UUID, Column>();
+    allHouseholdCells.forEach((cell) => {
+      const col = allColumnById.get(cell.column_id);
+      if (col) m.set(cell.id, col);
+    });
+    return m;
+  }, [allHouseholdCells, allColumnById]);
+
+  // Items in current room (for display in cells)
   const allItemsFlat = useMemo(() => {
     const out: ItemV2[] = [];
     Object.values(itemsByCell).forEach((arr) => arr.forEach((it) => out.push(it)));
     return out;
   }, [itemsByCell]);
 
+  // Use all household items for search (across all households the user is in)
   const fuse = useMemo(() => {
-    return new Fuse(allItemsFlat, {
+    return new Fuse(allHouseholdItems, {
       keys: ['name'],
       threshold: 0.35,
       ignoreLocation: true,
       minMatchCharLength: 2,
     });
-  }, [allItemsFlat]);
-
-  const matchedItemIds = useMemo(() => {
+  }, [allHouseholdItems]);
+  
+  // Search results from all households
+  const searchResults = useMemo(() => {
     const q = search.trim();
-    if (!q) return new Set<string>();
-    return new Set(fuse.search(q).slice(0, 400).map((r) => r.item.id));
+    if (!q) return [];
+    return fuse.search(q).slice(0, 100).map((r) => r.item);
   }, [search, fuse]);
+
+  // Matched item IDs from search (for filtering cells)
+  const matchedItemIds = useMemo(() => {
+    return new Set(searchResults.map((item) => item.id));
+  }, [searchResults]);
 
   const expiring0to7 = useMemo(() => {
     return allItemsFlat
@@ -549,8 +671,11 @@ export default function Page() {
   }, [allItemsFlat]);
 
   const shouldShowItem = (itemId: UUID) => {
+    // If no search query, show all items
     if (!search.trim()) return true;
+    // If "only show matches" is not checked, show all items
     if (!onlyShowMatches) return true;
+    // Otherwise, only show matched items
     return matchedItemIds.has(itemId);
   };
 
@@ -580,6 +705,22 @@ export default function Page() {
     return () => document.removeEventListener('mousedown', handler);
   }, [columnMenuOpenId]);
 
+  // cell menu click-outside (simple)
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (!cellMenuOpenId) return;
+      const target = e.target as Node | null;
+      const menu = document.getElementById(`cell-menu-${cellMenuOpenId}`);
+      const btn = document.getElementById(`cell-menu-btn-${cellMenuOpenId}`);
+      if (!menu || !target) return;
+      if (menu.contains(target)) return;
+      if (btn && btn.contains(target)) return;
+      setCellMenuOpenId(null);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [cellMenuOpenId]);
+
   // ----- columns CRUD -----
   const openAddColumn = () => {
     setColumnDraftName('');
@@ -596,11 +737,11 @@ export default function Page() {
     const { error } = await supabase.from('room_columns').insert({ room_id: roomId, name, position });
     if (error) {
       console.error(error);
-      setToast('新增 column 失败');
+      setToast('Failed to create column');
       return;
     }
     setAddColumnOpen(false);
-    setToast('已新增 column');
+    setToast('Column created');
     await loadAll({ silent: true });
   };
 
@@ -618,12 +759,12 @@ export default function Page() {
     const { error } = await supabase.from('room_columns').update({ name }).eq('id', targetColumnId);
     if (error) {
       console.error(error);
-      setToast('更新 column 失败');
+      setToast('Failed to update column');
       return;
     }
     setEditColumnOpen(false);
     setTargetColumnId(null);
-    setToast('已更新 column');
+    setToast('Column updated');
     await loadAll({ silent: true });
   };
 
@@ -641,12 +782,12 @@ export default function Page() {
     const { error } = await supabase.from('room_columns').delete().eq('id', targetColumnId);
     if (error) {
       console.error(error);
-      setToast('删除 column 失败');
+      setToast('Failed to delete column');
       return;
     }
     setDeleteColumnConfirmOpen(false);
     setTargetColumnId(null);
-    setToast(`已删除 column（影响 ${cells.length} cells / ${itemCount} items）`);
+    setToast(`Column deleted (affected ${cells.length} cells / ${itemCount} items)`);
     await loadAll({ silent: true });
   };
 
@@ -669,12 +810,12 @@ export default function Page() {
     const { error } = await supabase.from('room_cells').insert({ column_id: cellParentColumnId, code, position });
     if (error) {
       console.error(error);
-      setToast('新增 cell 失败');
+      setToast('Failed to create cell');
       return;
     }
     setAddCellOpen(false);
     setCellParentColumnId(null);
-    setToast('已新增 cell');
+    setToast('Cell created');
     await loadAll({ silent: true });
   };
 
@@ -692,12 +833,12 @@ export default function Page() {
     const { error } = await supabase.from('room_cells').update({ code }).eq('id', targetCellId);
     if (error) {
       console.error(error);
-      setToast('更新 cell 失败');
+      setToast('Failed to update cell');
       return;
     }
     setEditCellOpen(false);
     setTargetCellId(null);
-    setToast('已更新 cell');
+    setToast('Cell updated');
     await loadAll({ silent: true });
   };
 
@@ -713,20 +854,86 @@ export default function Page() {
     const { error } = await supabase.from('room_cells').delete().eq('id', targetCellId);
     if (error) {
       console.error(error);
-      setToast('删除 cell 失败');
+      setToast('Failed to delete cell');
       return;
     }
     setDeleteCellConfirmOpen(false);
     setTargetCellId(null);
-    setToast(`已删除 cell（影响 ${itemCount} items）`);
+    setToast(`Cell deleted (affected ${itemCount} items)`);
     await loadAll({ silent: true });
   };
 
   // ----- item helpers -----
   const getPublicImageUrl = (path: string | null) => {
     if (!path) return '';
+    // For public buckets, getPublicUrl works directly
+    // If bucket is private, this will need to be changed to createSignedUrl
     const { data } = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(path);
     return data?.publicUrl ?? '';
+  };
+
+  // Refresh search items list (all items, rooms, columns, cells from all households)
+  const refreshSearchItems = async () => {
+    if (households.length === 0) return;
+    const householdIds = households.map((h) => h.id);
+    
+    // Load all items
+    const { data: allItemsData } = await supabase
+      .from('items_v2')
+      .select('id, household_id, cell_id, name, qty, expires_at, image_path')
+      .in('household_id', householdIds);
+    if (allItemsData) setAllHouseholdItems(allItemsData as ItemV2[]);
+
+    // Load all rooms
+    const { data: allRoomsData } = await supabase
+      .from('rooms')
+      .select('id, household_id, name, position')
+      .in('household_id', householdIds);
+    if (allRoomsData) setAllHouseholdRooms(allRoomsData as Room[]);
+
+    // Load all columns
+    if (allRoomsData && allRoomsData.length > 0) {
+      const roomIds = allRoomsData.map((r: any) => r.id);
+      const { data: allColumnsData } = await supabase
+        .from('room_columns')
+        .select('id, room_id, name, position')
+        .in('room_id', roomIds);
+      if (allColumnsData) setAllHouseholdColumns(allColumnsData as Column[]);
+
+      // Load all cells
+      if (allColumnsData && allColumnsData.length > 0) {
+        const colIds = allColumnsData.map((c: any) => c.id);
+        const { data: allCellsData } = await supabase
+          .from('room_cells')
+          .select('id, column_id, code, position')
+          .in('column_id', colIds);
+        if (allCellsData) setAllHouseholdCells(allCellsData as Cell[]);
+      }
+    }
+  };
+
+  // Get signed URL for images (works for both public and private buckets)
+  const getImageUrl = async (path: string | null): Promise<string> => {
+    if (!path) return '';
+    try {
+      // Try signed URL first (works for private buckets)
+      const { data: signedData, error: signedError } = await supabase.storage
+        .from(STORAGE_BUCKET)
+        .createSignedUrl(path, 3600); // 1 hour expiry
+      
+      if (!signedError && signedData?.signedUrl) {
+        return signedData.signedUrl;
+      }
+      
+      // Fallback to public URL
+      const { data: publicData } = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(path);
+      return publicData?.publicUrl ?? '';
+    } catch (error) {
+      console.error('Error getting image URL:', error);
+      // Fallback to public URL
+      const { data: publicData } = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(path);
+      return publicData?.publicUrl ?? '';
+    }
   };
 
   const ensureCellsForRoomLoaded = async (rid: UUID) => {
@@ -792,13 +999,15 @@ export default function Page() {
     setItemDraft({
       id: null,
       name: '',
-      qty: '',
+      qty: '1', // Default to 1 (required)
       expires_at: '',
       imageFile: null,
       image_path: null,
       room_id: defaultRoomId,
       cell_id: defaultCellId,
     });
+
+    setCurrentImageUrl(''); // Reset image URL for new item
 
     setItemModalOpen(true);
     window.setTimeout(() => itemNameInputRef.current?.focus(), 50);
@@ -810,58 +1019,65 @@ export default function Page() {
     const currentRoomId = room?.id ?? null;
     if (currentRoomId) await ensureCellsForRoomLoaded(currentRoomId);
 
+    const imagePath = item.image_path ?? null;
     setItemDraft({
       id: item.id,
       name: item.name ?? '',
-      qty: item.qty === null || item.qty === undefined ? '' : String(item.qty),
+      qty: item.qty === null || item.qty === undefined ? '1' : String(item.qty), // Default to 1 if empty
       expires_at: toDateOnly(item.expires_at),
       imageFile: null,
-      image_path: item.image_path ?? null,
+      image_path: imagePath,
       room_id: currentRoomId,
       cell_id: item.cell_id,
     });
 
+    // Load image URL asynchronously
+    if (imagePath) {
+      const url = await getImageUrl(imagePath);
+      setCurrentImageUrl(url);
+    } else {
+      setCurrentImageUrl('');
+    }
+
     setItemModalOpen(true);
   };
 
-  const openDeleteItem = (itemId: UUID) => {
-    setTargetItemId(itemId);
-    setItemDeleteConfirmOpen(true);
-  };
-
-  const confirmDeleteItem = async () => {
-    if (!targetItemId) return;
-
-    const { error } = await supabase.from('items_v2').delete().eq('id', targetItemId);
+  const deleteItem = async (itemId: UUID) => {
+    const { error } = await supabase.from('items_v2').delete().eq('id', itemId);
     if (error) {
       console.error(error);
-      setToast('删除 item 失败');
+      setToast('Failed to delete item');
       return;
     }
-    setItemDeleteConfirmOpen(false);
-    setTargetItemId(null);
-    setToast('已删除 item');
+    setToast('Item deleted');
     await loadAll({ silent: true });
+    await refreshSearchItems();
   };
 
   const saveItem = async () => {
     const name = itemDraft.name.trim();
     if (!name) {
-      setToast('Name 不能为空');
+      setToast('Name cannot be empty');
       return;
     }
     if (!activeHouseholdId) {
-      setToast('未选择 household');
+      setToast('No household selected');
       return;
     }
     if (!itemDraft.cell_id) {
-      setToast('请选择 location（cell）');
+      setToast('Please select a location (cell)');
       return;
     }
 
-    const qty = itemDraft.qty.trim() === '' ? null : Number(itemDraft.qty);
-    if (qty !== null && (!Number.isFinite(qty) || qty < 0)) {
-      setToast('Qty 不合法');
+    // qty is required, default to 1
+    const qtyStr = itemDraft.qty.trim();
+    if (!qtyStr) {
+      setToast('Quantity cannot be empty');
+      return;
+    }
+    const qty = Number(qtyStr);
+    if (!Number.isFinite(qty) || qty < 1) {
+      setToast('Quantity must be a number greater than or equal to 1');
       return;
     }
 
@@ -879,7 +1095,7 @@ export default function Page() {
       });
       if (upErr) {
         console.error(upErr);
-        setToast('图片上传失败');
+        setToast('Failed to upload image');
         return;
       }
       image_path = fileName;
@@ -890,19 +1106,20 @@ export default function Page() {
         household_id: activeHouseholdId,
         cell_id: itemDraft.cell_id,
         name,
-        qty,
+        qty: qty, // Required, always a number >= 1
         expires_at,
         image_path,
       });
 
       if (error) {
         console.error(error);
-        setToast('新增 item 失败');
+        setToast('Failed to create item');
         return;
       }
       setItemModalOpen(false);
-      setToast('已新增 item');
+      setToast('Item created');
       await loadAll({ silent: true });
+      await refreshSearchItems();
       return;
     }
 
@@ -921,12 +1138,13 @@ export default function Page() {
 
     if (error) {
       console.error(error);
-      setToast('更新 item 失败');
+        setToast('Failed to update item');
       return;
     }
     setItemModalOpen(false);
-    setToast('已更新 item');
+    setToast('Item updated');
     await loadAll({ silent: true });
+    await refreshSearchItems();
   };
 
   const renderLocationLabel = (cellId: UUID) => {
@@ -941,7 +1159,7 @@ export default function Page() {
         type="button"
         onClick={() => jumpToCell(cellId)}
         className="text-xs px-2 py-1 rounded-lg border border-black/10 hover:bg-black/5"
-        title="定位到该 cell"
+        title="Jump to cell"
       >
         {colName || 'Column'}{cellName ? ` / ${cellName}` : ''}
       </button>
@@ -960,62 +1178,96 @@ export default function Page() {
 
         <div className="p-3">
           <div className="flex flex-col gap-2">
-            {items.map((it) => (
-              <div key={it.id} className="flex items-center justify-between gap-3">
-                <div className="min-w-0 flex items-center gap-2">
-                  <div className={cx('px-3 py-2 rounded-2xl border min-w-0', expiryChipClass(it.expires_at))}>
-                    <div className="flex items-center gap-2">
-                      <div className="truncate text-sm" style={fontNunito}>
+            {items.map((it) => {
+              const expiryLabel = formatExpiryLabel(it.expires_at);
+              const cell = cellById.get(it.cell_id);
+              const col = cellToColumn.get(it.cell_id);
+              const locationText = col?.name && cell?.code ? `${col.name} / ${cell.code}` : cell?.code || col?.name || '';
+              
+              return (
+                <div
+                  key={it.id}
+                  className="flex items-center justify-between gap-3 px-2 py-1.5 rounded-lg hover:bg-black/5 cursor-pointer"
+                  onClick={() => {
+                    // Jump to cell and highlight
+                    jumpToCell(it.cell_id);
+                    // Focus on the item in the cell after a short delay
+                    setTimeout(() => {
+                      const itemEl = document.querySelector(`[data-item-id="${it.id}"]`);
+                      if (itemEl) {
+                        itemEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        // Add a highlight effect
+                        itemEl.classList.add('ring-2', 'ring-blue-500/50');
+                        setTimeout(() => {
+                          itemEl.classList.remove('ring-2', 'ring-blue-500/50');
+                        }, 2000);
+                      }
+                    }, 600);
+                  }}
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-sm truncate" style={fontNunito}>
                         {it.name}
-                      </div>
-                      {it.expires_at && (
-                        <div className="text-[11px] text-black/70 whitespace-nowrap">
-                          {formatExpiryLabel(it.expires_at)}
-                        </div>
-                      )}
-                    </div>
-                    <div className="mt-1 flex items-center gap-2">
-                      {renderLocationLabel(it.cell_id)}
+                      </span>
                       {it.qty !== null && it.qty !== undefined && (
                         <span className="text-xs text-black/70">× {it.qty}</span>
                       )}
+                      {expiryLabel && (
+                        <span className="text-xs text-black/70 whitespace-nowrap">{expiryLabel}</span>
+                      )}
+                      {locationText && (
+                        <span className="text-xs text-black/60 whitespace-nowrap">· {locationText}</span>
+                      )}
                     </div>
                   </div>
-                </div>
 
-                <div className="flex items-center gap-2">
-                  <SmallIconButton title="Edit item" onClick={() => openEditItem(it)}>
-                    ✏️
-                  </SmallIconButton>
-                  <SmallIconButton title="Delete item" onClick={() => openDeleteItem(it.id)} className="hover:bg-red-50">
-                    🗑️
-                  </SmallIconButton>
+                  <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                    <SmallIconButton title="Edit item" onClick={() => openEditItem(it)}>
+                      ✏️
+                    </SmallIconButton>
+                    <SmallIconButton title="Delete item" onClick={() => openDeleteItem(it.id)} className="hover:bg-red-50">
+                      🗑️
+                    </SmallIconButton>
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       </div>
     );
   };
 
-  // room row: All rooms + Add column
+  // room row: Room name with All rooms button + Add column
   const RoomHeader = () => (
     <div className="mt-4 flex items-center justify-between gap-3">
-      <div className="min-w-0">
+      <div className="min-w-0 flex items-center gap-2">
         <div className="text-xl font-semibold truncate">{room?.name ?? 'Room'}</div>
+        <button
+          type="button"
+          className={cx(
+            'px-2 py-1 rounded-lg border text-sm hover:bg-black/5 flex items-center gap-1',
+            'border-black/10'
+          )}
+          onClick={() => {
+            // Use the current room's household_id to ensure we stay in the same household
+            const householdIdToUse = room?.household_id || activeHouseholdId;
+            if (householdIdToUse) {
+              window.localStorage.setItem(ACTIVE_HOUSEHOLD_KEY, householdIdToUse);
+              // Update state immediately to ensure consistency
+              setActiveHouseholdId(householdIdToUse);
+            }
+            router.push('/rooms');
+          }}
+          title="All rooms"
+        >
+          <span>All rooms</span>
+          <span className="text-xs text-black/60">▾</span>
+        </button>
       </div>
 
       <div className="flex items-center gap-2">
-        <button
-          type="button"
-          className="px-3 py-2 rounded-xl border border-black/10 hover:bg-black/5 text-sm"
-          onClick={() => router.push('/rooms')}
-          title="All rooms"
-        >
-          All rooms
-        </button>
-
         <button
           type="button"
           className={cx('px-3 py-2 rounded-xl border text-sm hover:bg-black/5', THEME.blueBorderSoft)}
@@ -1063,17 +1315,85 @@ export default function Page() {
               </div>
 
               <div className="mt-3 flex items-center justify-between gap-3">
-                <label className="flex items-center gap-2 text-sm">
+                <label className="flex items-center gap-2 text-sm" title="When enabled, only matched items are shown in cells below">
                   <input type="checkbox" checked={onlyShowMatches} onChange={(e) => setOnlyShowMatches(e.target.checked)} />
-                  只显示匹配结果
+                  Hide unmatched items in cells
                 </label>
 
                 {search.trim() && (
                   <div className="text-xs text-black/60">
-                    匹配：{matchedItemIds.size} items
+                    Found: {searchResults.length} items
                   </div>
                 )}
               </div>
+
+              {/* Search results list */}
+              {search.trim() && searchResults.length > 0 && (
+                <div className="mt-3 pt-3 border-t border-black/10">
+                  <div className="flex flex-col gap-2">
+                    {searchResults.map((item) => {
+                      const household = households.find((h) => h.id === item.household_id);
+                      // Use all household data for search results
+                      const cell = allCellById.get(item.cell_id) || cellById.get(item.cell_id);
+                      const col = allCellToColumn.get(item.cell_id) || cellToColumn.get(item.cell_id);
+                      const room = col ? (allColumnToRoom.get(col.id) || (col.room_id ? roomsInHousehold.find((r) => r.id === col.room_id) : null)) : null;
+                      const isInCurrentRoom = !!cellById.get(item.cell_id) && !!cellToColumn.get(item.cell_id);
+                      
+                      // Build location text: room / column / cell
+                      let locationParts: string[] = [];
+                      if (room) locationParts.push(room.name);
+                      if (col) locationParts.push(col.name);
+                      if (cell) locationParts.push(cell.code);
+                      const locationText = locationParts.join(' / ');
+                      
+                      return (
+                        <div
+                          key={item.id}
+                          className="flex items-center gap-3 px-2 py-1.5 rounded-lg hover:bg-black/5 cursor-pointer"
+                          onClick={() => {
+                            if (isInCurrentRoom) {
+                              jumpToCell(item.cell_id);
+                              setTimeout(() => {
+                                const itemEl = document.querySelector(`[data-item-id="${item.id}"]`);
+                                if (itemEl) {
+                                  itemEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                                  itemEl.classList.add('ring-2', 'ring-blue-500/50');
+                                  setTimeout(() => {
+                                    itemEl.classList.remove('ring-2', 'ring-blue-500/50');
+                                  }, 2000);
+                                }
+                              }, 600);
+                            }
+                          }}
+                        >
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="text-sm truncate" style={fontNunito}>
+                                {item.name}
+                              </span>
+                              {item.qty !== null && item.qty !== undefined && (
+                                <span className="text-xs text-black/70">× {item.qty}</span>
+                              )}
+                              {household && (
+                                <span className="text-xs text-black/60 whitespace-nowrap">· {household.name}</span>
+                              )}
+                              {locationText && (
+                                <span className="text-xs text-black/60 whitespace-nowrap">· {locationText}</span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {search.trim() && searchResults.length === 0 && (
+                <div className="mt-3 pt-3 border-t border-black/10 text-sm text-black/60">
+                  No items found
+                </div>
+              )}
             </div>
 
             <div className="flex flex-col gap-3">
@@ -1189,12 +1509,47 @@ export default function Page() {
                                     <SmallIconButton title="Add item" onClick={() => openAddItem(cell.id)}>
                                       ➕
                                     </SmallIconButton>
-                                    <SmallIconButton title="Edit cell" onClick={() => openEditCell(cell)}>
-                                      ✏️
-                                    </SmallIconButton>
-                                    <SmallIconButton title="Delete cell" onClick={() => openDeleteCell(cell.id)} className="hover:bg-red-50">
-                                      🗑️
-                                    </SmallIconButton>
+                                    
+                                    <div className="relative">
+                                      <button
+                                        id={`cell-menu-btn-${cell.id}`}
+                                        type="button"
+                                        className="h-8 w-8 inline-flex items-center justify-center rounded-lg border border-black/10 hover:bg-black/5 text-sm"
+                                        title="Cell actions"
+                                        aria-label="Cell actions"
+                                        onClick={() => setCellMenuOpenId((v) => (v === cell.id ? null : cell.id))}
+                                      >
+                                        ⚙️
+                                      </button>
+
+                                      {cellMenuOpenId === cell.id && (
+                                        <div
+                                          id={`cell-menu-${cell.id}`}
+                                          className="absolute right-0 mt-2 w-44 rounded-2xl border border-black/10 bg-white shadow-lg overflow-hidden z-[70]"
+                                        >
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              setCellMenuOpenId(null);
+                                              openEditCell(cell);
+                                            }}
+                                            className="w-full text-left px-3 py-2 text-sm hover:bg-black/5"
+                                          >
+                                            ✏️ Edit
+                                          </button>
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              setCellMenuOpenId(null);
+                                              openDeleteCell(cell.id);
+                                            }}
+                                            className="w-full text-left px-3 py-2 text-sm hover:bg-red-50 text-red-700"
+                                          >
+                                            🗑️ Delete
+                                          </button>
+                                        </div>
+                                      )}
+                                    </div>
                                   </div>
                                 </div>
 
@@ -1203,9 +1558,34 @@ export default function Page() {
                                   {filteredItems.length === 0 ? (
                                     <div className="text-xs text-black/50">No items</div>
                                   ) : (
-                                    filteredItems.map((it) => (
+                                    (() => {
+                                      // Sort items: expired first, then 30 days or less, then others
+                                      const sorted = [...filteredItems].sort((a, b) => {
+                                        const aExp = a.expires_at ? daysUntil(a.expires_at.slice(0, 10)) : Infinity;
+                                        const bExp = b.expires_at ? daysUntil(b.expires_at.slice(0, 10)) : Infinity;
+                                        
+                                        // Expired items first (negative days)
+                                        if (aExp < 0 && bExp >= 0) return -1;
+                                        if (aExp >= 0 && bExp < 0) return 1;
+                                        
+                                        // Both expired: sort by how expired (more expired first)
+                                        if (aExp < 0 && bExp < 0) return aExp - bExp;
+                                        
+                                        // 30 days or less: sort by days (sooner first)
+                                        if (aExp <= 30 && bExp <= 30) return aExp - bExp;
+                                        
+                                        // One is 30 days or less, other is more: 30 days or less comes first
+                                        if (aExp <= 30 && bExp > 30) return -1;
+                                        if (aExp > 30 && bExp <= 30) return 1;
+                                        
+                                        // Both more than 30 days: keep original order
+                                        return 0;
+                                      });
+                                      
+                                      return sorted.map((it) => (
                                       <button
                                         key={it.id}
+                                        data-item-id={it.id}
                                         type="button"
                                         onClick={() => openEditItem(it)}
                                         className={cx(
@@ -1221,14 +1601,18 @@ export default function Page() {
                                           {it.qty !== null && it.qty !== undefined && (
                                             <div className="text-xs text-black/70">× {it.qty}</div>
                                           )}
-                                          {it.expires_at && (
-                                            <div className="text-[11px] text-black/70 whitespace-nowrap">
-                                              {formatExpiryLabel(it.expires_at)}
-                                            </div>
-                                          )}
+                                          {(() => {
+                                            const label = formatExpiryLabel(it.expires_at);
+                                            return label ? (
+                                              <div className="text-[11px] text-black/70 whitespace-nowrap">
+                                                {label}
+                                              </div>
+                                            ) : null;
+                                          })()}
                                         </div>
                                       </button>
-                                    ))
+                                      ));
+                                    })()
                                   )}
                                 </div>
                               </div>
@@ -1246,22 +1630,30 @@ export default function Page() {
 
         {/* Switch household modal */}
         <Modal open={switchHouseholdOpen} title="Switch household" onClose={() => setSwitchHouseholdOpen(false)} widthClass="max-w-lg">
-          <div className="text-sm text-black/70">选择一个 household（会返回 All rooms）：</div>
+          <div className="text-sm text-black/70">Select a household (will return to All rooms):</div>
           <div className="mt-3 flex flex-col gap-2">
-            {households.map((h) => (
-              <button
-                key={h.id}
-                type="button"
-                onClick={() => doSwitchHousehold(h.id)}
-                className={cx(
-                  'px-3 py-2 rounded-xl border text-left hover:bg-black/5',
-                  h.id === activeHouseholdId ? 'border-black/30 bg-black/5' : 'border-black/10'
-                )}
-              >
-                <div className="text-sm">{h.name}</div>
-                {h.id === activeHouseholdId && <div className="text-xs text-black/60 mt-0.5">Current</div>}
-              </button>
-            ))}
+            {(() => {
+              // Sort: current first, then others alphabetically
+              const sorted = [...households].sort((a, b) => {
+                if (a.id === activeHouseholdId) return -1;
+                if (b.id === activeHouseholdId) return 1;
+                return a.name.localeCompare(b.name);
+              });
+              return sorted.map((h) => (
+                <button
+                  key={h.id}
+                  type="button"
+                  onClick={() => doSwitchHousehold(h.id)}
+                  className={cx(
+                    'px-3 py-2 rounded-xl border text-left hover:bg-black/5',
+                    h.id === activeHouseholdId ? 'border-black/30 bg-black/5' : 'border-black/10'
+                  )}
+                >
+                  <div className="text-sm">{h.name}</div>
+                  {h.id === activeHouseholdId && <div className="text-xs text-black/60 mt-0.5">Current</div>}
+                </button>
+              ));
+            })()}
           </div>
         </Modal>
 
@@ -1304,7 +1696,7 @@ export default function Page() {
         <ConfirmModal
           open={deleteColumnConfirmOpen}
           title="Delete column?"
-          description="删除 column 会同时删除其下所有 cells（以及这些 cells 的 items）。该操作不可撤销。"
+          description="Deleting this column will also delete all cells under it (and all items in those cells). This action cannot be undone."
           onCancel={() => {
             setDeleteColumnConfirmOpen(false);
             setTargetColumnId(null);
@@ -1351,7 +1743,7 @@ export default function Page() {
         <ConfirmModal
           open={deleteCellConfirmOpen}
           title="Delete cell?"
-          description="删除 cell 会同时删除该 cell 的 items。该操作不可撤销。"
+          description="Deleting this cell will also delete all items in it. This action cannot be undone."
           onCancel={() => {
             setDeleteCellConfirmOpen(false);
             setTargetCellId(null);
@@ -1360,109 +1752,205 @@ export default function Page() {
         />
 
         {/* Item modal */}
-        <Modal open={itemModalOpen} title={itemMode === 'add' ? 'Add item' : 'Edit item'} onClose={() => setItemModalOpen(false)} widthClass="max-w-2xl">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {/* left fields */}
-            <div>
-              <div className="text-sm text-black/70">Name</div>
-              <input
-                ref={itemNameInputRef}
-                value={itemDraft.name}
-                onChange={(e) => setItemDraft((p) => ({ ...p, name: e.target.value }))}
-                className="mt-2 w-full px-3 py-2 rounded-xl border border-black/10 bg-white text-sm outline-none focus:ring-2 focus:ring-black/10"
-                placeholder="e.g., Milk"
-              />
+        <Modal open={itemModalOpen} title={itemMode === 'add' ? 'Add item' : 'Edit item'} onClose={() => setItemModalOpen(false)} widthClass="max-w-4xl">
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              saveItem();
+            }}
+          >
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            {/* left: fields */}
+            <div className="md:col-span-2 space-y-4">
+              <div>
+                <div className="text-sm text-black/70">Name <span className="text-red-500">*</span></div>
+                <input
+                  ref={itemNameInputRef}
+                  value={itemDraft.name}
+                  onChange={(e) => setItemDraft((p) => ({ ...p, name: e.target.value }))}
+                  className="mt-2 w-full px-3 py-2 rounded-xl border border-black/10 bg-white text-sm outline-none focus:ring-2 focus:ring-black/10"
+                  placeholder="e.g., Milk"
+                />
+              </div>
 
-              <div className="mt-4 text-sm text-black/70">Qty</div>
-              <input
-                value={itemDraft.qty}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  if (v === '' || /^[0-9]+$/.test(v)) {
-                    setItemDraft((p) => ({ ...p, qty: v }));
-                  }
-                }}
-                inputMode="numeric"
-                className="mt-2 w-full px-3 py-2 rounded-xl border border-black/10 bg-white text-sm outline-none focus:ring-2 focus:ring-black/10"
-                placeholder="(optional)"
-              />
+              <div>
+                <div className="text-sm text-black/70">Qty <span className="text-red-500">*</span></div>
+                <input
+                  value={itemDraft.qty}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    if (v === '' || /^[0-9]+$/.test(v)) {
+                      setItemDraft((p) => ({ ...p, qty: v }));
+                    }
+                  }}
+                  inputMode="numeric"
+                  className="mt-2 w-full px-3 py-2 rounded-xl border border-black/10 bg-white text-sm outline-none focus:ring-2 focus:ring-black/10"
+                  placeholder="e.g., 1"
+                />
+              </div>
 
-              <div className="mt-4 text-sm text-black/70">Expires at</div>
-              <input
-                type="date"
-                value={itemDraft.expires_at}
-                onChange={(e) => setItemDraft((p) => ({ ...p, expires_at: e.target.value }))}
-                className="mt-2 w-full px-3 py-2 rounded-xl border border-black/10 bg-white text-sm outline-none focus:ring-2 focus:ring-black/10"
-              />
-
-              <div className="mt-4 text-sm text-black/70">Image</div>
-              <input
-                type="file"
-                accept="image/*"
-                onChange={(e) => {
-                  const f = e.target.files?.[0] ?? null;
-                  setItemDraft((p) => ({ ...p, imageFile: f }));
-                }}
-                className="mt-2 w-full text-sm"
-              />
-
-              {itemDraft.image_path && (
-                <div className="mt-3">
-                  <div className="text-xs text-black/60 mb-2">Current image</div>
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={getPublicImageUrl(itemDraft.image_path)}
-                    alt="item"
-                    className="w-full max-w-[260px] rounded-2xl border border-black/10"
-                  />
+              <div>
+                <div className="text-sm text-black/70">Expires at</div>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const d = new Date();
+                      d.setDate(d.getDate() + 7);
+                      setItemDraft((p) => ({ ...p, expires_at: d.toISOString().slice(0, 10) }));
+                    }}
+                    className="px-3 py-1.5 rounded-lg border border-black/10 bg-white hover:bg-black/5 text-xs"
+                  >
+                    1 Week
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const d = new Date();
+                      d.setMonth(d.getMonth() + 1);
+                      setItemDraft((p) => ({ ...p, expires_at: d.toISOString().slice(0, 10) }));
+                    }}
+                    className="px-3 py-1.5 rounded-lg border border-black/10 bg-white hover:bg-black/5 text-xs"
+                  >
+                    1 Month
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const d = new Date();
+                      d.setMonth(d.getMonth() + 6);
+                      setItemDraft((p) => ({ ...p, expires_at: d.toISOString().slice(0, 10) }));
+                    }}
+                    className="px-3 py-1.5 rounded-lg border border-black/10 bg-white hover:bg-black/5 text-xs"
+                  >
+                    6 Months
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const d = new Date();
+                      d.setFullYear(d.getFullYear() + 1);
+                      setItemDraft((p) => ({ ...p, expires_at: d.toISOString().slice(0, 10) }));
+                    }}
+                    className="px-3 py-1.5 rounded-lg border border-black/10 bg-white hover:bg-black/5 text-xs"
+                  >
+                    1 Year
+                  </button>
                 </div>
-              )}
+                <input
+                  type="date"
+                  value={itemDraft.expires_at}
+                  onChange={(e) => setItemDraft((p) => ({ ...p, expires_at: e.target.value }))}
+                  className="mt-2 w-full px-3 py-2 rounded-xl border border-black/10 bg-white text-sm outline-none focus:ring-2 focus:ring-black/10"
+                  placeholder="Or select a date"
+                />
+              </div>
+
+              <div>
+                <div className="text-sm text-black/70">Location <span className="text-red-500">*</span></div>
+                <div className="mt-2 text-xs text-black/60">Room</div>
+                <select
+                  value={itemDraft.room_id ?? ''}
+                  onChange={async (e) => {
+                    const rid = (e.target.value || null) as UUID | null;
+                    setItemDraft((p) => ({ ...p, room_id: rid, cell_id: null }));
+                    if (rid) await ensureCellsForRoomLoaded(rid);
+                  }}
+                  className="mt-1 w-full px-3 py-2 rounded-xl border border-black/10 bg-white text-sm outline-none focus:ring-2 focus:ring-black/10"
+                >
+                  <option value="">Select room…</option>
+                  {roomsInHousehold.map((r) => (
+                    <option key={r.id} value={r.id}>
+                      {r.name}
+                    </option>
+                  ))}
+                </select>
+
+                <div className="mt-3 text-xs text-black/60">Cell</div>
+                <select
+                  value={itemDraft.cell_id ?? ''}
+                  onChange={(e) => setItemDraft((p) => ({ ...p, cell_id: (e.target.value || null) as UUID | null }))}
+                  disabled={!itemDraft.room_id || loadingCellsForRoom}
+                  className={cx(
+                    'mt-1 w-full px-3 py-2 rounded-xl border bg-white text-sm outline-none focus:ring-2 focus:ring-black/10',
+                    'border-black/10',
+                    (!itemDraft.room_id || loadingCellsForRoom) && 'opacity-60'
+                  )}
+                >
+                  <option value="">{loadingCellsForRoom ? 'Loading cells…' : 'Select cell…'}</option>
+                  {(itemDraft.room_id ? (cellsForRoomCache[itemDraft.room_id] ?? []) : []).map(({ cell, column }) => (
+                    <option key={cell.id} value={cell.id}>
+                      {column.name} / {cell.code}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <div className="text-sm text-black/70">Image</div>
+                <label className="mt-2 block">
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0] ?? null;
+                      setItemDraft((p) => ({ ...p, imageFile: f }));
+                    }}
+                    className="hidden"
+                  />
+                  <div className="px-3 py-2 rounded-xl border border-black/10 bg-white hover:bg-black/5 text-sm text-center cursor-pointer">
+                    {itemDraft.imageFile || itemDraft.image_path ? 'Change image' : 'Upload image'}
+                  </div>
+                </label>
+                {itemDraft.imageFile && (
+                  <button
+                    type="button"
+                    onClick={() => setItemDraft((p) => ({ ...p, imageFile: null }))}
+                    className="mt-2 w-full px-3 py-1.5 rounded-lg border border-red-300 text-red-700 hover:bg-red-50 text-xs"
+                  >
+                    Remove uploaded image
+                  </button>
+                )}
+                {!itemDraft.imageFile && itemDraft.image_path && (
+                  <button
+                    type="button"
+                    onClick={() => setItemDraft((p) => ({ ...p, image_path: null }))}
+                    className="mt-2 w-full px-3 py-1.5 rounded-lg border border-red-300 text-red-700 hover:bg-red-50 text-xs"
+                  >
+                    Remove current image
+                  </button>
+                )}
+              </div>
             </div>
 
-            {/* right location */}
-            <div>
-              <div className="text-sm text-black/70">Location</div>
-
-              <div className="mt-2 text-xs text-black/60">Room</div>
-              <select
-                value={itemDraft.room_id ?? ''}
-                onChange={async (e) => {
-                  const rid = (e.target.value || null) as UUID | null;
-                  setItemDraft((p) => ({ ...p, room_id: rid, cell_id: null }));
-                  if (rid) await ensureCellsForRoomLoaded(rid);
-                }}
-                className="mt-1 w-full px-3 py-2 rounded-xl border border-black/10 bg-white text-sm outline-none focus:ring-2 focus:ring-black/10"
-              >
-                <option value="">Select room…</option>
-                {roomsInHousehold.map((r) => (
-                  <option key={r.id} value={r.id}>
-                    {r.name}
-                  </option>
-                ))}
-              </select>
-
-              <div className="mt-3 text-xs text-black/60">Cell</div>
-              <select
-                value={itemDraft.cell_id ?? ''}
-                onChange={(e) => setItemDraft((p) => ({ ...p, cell_id: (e.target.value || null) as UUID | null }))}
-                disabled={!itemDraft.room_id || loadingCellsForRoom}
-                className={cx(
-                  'mt-1 w-full px-3 py-2 rounded-xl border bg-white text-sm outline-none focus:ring-2 focus:ring-black/10',
-                  'border-black/10',
-                  (!itemDraft.room_id || loadingCellsForRoom) && 'opacity-60'
+            {/* right: image preview */}
+            <div className="md:col-span-1">
+              <div className="rounded-2xl border border-black/10 bg-white/50 p-4 min-h-[200px] flex items-center justify-center">
+                {itemDraft.imageFile ? (
+                  <div className="w-full">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={URL.createObjectURL(itemDraft.imageFile)}
+                      alt="preview"
+                      className="w-full rounded-xl border border-black/10"
+                    />
+                  </div>
+                ) : itemDraft.image_path ? (
+                  <div className="w-full">
+                    {currentImageUrl ? (
+                      /* eslint-disable-next-line @next/next/no-img-element */
+                      <img
+                        src={currentImageUrl}
+                        alt="item"
+                        className="w-full rounded-xl border border-black/10"
+                      />
+                    ) : (
+                      <div className="text-xs text-black/40">Loading image...</div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="text-sm text-black/60">No image</div>
                 )}
-              >
-                <option value="">{loadingCellsForRoom ? 'Loading cells…' : 'Select cell…'}</option>
-                {(itemDraft.room_id ? (cellsForRoomCache[itemDraft.room_id] ?? []) : []).map(({ cell, column }) => (
-                  <option key={cell.id} value={cell.id}>
-                    {column.name} / {cell.code}
-                  </option>
-                ))}
-              </select>
-
-              <div className="mt-6 rounded-2xl border border-black/10 bg-white p-3">
-                <div className="text-xs text-black/60">Tip</div>
-                <div className="text-sm text-black/80 mt-1">也可以在 cell 右上角 ➕ 直接添加 item（更快）。</div>
               </div>
             </div>
           </div>
@@ -1473,7 +1961,10 @@ export default function Page() {
                 <button
                   type="button"
                   className="px-3 py-2 rounded-xl border border-red-600 text-red-700 hover:bg-red-50 text-sm"
-                  onClick={() => openDeleteItem(itemDraft.id as UUID)}
+                  onClick={async () => {
+                    await deleteItem(itemDraft.id as UUID);
+                    setItemModalOpen(false);
+                  }}
                 >
                   Delete
                 </button>
@@ -1481,26 +1972,24 @@ export default function Page() {
             </div>
 
             <div className="flex items-center gap-2">
-              <button className="px-3 py-2 rounded-xl border border-black/10 hover:bg-black/5 text-sm" onClick={() => setItemModalOpen(false)}>
+              <button 
+                type="button"
+                className="px-3 py-2 rounded-xl border border-black/10 hover:bg-black/5 text-sm" 
+                onClick={() => setItemModalOpen(false)}
+              >
                 Cancel
               </button>
-              <button className="px-3 py-2 rounded-xl border border-black bg-black text-white hover:bg-black/90 text-sm" onClick={saveItem}>
+              <button 
+                type="submit"
+                className="px-3 py-2 rounded-xl border border-black bg-black text-white hover:bg-black/90 text-sm"
+              >
                 Save
               </button>
             </div>
           </div>
+          </form>
         </Modal>
 
-        <ConfirmModal
-          open={itemDeleteConfirmOpen}
-          title="Delete item?"
-          description="确定删除该 item 吗？该操作不可撤销。"
-          onCancel={() => {
-            setItemDeleteConfirmOpen(false);
-            setTargetItemId(null);
-          }}
-          onConfirm={confirmDeleteItem}
-        />
 
         {toast && <Toast message={toast} />}
       </div>

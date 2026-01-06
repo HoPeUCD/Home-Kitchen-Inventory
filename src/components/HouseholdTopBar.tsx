@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useEffect, useRef, useState } from 'react';
+import { useRouter } from 'next/navigation';
 
 function cx(...classes: Array<string | false | null | undefined>) {
   return classes.filter(Boolean).join(' ');
@@ -35,13 +36,26 @@ export default function HouseholdTopBar(props: {
 }) {
   const { householdName, userEmail, refreshing, onRefresh, onOpenSwitchHousehold, onSignOut } = props;
 
+  const router = useRouter();
   const [open, setOpen] = useState(false);
   const ref = useClickOutside<HTMLDivElement>(open, () => setOpen(false));
 
   return (
     <div className="flex items-center justify-between gap-3">
-      <div className="min-w-0">
-        <div className="text-base font-semibold truncate">{householdName || 'Household'}</div>
+      <div className="min-w-0 flex items-center gap-2">
+        <div className="text-xl font-semibold truncate">{householdName || 'Household'}</div>
+        <button
+          type="button"
+          onClick={onOpenSwitchHousehold}
+          className={cx(
+            'px-2 py-1 rounded-lg border text-sm hover:bg-black/5 flex items-center gap-1',
+            'border-black/10'
+          )}
+          title="Switch household"
+        >
+          <span>Switch</span>
+          <span className="text-xs text-black/60">▾</span>
+        </button>
       </div>
 
       <div className="flex items-center gap-2">
@@ -88,11 +102,11 @@ export default function HouseholdTopBar(props: {
                 type="button"
                 onClick={() => {
                   setOpen(false);
-                  onOpenSwitchHousehold();
+                  router.push('/households');
                 }}
                 className="w-full text-left px-3 py-2 text-sm hover:bg-black/5"
               >
-                Switch household
+                Manage households
               </button>
 
               <button

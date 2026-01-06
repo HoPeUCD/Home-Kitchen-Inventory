@@ -35,32 +35,20 @@ export default function Home() {
 
       const userId = session.user.id;
 
-      // profiles schema 兼容：先尝试 id = userId，再 fallback user_id = userId
-      const profById = await supabase
+      // profiles 表使用 user_id 作为主键
+      const profRes = await supabase
         .from("profiles")
         .select("default_household_id")
-        .eq("id", userId)
+        .eq("user_id", userId)
         .maybeSingle();
 
-      let defaultHouseholdId: string | null = null;
-
-      if (profById.error) {
-        const profByUserId = await supabase
-          .from("profiles")
-          .select("default_household_id")
-          .eq("user_id", userId)
-          .maybeSingle();
-
-        if (profByUserId.error) {
-          setErr(profByUserId.error.message);
-          setStatus("Failed");
-          return;
-        }
-
-        defaultHouseholdId = (profByUserId.data as any)?.default_household_id ?? null;
-      } else {
-        defaultHouseholdId = (profById.data as any)?.default_household_id ?? null;
+      if (profRes.error) {
+        setErr(profRes.error.message);
+        setStatus("Failed");
+        return;
       }
+
+      const defaultHouseholdId: string | null = (profRes.data as any)?.default_household_id ?? null;
 
       if (!defaultHouseholdId) {
         setStatus("No default household. Redirecting…");
