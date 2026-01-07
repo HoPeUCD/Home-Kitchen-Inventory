@@ -1025,7 +1025,6 @@ export default function Page() {
       image_path: null,
       room_id: defaultRoomId,
       cell_id: defaultCellId,
-      tag: '',
       remark: '',
     });
 
