@@ -42,8 +42,8 @@ function Modal({
   return (
     <div className="fixed inset-0 z-[60] overflow-y-auto">
       <div className="absolute inset-0 bg-black/40" onClick={onClose} />
-      <div className="min-h-full flex items-center justify-center p-4">
-        <div className={cx('w-full my-auto', widthClass)} onClick={(e) => e.stopPropagation()}>
+      <div className="relative min-h-full flex items-center justify-center p-4">
+        <div className={cx('relative w-full my-auto z-10', widthClass)} onClick={(e) => e.stopPropagation()}>
           <div className={cx('rounded-2xl shadow-xl border flex flex-col max-h-[90vh]', THEME.borderSoft, THEME.oatCard)}>
             {/* Fixed header */}
             <div className="px-5 py-4 border-b border-black/10 flex items-center justify-between gap-3 flex-shrink-0">
