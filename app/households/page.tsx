@@ -116,6 +116,14 @@ export default function HouseholdsPage() {
   const [editNameModalOpen, setEditNameModalOpen] = useState(false);
   const [targetHouseholdId, setTargetHouseholdId] = useState<string | null>(null);
   const [householdDraftName, setHouseholdDraftName] = useState("");
+  
+  // Chat states
+  const [chatModalOpen, setChatModalOpen] = useState(false);
+  const [chatHouseholdId, setChatHouseholdId] = useState<string | null>(null);
+  const [chatMessages, setChatMessages] = useState<Array<{ role: 'user' | 'assistant'; content: string }>>([]);
+  const [chatInput, setChatInput] = useState("");
+  const [chatLoading, setChatLoading] = useState(false);
+  const [lastEnterTime, setLastEnterTime] = useState<number>(0);
 
   // theme
   const oatBg = "bg-[#F7F1E6]";
@@ -538,6 +546,77 @@ export default function HouseholdsPage() {
     }
   }
 
+  function openChat(householdId: string) {
+    setChatHouseholdId(householdId);
+    setChatMessages([]);
+    setChatInput("");
+    setLastEnterTime(0);
+    setChatModalOpen(true);
+  }
+
+  async function sendChatMessage() {
+    if (!chatHouseholdId || !chatInput.trim() || chatLoading) return;
+
+    const question = chatInput.trim();
+    setChatInput("");
+    
+    // Add user message to chat
+    const userMessage = { role: 'user' as const, content: question };
+    setChatMessages(prev => [...prev, userMessage]);
+    setChatLoading(true);
+    setErr(null);
+
+    try {
+      // Get session token for authentication
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        throw new Error("Not authenticated");
+      }
+
+      // Prepare conversation history (excluding system message)
+      const conversationHistory = chatMessages.map(msg => ({
+        role: msg.role,
+        content: msg.content,
+      }));
+
+      // Call API
+      const response = await fetch('/api/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({
+          householdId: chatHouseholdId,
+          question: question,
+          conversationHistory: conversationHistory,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || 'Failed to get response from AI');
+      }
+
+      const data = await response.json();
+      const assistantMessage = { role: 'assistant' as const, content: data.response };
+      setChatMessages(prev => [...prev, assistantMessage]);
+      
+      // If there was a database operation, refresh the household data
+      if (data.operation && data.operation.success) {
+        setToast(data.operation.message || 'Operation completed');
+        // Refresh household data by reloading
+        await load();
+      }
+    } catch (e: any) {
+      setErr(e?.message ?? "Failed to send message");
+      // Remove the user message if error occurred
+      setChatMessages(prev => prev.slice(0, -1));
+    } finally {
+      setChatLoading(false);
+    }
+  }
+
   const userEmail = session?.user?.email ?? "";
 
   return (
@@ -680,7 +759,7 @@ export default function HouseholdsPage() {
                         <div className="text-sm text-black/60">No members found</div>
                       )}
                     </div>
-                    {/* Export and Delete buttons at the bottom */}
+                    {/* Export, Chat, and Delete buttons at the bottom */}
                     <div className="mt-3 space-y-2">
                       <button
                         onClick={() => exportToExcel(h.id, h.name)}
@@ -688,6 +767,13 @@ export default function HouseholdsPage() {
                         className="w-full px-3 py-2 rounded-xl border border-blue-600/30 bg-blue-50 text-blue-700 hover:bg-blue-100 text-sm disabled:opacity-60"
                       >
                         {busyId === h.id ? "Exporting..." : "Export to Excel"}
+                      </button>
+                      <button
+                        onClick={() => openChat(h.id)}
+                        disabled={busyId === h.id}
+                        className="w-full px-3 py-2 rounded-xl border border-green-600/30 bg-green-50 text-green-700 hover:bg-green-100 text-sm disabled:opacity-60"
+                      >
+                        💬 Ask AI about Inventory
                       </button>
                       {isOwner && (
                         <button
@@ -707,6 +793,94 @@ export default function HouseholdsPage() {
             })}
           </div>
         </div>
+
+        {/* Chat modal */}
+        <Modal 
+          open={chatModalOpen} 
+          title="Ask AI about Inventory" 
+          onClose={() => {
+            setChatModalOpen(false);
+            setChatHouseholdId(null);
+            setChatMessages([]);
+            setChatInput("");
+          }} 
+          widthClass="max-w-2xl"
+        >
+          <div className="flex flex-col h-[60vh]">
+            {/* Messages area */}
+            <div className="flex-1 overflow-y-auto space-y-4 mb-4 pr-2">
+              {chatMessages.length === 0 ? (
+                <div className="text-sm text-black/60 text-center py-8">
+                  Ask me anything about your inventory! For example:
+                  <ul className="mt-2 text-left list-disc list-inside space-y-1">
+                    <li>"What items are expiring soon?"</li>
+                    <li>"How many items do I have in total?"</li>
+                    <li>"Where can I find [item name]?"</li>
+                    <li>"What items are in [room name]?"</li>
+                  </ul>
+                </div>
+              ) : (
+                chatMessages.map((msg, idx) => (
+                  <div
+                    key={idx}
+                    className={cx(
+                      "rounded-xl p-3",
+                      msg.role === 'user'
+                        ? "bg-blue-50 border border-blue-200 ml-8"
+                        : "bg-gray-50 border border-gray-200 mr-8"
+                    )}
+                  >
+                    <div className="text-xs font-medium text-black/60 mb-1">
+                      {msg.role === 'user' ? 'You' : 'AI Assistant'}
+                    </div>
+                    <div className="text-sm text-black/80 whitespace-pre-wrap">{msg.content}</div>
+                  </div>
+                ))
+              )}
+              {chatLoading && (
+                <div className="rounded-xl p-3 bg-gray-50 border border-gray-200 mr-8">
+                  <div className="text-xs font-medium text-black/60 mb-1">AI Assistant</div>
+                  <div className="text-sm text-black/60">Thinking...</div>
+                </div>
+              )}
+            </div>
+
+            {/* Input area */}
+            <div className="flex-shrink-0 border-t border-black/10 pt-4">
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={chatInput}
+                  onChange={(e) => setChatInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      const now = Date.now();
+                      // If pressed Enter within 500ms of last Enter, send message
+                      if (now - lastEnterTime < 500 && lastEnterTime > 0) {
+                        sendChatMessage();
+                        setLastEnterTime(0); // Reset
+                      } else {
+                        // First Enter press, just update timestamp
+                        setLastEnterTime(now);
+                      }
+                    }
+                  }}
+                  placeholder="Ask a question about your inventory... (Press Enter twice to send)"
+                  disabled={chatLoading}
+                  className="flex-1 px-3 py-2 rounded-xl border border-black/10 focus:outline-none focus:ring-2 focus:ring-blue-500/50 disabled:opacity-60"
+                />
+                <button
+                  onClick={sendChatMessage}
+                  disabled={!chatInput.trim() || chatLoading}
+                  className="px-4 py-2 rounded-xl border border-blue-600/30 bg-blue-50 text-blue-700 hover:bg-blue-100 text-sm disabled:opacity-60"
+                >
+                  Send
+                </button>
+              </div>
+            </div>
+          </div>
+        </Modal>
 
         {/* Edit household name modal */}
         <Modal open={editNameModalOpen} title="Edit Household Name" onClose={() => {
