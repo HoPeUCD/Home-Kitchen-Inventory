@@ -111,6 +111,11 @@ export default function HouseholdsPage() {
   const [switchModalOpen, setSwitchModalOpen] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [toast, setToast] = useState("");
+  
+  // Edit household name states
+  const [editNameModalOpen, setEditNameModalOpen] = useState(false);
+  const [targetHouseholdId, setTargetHouseholdId] = useState<string | null>(null);
+  const [householdDraftName, setHouseholdDraftName] = useState("");
 
   // theme
   const oatBg = "bg-[#F7F1E6]";
@@ -497,6 +502,42 @@ export default function HouseholdsPage() {
     }
   }
 
+  function openEditHouseholdName(hid: string, currentName: string) {
+    setTargetHouseholdId(hid);
+    setHouseholdDraftName(currentName);
+    setEditNameModalOpen(true);
+  }
+
+  async function saveEditHouseholdName() {
+    if (!targetHouseholdId) return;
+    const name = householdDraftName.trim();
+    if (!name) {
+      setErr("Household name cannot be empty");
+      return;
+    }
+
+    setErr(null);
+    setBusyId(targetHouseholdId);
+    try {
+      const { error } = await supabase
+        .from("households")
+        .update({ name })
+        .eq("id", targetHouseholdId);
+
+      if (error) throw error;
+
+      setEditNameModalOpen(false);
+      setTargetHouseholdId(null);
+      setHouseholdDraftName("");
+      setToast("Household name updated");
+      await load();
+    } catch (e: any) {
+      setErr(e?.message ?? "Failed to update household name");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   const userEmail = session?.user?.email ?? "";
 
   return (
@@ -570,7 +611,19 @@ export default function HouseholdsPage() {
 
                   {/* Household basic info */}
                   <div className="mb-3">
-                    <div className="font-semibold truncate">{h.name}</div>
+                    <div className="flex items-center gap-2">
+                      <div className="font-semibold truncate flex-1">{h.name}</div>
+                      {isOwner && (
+                        <button
+                          onClick={() => openEditHouseholdName(h.id, h.name)}
+                          disabled={busy}
+                          className="px-2 py-1 rounded-lg border border-black/10 hover:bg-black/5 text-sm disabled:opacity-60 flex-shrink-0"
+                          title="Edit household name"
+                        >
+                          ✏️
+                        </button>
+                      )}
+                    </div>
                     {h.join_code && (
                       <div className="text-sm text-black/70 mt-1">Join code: {h.join_code}</div>
                     )}
@@ -654,6 +707,54 @@ export default function HouseholdsPage() {
             })}
           </div>
         </div>
+
+        {/* Edit household name modal */}
+        <Modal open={editNameModalOpen} title="Edit Household Name" onClose={() => {
+          setEditNameModalOpen(false);
+          setTargetHouseholdId(null);
+          setHouseholdDraftName("");
+        }} widthClass="max-w-lg">
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-black/80 mb-1">
+                Household Name <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                value={householdDraftName}
+                onChange={(e) => setHouseholdDraftName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    saveEditHouseholdName();
+                  }
+                }}
+                className="w-full px-3 py-2 rounded-xl border border-black/10 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+                placeholder="Enter household name"
+                autoFocus
+              />
+            </div>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                onClick={() => {
+                  setEditNameModalOpen(false);
+                  setTargetHouseholdId(null);
+                  setHouseholdDraftName("");
+                }}
+                className="px-3 py-2 rounded-xl border border-black/10 hover:bg-black/5 text-sm"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={saveEditHouseholdName}
+                disabled={busyId === targetHouseholdId || !householdDraftName.trim()}
+                className="px-3 py-2 rounded-xl border border-blue-600/30 bg-blue-50 text-blue-700 hover:bg-blue-100 text-sm disabled:opacity-60"
+              >
+                {busyId === targetHouseholdId ? "Saving..." : "Save"}
+              </button>
+            </div>
+          </div>
+        </Modal>
 
         {/* Switch household modal */}
         <Modal open={switchModalOpen} title="Switch household" onClose={() => setSwitchModalOpen(false)} widthClass="max-w-lg">
