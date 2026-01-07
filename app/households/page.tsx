@@ -62,16 +62,16 @@ function Modal({
           <div className="rounded-2xl shadow-xl border border-black/10 bg-[#FBF7EF] flex flex-col max-h-[90vh]">
             {/* Fixed header */}
             <div className="px-5 py-4 border-b border-black/10 flex items-center justify-between gap-3 flex-shrink-0">
-              <div className="text-base font-semibold">{title}</div>
-              <button
-                onClick={onClose}
+            <div className="text-base font-semibold">{title}</div>
+            <button
+              onClick={onClose}
                 className="px-2 py-1 rounded-lg border border-black/10 hover:bg-black/5 text-sm flex-shrink-0"
-                aria-label="Close"
-                title="Close"
-              >
-                ✕
-              </button>
-            </div>
+              aria-label="Close"
+              title="Close"
+            >
+              ✕
+            </button>
+          </div>
             {/* Scrollable content */}
             <div className="p-5 overflow-y-auto flex-1 min-h-0">
               {children}
@@ -284,7 +284,7 @@ export default function HouseholdsPage() {
       // Load all items
       const { data: itemsData, error: itemsErr } = await supabase
         .from('items_v2')
-        .select('id, cell_id, name, qty, expires_at')
+        .select('id, cell_id, name, qty, expires_at, remark')
         .eq('household_id', householdId)
         .in('cell_id', cellIds);
 
@@ -328,6 +328,7 @@ export default function HouseholdsPage() {
         'Item Name': string;
         'Quantity': number | null;
         'Expire Date': string | null;
+        'Remark': string;
         'Location': string;
       }> = [];
 
@@ -356,6 +357,7 @@ export default function HouseholdsPage() {
                   'Item Name': item.name,
                   'Quantity': item.qty,
                   'Expire Date': item.expires_at ? new Date(item.expires_at + 'T00:00:00').toLocaleDateString('en-US', { year: 'numeric', month: '2-digit', day: '2-digit' }) : '',
+                  'Remark': item.remark ?? '',
                   'Location': location,
                 });
               });
@@ -555,16 +557,16 @@ export default function HouseholdsPage() {
                   {/* Active and Default badges at the top */}
                   <div className="flex items-center gap-2 flex-wrap mb-3">
                     {activeHouseholdId === h.id && (
-                      <span className="text-xs px-2 py-1 rounded-lg border border-black/20 bg-black/5">
-                        Active
-                      </span>
+                          <span className="text-xs px-2 py-1 rounded-lg border border-black/20 bg-black/5">
+                            Active
+                          </span>
                     )}
                     {isDefault && (
-                      <span className="text-xs px-2 py-1 rounded-lg border border-black/20 bg-black/5">
-                        Default
-                      </span>
+                          <span className="text-xs px-2 py-1 rounded-lg border border-black/20 bg-black/5">
+                            Default
+                          </span>
                     )}
-                  </div>
+                      </div>
 
                   {/* Household basic info */}
                   <div className="mb-3">
@@ -572,28 +574,28 @@ export default function HouseholdsPage() {
                     {h.join_code && (
                       <div className="text-sm text-black/70 mt-1">Join code: {h.join_code}</div>
                     )}
-                  </div>
+                    </div>
 
                   {/* Action buttons */}
                   <div className="flex items-center gap-2 flex-wrap mb-3">
-                    <button
-                      onClick={() => switchOnly(h.id)}
-                      disabled={busy}
-                      className="px-3 py-2 rounded-xl border border-black/10 hover:bg-black/5 text-sm disabled:opacity-60"
-                    >
+                      <button
+                        onClick={() => switchOnly(h.id)}
+                        disabled={busy}
+                        className="px-3 py-2 rounded-xl border border-black/10 hover:bg-black/5 text-sm disabled:opacity-60"
+                      >
                       Switch
-                    </button>
+                      </button>
 
-                    <button
-                      onClick={() => setDefault(h.id)}
-                      disabled={busy}
-                      className={cx(
-                        "px-3 py-2 rounded-xl border text-sm disabled:opacity-60",
-                        isDefault ? "border-black/30 bg-black/5" : "border-black/10 hover:bg-black/5"
-                      )}
-                    >
-                      {isDefault ? "Default" : "Set as default"}
-                    </button>
+                      <button
+                        onClick={() => setDefault(h.id)}
+                        disabled={busy}
+                        className={cx(
+                          "px-3 py-2 rounded-xl border text-sm disabled:opacity-60",
+                          isDefault ? "border-black/30 bg-black/5" : "border-black/10 hover:bg-black/5"
+                        )}
+                      >
+                        {isDefault ? "Default" : "Set as default"}
+                      </button>
                   </div>
 
                   {/* Members list - flex-grow to push export button to bottom */}
@@ -660,8 +662,8 @@ export default function HouseholdsPage() {
           <div className="mt-3 flex flex-col gap-2">
             {(() => {
               const householdList = rows
-                .map((r) => normalizeHousehold(r.households))
-                .filter(Boolean)
+              .map((r) => normalizeHousehold(r.households))
+              .filter(Boolean)
                 .map((hh) => hh as HouseholdMini);
               
               // Sort: current first, then others alphabetically

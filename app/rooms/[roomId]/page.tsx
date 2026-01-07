@@ -22,6 +22,7 @@ type ItemV2 = {
   qty: number | null;
   expires_at: string | null;
   image_path: string | null;
+  remark: string | null;
 };
 
 const ACTIVE_HOUSEHOLD_KEY = 'active_household_id';
@@ -269,12 +270,13 @@ export default function Page() {
   const [itemDraft, setItemDraft] = useState<{
     id: UUID | null;
     name: string;
-    qty: string; // IMPORTANT: string => fixes “0 stuck / 02”
+    qty: string; // IMPORTANT: string => fixes "0 stuck / 02"
     expires_at: string; // yyyy-mm-dd
     imageFile: File | null;
     image_path: string | null;
     room_id: UUID | null;
     cell_id: UUID | null;
+    remark: string;
   }>({
     id: null,
     name: '',
@@ -379,7 +381,7 @@ export default function Page() {
         // Load all items
         const { data: allItemsData, error: itemsErr } = await supabase
           .from('items_v2')
-          .select('id, household_id, cell_id, name, qty, expires_at, image_path')
+          .select('id, household_id, cell_id, name, qty, expires_at, image_path, remark')
           .in('household_id', householdIds);
 
         if (!itemsErr && allItemsData) {
@@ -529,7 +531,7 @@ export default function Page() {
 
       const { data: itemData, error: iErr } = await supabase
         .from('items_v2')
-        .select('id, household_id, cell_id, name, qty, expires_at, image_path')
+        .select('id, household_id, cell_id, name, qty, expires_at, image_path, remark')
         .eq('household_id', effectiveHouseholdId)
         .in('cell_id', cellIds)
         .order('name', { ascending: true });
@@ -646,19 +648,24 @@ export default function Page() {
   // Use all household items for search (across all households the user is in)
   const fuse = useMemo(() => {
     return new Fuse(allHouseholdItems, {
-      keys: ['name'],
+      keys: ['name', 'remark'],
       threshold: 0.35,
       ignoreLocation: true,
       minMatchCharLength: 2,
+      includeMatches: true, // Include match information for highlighting
     });
   }, [allHouseholdItems]);
   
-  // Search results from all households
-  const searchResults = useMemo(() => {
+  // Search results from all households (with match info)
+  const searchResultsWithMatch = useMemo(() => {
     const q = search.trim();
-    if (!q) return [];
-    return fuse.search(q).slice(0, 100).map((r) => r.item);
+    if (!q || q.length < 2) return [];
+    return fuse.search(q).slice(0, 100);
   }, [search, fuse]);
+
+  const searchResults = useMemo(() => {
+    return searchResultsWithMatch.map((r) => r.item);
+  }, [searchResultsWithMatch]);
 
   // Matched item IDs from search (for filtering cells)
   const matchedItemIds = useMemo(() => {
@@ -893,7 +900,7 @@ export default function Page() {
     // Load all items
     const { data: allItemsData } = await supabase
       .from('items_v2')
-      .select('id, household_id, cell_id, name, qty, expires_at, image_path')
+      .select('id, household_id, cell_id, name, qty, expires_at, image_path, remark')
       .in('household_id', householdIds);
     if (allItemsData) setAllHouseholdItems(allItemsData as ItemV2[]);
 
@@ -1018,6 +1025,8 @@ export default function Page() {
       image_path: null,
       room_id: defaultRoomId,
       cell_id: defaultCellId,
+      tag: '',
+      remark: '',
     });
 
     setCurrentImageUrl(''); // Reset image URL for new item
@@ -1042,6 +1051,7 @@ export default function Page() {
       image_path: imagePath,
       room_id: currentRoomId,
       cell_id: item.cell_id,
+      remark: item.remark ?? '',
     });
 
     // Load image URL asynchronously
@@ -1167,6 +1177,8 @@ export default function Page() {
       image_path = fileName;
     }
 
+    const remark = itemDraft.remark.trim() || null;
+
     if (itemMode === 'add') {
       const { error } = await supabase.from('items_v2').insert({
         household_id: activeHouseholdId,
@@ -1175,6 +1187,7 @@ export default function Page() {
         qty: qty, // Required, always a number >= 1
         expires_at,
         image_path,
+        remark,
       });
 
       if (error) {
@@ -1204,6 +1217,7 @@ export default function Page() {
         qty,
         expires_at,
         image_path,
+        remark,
       })
       .eq('id', itemDraft.id);
 
@@ -1344,34 +1358,6 @@ export default function Page() {
           <span className="text-xs text-black/60">▾</span>
         </button>
       </div>
-
-      <div className="flex items-center gap-2">
-        <button
-          type="button"
-          onClick={() => {
-            setSelectionMode(!selectionMode);
-            if (selectionMode) {
-              setSelectedItemIds(new Set());
-            }
-          }}
-          className={cx(
-            "px-3 py-2 rounded-xl border text-sm",
-            selectionMode 
-              ? "border-blue-600/30 bg-blue-50 text-blue-700 hover:bg-blue-100" 
-              : "border-black/10 hover:bg-black/5"
-          )}
-        >
-          {selectionMode ? `Cancel (${selectedItemIds.size} selected)` : 'Select items'}
-        </button>
-        <button
-          type="button"
-          className={cx('px-3 py-2 rounded-xl border text-sm hover:bg-black/5', THEME.blueBorderSoft)}
-          onClick={openAddColumn}
-          title="Add column"
-        >
-          Add column
-        </button>
-      </div>
     </div>
   );
 
@@ -1455,7 +1441,65 @@ export default function Page() {
               {search.trim() && searchResults.length > 0 && (
                 <div className="mt-3 pt-3 border-t border-black/10">
                   <div className="flex flex-col gap-2">
-                    {searchResults.map((item) => {
+                    {searchResultsWithMatch.map((searchResult) => {
+                      const item = searchResult.item;
+                      // Check if match is in remark field
+                      // Fuse.js match structure: { key: string | string[], indices: number[][] }
+                      const matchedInRemark = searchResult.matches?.some(match => {
+                        if (!match.key) return false;
+                        // Handle both string and array keys
+                        const keyStr = typeof match.key === 'string' ? match.key : (Array.isArray(match.key) ? match.key.join('.') : '');
+                        const isRemarkMatch = keyStr === 'remark' || keyStr.includes('remark');
+                        return isRemarkMatch;
+                      });
+                      
+                      // Get remark match indices for highlighting
+                      const remarkMatch = searchResult.matches?.find(match => {
+                        if (!match.key) return false;
+                        const keyStr = typeof match.key === 'string' ? match.key : (Array.isArray(match.key) ? match.key.join('.') : '');
+                        return keyStr === 'remark' || keyStr.includes('remark');
+                      });
+                      
+                      // Helper to highlight matched text in remark
+                      // Fuse.js indices are [start, end] pairs
+                      const highlightRemark = (text: string) => {
+                        if (!remarkMatch?.indices || !text) return text;
+                        
+                        const parts: (string | JSX.Element)[] = [];
+                        let lastIndex = 0;
+                        
+                        // Sort ranges by start position
+                        const ranges = remarkMatch.indices
+                          .map(([start, end]) => [Math.max(0, start), Math.min(text.length - 1, end)])
+                          .sort((a, b) => (a[0] as number) - (b[0] as number));
+                        
+                        ranges.forEach(([start, end], idx) => {
+                          const startIdx = start as number;
+                          const endIdx = end as number;
+                          
+                          if (startIdx >= lastIndex && startIdx < text.length) {
+                            // Add text before match
+                            if (startIdx > lastIndex) {
+                              parts.push(text.slice(lastIndex, startIdx));
+                            }
+                            // Add highlighted match
+                            parts.push(
+                              <span key={`match-${idx}`} className="bg-yellow-200 font-semibold">
+                                {text.slice(startIdx, endIdx + 1)}
+                              </span>
+                            );
+                            lastIndex = endIdx + 1;
+                          }
+                        });
+                        
+                        // Add remaining text
+                        if (lastIndex < text.length) {
+                          parts.push(text.slice(lastIndex));
+                        }
+                        
+                        return parts.length > 0 ? <>{parts}</> : text;
+                      };
+                      
                       const household = households.find((h) => h.id === item.household_id);
                       // Use all household data for search results
                       const cell = allCellById.get(item.cell_id) || cellById.get(item.cell_id);
@@ -1463,12 +1507,16 @@ export default function Page() {
                       const room = col ? (allColumnToRoom.get(col.id) || (col.room_id ? roomsInHousehold.find((r) => r.id === col.room_id) : null)) : null;
                       const isInCurrentRoom = !!cellById.get(item.cell_id) && !!cellToColumn.get(item.cell_id);
                       
-                      // Build location text: room / column / cell
+                      // Build location text: only show room if not current room, always show column / cell
                       let locationParts: string[] = [];
-                      if (room) locationParts.push(room.name);
+                      const isCurrentRoom = room && room.id === roomId;
+                      if (room && !isCurrentRoom) locationParts.push(room.name);
                       if (col) locationParts.push(col.name);
                       if (cell) locationParts.push(cell.code);
                       const locationText = locationParts.join(' / ');
+                      
+                      // Only show household name if it's different from current active household
+                      const isCurrentHousehold = household && household.id === activeHouseholdId;
                       
                       return (
                         <div
@@ -1491,18 +1539,25 @@ export default function Page() {
                           }}
                         >
                           <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-2 flex-wrap">
-                              <span className="text-sm truncate" style={fontNunito}>
-                                {item.name}
-                              </span>
-                              {item.qty !== null && item.qty !== undefined && (
-                                <span className="text-xs text-black/70">× {item.qty}</span>
-                              )}
-                              {household && (
-                                <span className="text-xs text-black/60 whitespace-nowrap">· {household.name}</span>
-                              )}
-                              {locationText && (
-                                <span className="text-xs text-black/60 whitespace-nowrap">· {locationText}</span>
+                            <div className="flex flex-col gap-1">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="text-sm truncate" style={fontNunito}>
+                                  {item.name}
+                                </span>
+                                {item.qty !== null && item.qty !== undefined && (
+                                  <span className="text-xs text-black/70">× {item.qty}</span>
+                                )}
+                                {household && !isCurrentHousehold && (
+                                  <span className="text-xs text-black/60 whitespace-nowrap">· {household.name}</span>
+                                )}
+                                {locationText && (
+                                  <span className="text-xs text-black/60 whitespace-nowrap">· {locationText}</span>
+                                )}
+                              </div>
+                              {matchedInRemark && item.remark && (
+                                <div className="text-xs text-black/60 italic">
+                                  {highlightRemark(item.remark)}
+                                </div>
                               )}
                             </div>
                           </div>
@@ -1524,6 +1579,35 @@ export default function Page() {
               <ExpiringSection title="Expiring (0–7d)" items={expiring0to7} />
               <ExpiringSection title="Expiring (8–30d)" items={expiring8to30} />
             </div>
+          </div>
+
+          {/* Action buttons below search and expiring */}
+          <div className="mt-3 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setSelectionMode(!selectionMode);
+                if (selectionMode) {
+                  setSelectedItemIds(new Set());
+                }
+              }}
+              className={cx(
+                "px-3 py-2 rounded-xl border text-sm",
+                selectionMode 
+                  ? "border-blue-600/30 bg-blue-50 text-blue-700 hover:bg-blue-100" 
+                  : "border-black/10 hover:bg-black/5"
+              )}
+            >
+              {selectionMode ? `Cancel (${selectedItemIds.size} selected)` : 'Select items'}
+            </button>
+            <button
+              type="button"
+              className={cx('px-3 py-2 rounded-xl border text-sm hover:bg-black/5', THEME.blueBorderSoft)}
+              onClick={openAddColumn}
+              title="Add column"
+            >
+              Add column
+            </button>
           </div>
 
           {/* Columns */}
@@ -1752,21 +1836,23 @@ export default function Page() {
                                             )}
                                             title={selectionMode ? 'Click to select' : 'Click to edit'}
                                           >
-                                            <div className="flex items-center gap-2">
-                                              <div className="text-sm truncate" style={fontNunito}>
-                                                {it.name}
+                                            <div className="flex flex-col gap-1">
+                                              <div className="flex items-center gap-2">
+                                                <div className="text-sm truncate" style={fontNunito}>
+                                                  {it.name}
+                                                </div>
+                                                {it.qty !== null && it.qty !== undefined && (
+                                                  <div className="text-xs text-black/70">× {it.qty}</div>
+                                                )}
+                                                {(() => {
+                                                  const label = formatExpiryLabel(it.expires_at);
+                                                  return label ? (
+                                                    <div className="text-[11px] text-black/70 whitespace-nowrap">
+                                                      {label}
+                                                    </div>
+                                                  ) : null;
+                                                })()}
                                               </div>
-                                              {it.qty !== null && it.qty !== undefined && (
-                                                <div className="text-xs text-black/70">× {it.qty}</div>
-                                              )}
-                                              {(() => {
-                                                const label = formatExpiryLabel(it.expires_at);
-                                                return label ? (
-                                                  <div className="text-[11px] text-black/70 whitespace-nowrap">
-                                                    {label}
-                                                  </div>
-                                                ) : null;
-                                              })()}
                                             </div>
                                           </button>
                                         </div>
@@ -2051,6 +2137,17 @@ export default function Page() {
                       </option>
                     ))}
                 </select>
+              </div>
+
+              <div>
+                <div className="text-sm text-black/70">Remark</div>
+                <textarea
+                  value={itemDraft.remark ?? ''}
+                  onChange={(e) => setItemDraft((p) => ({ ...p, remark: e.target.value }))}
+                  className="mt-2 w-full px-3 py-2 rounded-xl border border-black/10 bg-white text-sm outline-none focus:ring-2 focus:ring-black/10 resize-none"
+                  placeholder="Additional notes..."
+                  rows={3}
+                />
               </div>
 
               <div>
