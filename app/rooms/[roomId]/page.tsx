@@ -223,6 +223,7 @@ export default function Page() {
   // UI state
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [savingItem, setSavingItem] = useState(false);
   const [toast, setToast] = useState('');
 
   // Search
@@ -234,6 +235,12 @@ export default function Page() {
 
   // switch household modal
   const [switchHouseholdOpen, setSwitchHouseholdOpen] = useState(false);
+
+  // Batch selection mode
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedItemIds, setSelectedItemIds] = useState<Set<UUID>>(new Set());
+  const [moveToLocationModalOpen, setMoveToLocationModalOpen] = useState(false);
+  const [batchMoveTargetCellId, setBatchMoveTargetCellId] = useState<UUID | null>(null);
 
   // Column menu + modals
   const [columnMenuOpenId, setColumnMenuOpenId] = useState<UUID | null>(null);
@@ -1060,7 +1067,55 @@ export default function Page() {
     await refreshSearchItems();
   };
 
+  const batchDeleteItems = async () => {
+    if (selectedItemIds.size === 0) return;
+    
+    const itemIdsArray = Array.from(selectedItemIds);
+    const { error } = await supabase
+      .from('items_v2')
+      .delete()
+      .in('id', itemIdsArray);
+    
+    if (error) {
+      console.error(error);
+      setToast(`Failed to delete ${itemIdsArray.length} item(s)`);
+      return;
+    }
+    
+    setToast(`${itemIdsArray.length} item(s) deleted`);
+    setSelectedItemIds(new Set());
+    setSelectionMode(false);
+    await loadAll({ silent: true });
+    await refreshSearchItems();
+  };
+
+  const batchMoveItems = async () => {
+    if (selectedItemIds.size === 0 || !batchMoveTargetCellId) return;
+    
+    const itemIdsArray = Array.from(selectedItemIds);
+    const { error } = await supabase
+      .from('items_v2')
+      .update({ cell_id: batchMoveTargetCellId })
+      .in('id', itemIdsArray);
+    
+    if (error) {
+      console.error(error);
+      setToast(`Failed to move ${itemIdsArray.length} item(s)`);
+      return;
+    }
+    
+    setToast(`${itemIdsArray.length} item(s) moved`);
+    setSelectedItemIds(new Set());
+    setSelectionMode(false);
+    setMoveToLocationModalOpen(false);
+    setBatchMoveTargetCellId(null);
+    await loadAll({ silent: true });
+    await refreshSearchItems();
+  };
+
   const saveItem = async () => {
+    if (savingItem) return; // Prevent multiple clicks
+    
     const name = itemDraft.name.trim();
     if (!name) {
       setToast('Name cannot be empty');
@@ -1087,6 +1142,10 @@ export default function Page() {
       return;
     }
 
+    setSavingItem(true);
+    
+    try {
+
     const expires_at = itemDraft.expires_at.trim() ? `${itemDraft.expires_at.trim()}T00:00:00.000Z` : null;
 
     let image_path = itemDraft.image_path ?? null;
@@ -1102,6 +1161,7 @@ export default function Page() {
       if (upErr) {
         console.error(upErr);
         setToast('Failed to upload image');
+        setSavingItem(false);
         return;
       }
       image_path = fileName;
@@ -1120,16 +1180,21 @@ export default function Page() {
       if (error) {
         console.error(error);
         setToast('Failed to create item');
+        setSavingItem(false);
         return;
       }
       setItemModalOpen(false);
       setToast('Item created');
       await loadAll({ silent: true });
       await refreshSearchItems();
+      setSavingItem(false);
       return;
     }
 
-    if (!itemDraft.id) return;
+    if (!itemDraft.id) {
+      setSavingItem(false);
+      return;
+    }
 
     const { error } = await supabase
       .from('items_v2')
@@ -1144,13 +1209,20 @@ export default function Page() {
 
     if (error) {
       console.error(error);
-        setToast('Failed to update item');
+      setToast('Failed to update item');
+      setSavingItem(false);
       return;
     }
     setItemModalOpen(false);
     setToast('Item updated');
     await loadAll({ silent: true });
     await refreshSearchItems();
+    setSavingItem(false);
+    } catch (e) {
+      console.error('Error saving item:', e);
+      setToast('Failed to save item');
+      setSavingItem(false);
+    }
   };
 
   const renderLocationLabel = (cellId: UUID) => {
@@ -1276,6 +1348,23 @@ export default function Page() {
       <div className="flex items-center gap-2">
         <button
           type="button"
+          onClick={() => {
+            setSelectionMode(!selectionMode);
+            if (selectionMode) {
+              setSelectedItemIds(new Set());
+            }
+          }}
+          className={cx(
+            "px-3 py-2 rounded-xl border text-sm",
+            selectionMode 
+              ? "border-blue-600/30 bg-blue-50 text-blue-700 hover:bg-blue-100" 
+              : "border-black/10 hover:bg-black/5"
+          )}
+        >
+          {selectionMode ? `Cancel (${selectedItemIds.size} selected)` : 'Select items'}
+        </button>
+        <button
+          type="button"
           className={cx('px-3 py-2 rounded-xl border text-sm hover:bg-black/5', THEME.blueBorderSoft)}
           onClick={openAddColumn}
           title="Add column"
@@ -1300,6 +1389,35 @@ export default function Page() {
           />
 
           <RoomHeader />
+
+          {/* Batch actions bar */}
+          {selectionMode && selectedItemIds.size > 0 && (
+            <div className="mt-3 px-4 py-3 rounded-xl border border-blue-200 bg-blue-50 flex items-center justify-between gap-3">
+              <div className="text-sm text-blue-900 font-medium">
+                {selectedItemIds.size} item{selectedItemIds.size > 1 ? 's' : ''} selected
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setMoveToLocationModalOpen(true)}
+                  className="px-3 py-1.5 rounded-lg border border-blue-600 bg-blue-600 text-white hover:bg-blue-700 text-sm"
+                >
+                  Move to location
+                </button>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    if (confirm(`Are you sure you want to delete ${selectedItemIds.size} item(s)?`)) {
+                      await batchDeleteItems();
+                    }
+                  }}
+                  className="px-3 py-1.5 rounded-lg border border-red-600 bg-red-600 text-white hover:bg-red-700 text-sm"
+                >
+                  Delete
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Search + expiring */}
           <div className="mt-4 grid grid-cols-1 lg:grid-cols-3 gap-3">
@@ -1589,34 +1707,69 @@ export default function Page() {
                                       });
                                       
                                       return sorted.map((it) => (
-                                      <button
-                                        key={it.id}
-                                        data-item-id={it.id}
-                                        type="button"
-                                        onClick={() => openEditItem(it)}
-                                        className={cx(
-                                          'px-3 py-2 rounded-2xl border text-left hover:shadow-sm transition-shadow',
-                                          expiryChipClass(it.expires_at)
-                                        )}
-                                        title="Click to edit"
-                                      >
-                                        <div className="flex items-center gap-2">
-                                          <div className="text-sm truncate" style={fontNunito}>
-                                            {it.name}
-                                          </div>
-                                          {it.qty !== null && it.qty !== undefined && (
-                                            <div className="text-xs text-black/70">× {it.qty}</div>
+                                        <div key={it.id} className="flex items-center gap-2">
+                                          {selectionMode && (
+                                            <input
+                                              type="checkbox"
+                                              checked={selectedItemIds.has(it.id)}
+                                              onChange={(e) => {
+                                                e.stopPropagation();
+                                                setSelectedItemIds((prev) => {
+                                                  const next = new Set(prev);
+                                                  if (e.target.checked) {
+                                                    next.add(it.id);
+                                                  } else {
+                                                    next.delete(it.id);
+                                                  }
+                                                  return next;
+                                                });
+                                              }}
+                                              className="h-4 w-4 rounded border-black/20 text-blue-600 focus:ring-blue-500"
+                                            />
                                           )}
-                                          {(() => {
-                                            const label = formatExpiryLabel(it.expires_at);
-                                            return label ? (
-                                              <div className="text-[11px] text-black/70 whitespace-nowrap">
-                                                {label}
+                                          <button
+                                            data-item-id={it.id}
+                                            type="button"
+                                            onClick={() => {
+                                              if (selectionMode) {
+                                                setSelectedItemIds((prev) => {
+                                                  const next = new Set(prev);
+                                                  if (next.has(it.id)) {
+                                                    next.delete(it.id);
+                                                  } else {
+                                                    next.add(it.id);
+                                                  }
+                                                  return next;
+                                                });
+                                              } else {
+                                                openEditItem(it);
+                                              }
+                                            }}
+                                            className={cx(
+                                              'px-3 py-2 rounded-2xl border text-left hover:shadow-sm transition-shadow flex-1',
+                                              expiryChipClass(it.expires_at),
+                                              selectionMode && selectedItemIds.has(it.id) && 'ring-2 ring-blue-500 ring-offset-2'
+                                            )}
+                                            title={selectionMode ? 'Click to select' : 'Click to edit'}
+                                          >
+                                            <div className="flex items-center gap-2">
+                                              <div className="text-sm truncate" style={fontNunito}>
+                                                {it.name}
                                               </div>
-                                            ) : null;
-                                          })()}
+                                              {it.qty !== null && it.qty !== undefined && (
+                                                <div className="text-xs text-black/70">× {it.qty}</div>
+                                              )}
+                                              {(() => {
+                                                const label = formatExpiryLabel(it.expires_at);
+                                                return label ? (
+                                                  <div className="text-[11px] text-black/70 whitespace-nowrap">
+                                                    {label}
+                                                  </div>
+                                                ) : null;
+                                              })()}
+                                            </div>
+                                          </button>
                                         </div>
-                                      </button>
                                       ));
                                     })()
                                   )}
@@ -1884,11 +2037,19 @@ export default function Page() {
                   )}
                 >
                   <option value="">{loadingCellsForRoom ? 'Loading cells…' : 'Select cell…'}</option>
-                  {(itemDraft.room_id ? (cellsForRoomCache[itemDraft.room_id] ?? []) : []).map(({ cell, column }) => (
-                    <option key={cell.id} value={cell.id}>
-                      {column.name} / {cell.code}
-                    </option>
-                  ))}
+                  {(itemDraft.room_id ? (cellsForRoomCache[itemDraft.room_id] ?? []) : [])
+                    .sort((a, b) => {
+                      // First sort by column position
+                      const colPosDiff = (a.column.position ?? 0) - (b.column.position ?? 0);
+                      if (colPosDiff !== 0) return colPosDiff;
+                      // If same column, sort by cell position
+                      return (a.cell.position ?? 0) - (b.cell.position ?? 0);
+                    })
+                    .map(({ cell, column }) => (
+                      <option key={cell.id} value={cell.id}>
+                        {column.name} / {cell.code}
+                      </option>
+                    ))}
                 </select>
               </div>
 
@@ -1980,22 +2141,124 @@ export default function Page() {
             <div className="flex items-center gap-2">
               <button 
                 type="button"
-                className="px-3 py-2 rounded-xl border border-black/10 hover:bg-black/5 text-sm" 
+                className="px-3 py-2 rounded-xl border border-black/10 hover:bg-black/5 text-sm disabled:opacity-60" 
                 onClick={() => setItemModalOpen(false)}
+                disabled={savingItem}
               >
                 Cancel
               </button>
               <button 
                 type="submit"
-                className="px-3 py-2 rounded-xl border border-black bg-black text-white hover:bg-black/90 text-sm"
+                className="px-3 py-2 rounded-xl border border-black bg-black text-white hover:bg-black/90 text-sm disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
+                disabled={savingItem}
               >
-                Save
+                {savingItem && (
+                  <svg className="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                )}
+                {savingItem ? 'Saving...' : 'Save'}
               </button>
             </div>
           </div>
           </form>
         </Modal>
 
+        {/* Batch move to location modal */}
+        <Modal 
+          open={moveToLocationModalOpen} 
+          title="Move items to location" 
+          onClose={() => {
+            setMoveToLocationModalOpen(false);
+            setBatchMoveTargetCellId(null);
+          }} 
+          widthClass="max-w-lg"
+        >
+          <div className="space-y-4">
+            <div className="text-sm text-black/70">
+              Select the destination location for {selectedItemIds.size} item(s):
+            </div>
+            
+            <div>
+              <div className="text-sm text-black/70 mb-2">Room</div>
+              <select
+                value={batchMoveTargetCellId ? (() => {
+                  // Find which room contains the selected cell
+                  for (const [roomId, cells] of Object.entries(cellsForRoomCache)) {
+                    if (cells.some(({ cell }) => cell.id === batchMoveTargetCellId)) {
+                      return roomId;
+                    }
+                  }
+                  return '';
+                })() : ''}
+                onChange={async (e) => {
+                  const rid = (e.target.value || null) as UUID | null;
+                  setBatchMoveTargetCellId(null);
+                  if (rid) await ensureCellsForRoomLoaded(rid);
+                }}
+                className="w-full px-3 py-2 rounded-xl border border-black/10 bg-white text-sm outline-none focus:ring-2 focus:ring-black/10"
+              >
+                <option value="">Select room…</option>
+                {roomsInHousehold.map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {r.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <div className="text-sm text-black/70 mb-2">Cell</div>
+              <select
+                value={batchMoveTargetCellId ?? ''}
+                onChange={(e) => setBatchMoveTargetCellId((e.target.value || null) as UUID | null)}
+                disabled={Object.keys(cellsForRoomCache).length === 0}
+                className={cx(
+                  "w-full px-3 py-2 rounded-xl border bg-white text-sm outline-none focus:ring-2 focus:ring-black/10",
+                  "border-black/10",
+                  Object.keys(cellsForRoomCache).length === 0 && 'opacity-60'
+                )}
+              >
+                <option value="">Select cell…</option>
+                {Object.entries(cellsForRoomCache).map(([roomId, cells]) =>
+                  cells
+                    .sort((a, b) => {
+                      const colPosDiff = (a.column.position ?? 0) - (b.column.position ?? 0);
+                      if (colPosDiff !== 0) return colPosDiff;
+                      return (a.cell.position ?? 0) - (b.cell.position ?? 0);
+                    })
+                    .map(({ cell, column }) => (
+                      <option key={cell.id} value={cell.id}>
+                        {column.name} / {cell.code}
+                      </option>
+                    ))
+                )}
+              </select>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setMoveToLocationModalOpen(false);
+                  setBatchMoveTargetCellId(null);
+                }}
+                className="px-3 py-2 rounded-xl border border-black/10 hover:bg-black/5 text-sm"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={batchMoveItems}
+                disabled={!batchMoveTargetCellId}
+                className="px-3 py-2 rounded-xl border border-black bg-black text-white hover:bg-black/90 text-sm disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                Move {selectedItemIds.size} item(s)
+              </button>
+            </div>
+          </div>
+        </Modal>
 
         {toast && <Toast message={toast} />}
       </div>

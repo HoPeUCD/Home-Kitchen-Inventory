@@ -3,6 +3,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { useRouter } from "next/navigation";
+import * as XLSX from "xlsx";
 
 import { supabase } from "@/src/lib/supabase";
 import AuthGate from "@/src/components/AuthGate";
@@ -236,6 +237,154 @@ export default function HouseholdsPage() {
     }
   }
 
+  async function exportToExcel(householdId: string, householdName: string) {
+    try {
+      setBusyId(householdId);
+      setErr(null);
+
+      // Load all rooms for this household
+      const { data: roomsData, error: roomsErr } = await supabase
+        .from('rooms')
+        .select('id, name, position')
+        .eq('household_id', householdId)
+        .order('position', { ascending: true });
+
+      if (roomsErr) throw roomsErr;
+      if (!roomsData || roomsData.length === 0) {
+        setToast('No rooms found in this household');
+        return;
+      }
+
+      const roomIds = roomsData.map(r => r.id);
+
+      // Load all columns
+      const { data: columnsData, error: columnsErr } = await supabase
+        .from('room_columns')
+        .select('id, room_id, name, position')
+        .in('room_id', roomIds)
+        .order('position', { ascending: true });
+
+      if (columnsErr) throw columnsErr;
+
+      const columnIds = columnsData?.map(c => c.id) ?? [];
+      const columnById = new Map(columnsData?.map(c => [c.id, c]) ?? []);
+
+      // Load all cells
+      const { data: cellsData, error: cellsErr } = await supabase
+        .from('room_cells')
+        .select('id, column_id, code, position')
+        .in('column_id', columnIds)
+        .order('position', { ascending: true });
+
+      if (cellsErr) throw cellsErr;
+
+      const cellIds = cellsData?.map(c => c.id) ?? [];
+      const cellById = new Map(cellsData?.map(c => [c.id, c]) ?? []);
+
+      // Load all items
+      const { data: itemsData, error: itemsErr } = await supabase
+        .from('items_v2')
+        .select('id, cell_id, name, qty, expires_at')
+        .eq('household_id', householdId)
+        .in('cell_id', cellIds);
+
+      if (itemsErr) throw itemsErr;
+
+      // Build room -> column -> cell mapping
+      const roomToColumns = new Map<string, typeof columnsData>();
+      const columnToCells = new Map<string, typeof cellsData>();
+
+      columnsData?.forEach(col => {
+        if (!roomToColumns.has(col.room_id)) {
+          roomToColumns.set(col.room_id, []);
+        }
+        roomToColumns.get(col.room_id)!.push(col);
+      });
+
+      cellsData?.forEach(cell => {
+        const col = columnById.get(cell.column_id);
+        if (col) {
+          if (!columnToCells.has(cell.column_id)) {
+            columnToCells.set(cell.column_id, []);
+          }
+          columnToCells.get(cell.column_id)!.push(cell);
+        }
+      });
+
+      // Group items by cell
+      const itemsByCell = new Map<string, typeof itemsData>();
+      itemsData?.forEach(item => {
+        if (!itemsByCell.has(item.cell_id)) {
+          itemsByCell.set(item.cell_id, []);
+        }
+        itemsByCell.get(item.cell_id)!.push(item);
+      });
+
+      // Build Excel data rows
+      const excelData: Array<{
+        Room: string;
+        Column: string;
+        Cell: string;
+        'Item Name': string;
+        'Quantity': number | null;
+        'Expire Date': string | null;
+        'Location': string;
+      }> = [];
+
+      // Sort rooms by position
+      const sortedRooms = [...roomsData].sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+
+      sortedRooms.forEach(room => {
+        const columns = roomToColumns.get(room.id) ?? [];
+        const sortedColumns = columns.sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+
+        sortedColumns.forEach(column => {
+          const cells = columnToCells.get(column.id) ?? [];
+          const sortedCells = cells.sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+
+          sortedCells.forEach(cell => {
+            const items = itemsByCell.get(cell.id) ?? [];
+
+            // Only include cells that have items
+            if (items.length > 0) {
+              items.forEach(item => {
+                const location = `${room.name} / ${column.name} / ${cell.code}`;
+                excelData.push({
+                  Room: room.name,
+                  Column: column.name,
+                  Cell: cell.code,
+                  'Item Name': item.name,
+                  'Quantity': item.qty,
+                  'Expire Date': item.expires_at ? new Date(item.expires_at + 'T00:00:00').toLocaleDateString('en-US', { year: 'numeric', month: '2-digit', day: '2-digit' }) : '',
+                  'Location': location,
+                });
+              });
+            }
+          });
+        });
+      });
+
+      // Create workbook and worksheet
+      const ws = XLSX.utils.json_to_sheet(excelData);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Inventory');
+
+      // Generate file name with date
+      const dateStr = new Date().toISOString().slice(0, 10);
+      const fileName = `${householdName}_${dateStr}.xlsx`;
+
+      // Write and download
+      XLSX.writeFile(wb, fileName);
+
+      setToast('Export completed successfully');
+    } catch (e: any) {
+      console.error('Export error:', e);
+      setErr(e?.message ?? 'Failed to export');
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -402,7 +551,7 @@ export default function HouseholdsPage() {
               const members = householdMembers[h.id] ?? [];
 
               return (
-                <div key={h.id} className={cx("rounded-2xl border p-4", "border-black/10", oatCard)}>
+                <div key={h.id} className={cx("rounded-2xl border p-4 flex flex-col", "border-black/10", oatCard)}>
                   {/* Active and Default badges at the top */}
                   <div className="flex items-center gap-2 flex-wrap mb-3">
                     {activeHouseholdId === h.id && (
@@ -432,7 +581,7 @@ export default function HouseholdsPage() {
                       disabled={busy}
                       className="px-3 py-2 rounded-xl border border-black/10 hover:bg-black/5 text-sm disabled:opacity-60"
                     >
-                      Switch only
+                      Switch
                     </button>
 
                     <button
@@ -445,22 +594,12 @@ export default function HouseholdsPage() {
                     >
                       {isDefault ? "Default" : "Set as default"}
                     </button>
-
-                    {isOwner && (
-                      <button
-                        onClick={() => deleteHousehold(h.id, h.name)}
-                        disabled={busy}
-                        className="px-3 py-2 rounded-xl border border-red-600/30 bg-red-50 text-red-700 hover:bg-red-100 text-sm font-semibold disabled:opacity-60"
-                      >
-                        Delete
-                      </button>
-                    )}
                   </div>
 
-                  {/* Members list */}
-                  <div className="pt-3 border-t border-black/10">
+                  {/* Members list - flex-grow to push export button to bottom */}
+                  <div className="pt-3 border-t border-black/10 flex-grow flex flex-col">
                     <div className="text-sm font-medium text-black/80 mb-2">Members ({members.length}):</div>
-                    <div className="space-y-1">
+                    <div className="space-y-1 flex-grow">
                       {members.length > 0 ? (
                         members.map((member) => (
                           <div key={member.user_id} className="flex items-center justify-between gap-2 text-sm">
@@ -484,6 +623,25 @@ export default function HouseholdsPage() {
                         ))
                       ) : (
                         <div className="text-sm text-black/60">No members found</div>
+                      )}
+                    </div>
+                    {/* Export and Delete buttons at the bottom */}
+                    <div className="mt-3 space-y-2">
+                      <button
+                        onClick={() => exportToExcel(h.id, h.name)}
+                        disabled={busyId === h.id}
+                        className="w-full px-3 py-2 rounded-xl border border-blue-600/30 bg-blue-50 text-blue-700 hover:bg-blue-100 text-sm disabled:opacity-60"
+                      >
+                        {busyId === h.id ? "Exporting..." : "Export to Excel"}
+                      </button>
+                      {isOwner && (
+                        <button
+                          onClick={() => deleteHousehold(h.id, h.name)}
+                          disabled={busy}
+                          className="w-full px-3 py-2 rounded-xl border border-red-600/30 bg-red-50 text-red-700 hover:bg-red-100 text-sm font-semibold disabled:opacity-60"
+                        >
+                          Delete
+                        </button>
                       )}
                     </div>
                   </div>
