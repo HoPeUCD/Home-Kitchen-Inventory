@@ -1452,7 +1452,7 @@ export default function Page() {
                         if (typeof match.key === 'string') {
                           keyStr = match.key;
                         } else if (Array.isArray(match.key)) {
-                          keyStr = match.key.join('.');
+                          keyStr = (match.key as string[]).join('.');
                         } else {
                           keyStr = '';
                         }
@@ -1467,7 +1467,7 @@ export default function Page() {
                         if (typeof match.key === 'string') {
                           keyStr = match.key;
                         } else if (Array.isArray(match.key)) {
-                          keyStr = match.key.join('.');
+                          keyStr = (match.key as string[]).join('.');
                         } else {
                           keyStr = '';
                         }
@@ -1479,7 +1479,7 @@ export default function Page() {
                       const highlightRemark = (text: string) => {
                         if (!remarkMatch?.indices || !text) return text;
                         
-                        const parts: (string | JSX.Element)[] = [];
+                        const parts: (string | React.ReactElement)[] = [];
                         let lastIndex = 0;
                         
                         // Sort ranges by start position
