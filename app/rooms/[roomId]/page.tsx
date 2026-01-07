@@ -1226,7 +1226,7 @@ export default function Page() {
                     <SmallIconButton title="Edit item" onClick={() => openEditItem(it)}>
                       ✏️
                     </SmallIconButton>
-                    <SmallIconButton title="Delete item" onClick={() => openDeleteItem(it.id)} className="hover:bg-red-50">
+                    <SmallIconButton title="Delete item" onClick={() => deleteItem(it.id)} className="hover:bg-red-50">
                       🗑️
                     </SmallIconButton>
                   </div>
