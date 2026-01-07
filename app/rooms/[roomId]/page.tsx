@@ -286,6 +286,7 @@ export default function Page() {
     image_path: null,
     room_id: null,
     cell_id: null,
+    remark: '',
   });
 
   const itemNameInputRef = useRef<HTMLInputElement | null>(null);
