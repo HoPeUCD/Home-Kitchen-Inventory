@@ -1448,7 +1448,14 @@ export default function Page() {
                       const matchedInRemark = searchResult.matches?.some(match => {
                         if (!match.key) return false;
                         // Handle both string and array keys
-                        const keyStr = typeof match.key === 'string' ? match.key : (Array.isArray(match.key) ? match.key.join('.') : '');
+                        let keyStr: string;
+                        if (typeof match.key === 'string') {
+                          keyStr = match.key;
+                        } else if (Array.isArray(match.key)) {
+                          keyStr = match.key.join('.');
+                        } else {
+                          keyStr = '';
+                        }
                         const isRemarkMatch = keyStr === 'remark' || keyStr.includes('remark');
                         return isRemarkMatch;
                       });
@@ -1456,7 +1463,14 @@ export default function Page() {
                       // Get remark match indices for highlighting
                       const remarkMatch = searchResult.matches?.find(match => {
                         if (!match.key) return false;
-                        const keyStr = typeof match.key === 'string' ? match.key : (Array.isArray(match.key) ? match.key.join('.') : '');
+                        let keyStr: string;
+                        if (typeof match.key === 'string') {
+                          keyStr = match.key;
+                        } else if (Array.isArray(match.key)) {
+                          keyStr = match.key.join('.');
+                        } else {
+                          keyStr = '';
+                        }
                         return keyStr === 'remark' || keyStr.includes('remark');
                       });
                       
