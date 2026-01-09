@@ -7,8 +7,8 @@
 YOUR_APP_URL="https://home-kitchen-inventory.vercel.app"  # Replace with your Vercel app URL
 CRON_SECRET="88888888"          # Replace with your CRON_SECRET from Vercel
 
-# API endpoint
-API_URL="${YOUR_APP_URL}/api/cron/weekly-reminder"
+# API endpoint (remove trailing slash from URL if present)
+API_URL="${YOUR_APP_URL%/}/api/cron/weekly-reminder"
 
 # Make the API call
 response=$(curl -s -w "\n%{http_code}" -X GET \

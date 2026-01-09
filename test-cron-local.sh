@@ -4,11 +4,11 @@
 # This script tests the cron endpoint locally
 
 # Configuration - Update these values
-YOUR_APP_URL="https://home-kitchen-inventory.vercel.app/"  # Local development server
+YOUR_APP_URL="https://home-kitchen-inventory.vercel.app"  # Local development server
 CRON_SECRET="88888888"                 # Same as in your .env.local
 
-# API endpoint
-API_URL="${YOUR_APP_URL}/api/cron/weekly-reminder"
+# API endpoint (remove trailing slash from URL if present)
+API_URL="${YOUR_APP_URL%/}/api/cron/weekly-reminder"
 
 echo "Testing Weekly Reminder API..."
 echo "URL: ${API_URL}"
