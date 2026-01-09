@@ -617,6 +617,45 @@ export default function HouseholdsPage() {
     }
   }
 
+  async function sendExpiryReminder(householdId: string) {
+    if (busyId === householdId) return;
+    
+    setBusyId(householdId);
+    setErr(null);
+
+    try {
+      // Get session token for authentication
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        throw new Error("Not authenticated");
+      }
+
+      // Call API
+      const response = await fetch('/api/send-expiry-reminder', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({
+          householdId: householdId,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || 'Failed to send expiry reminder');
+      }
+
+      const data = await response.json();
+      setToast(`Expiry reminder sent to ${data.recipients} member(s). ${data.itemsCount} expiring items found.`);
+    } catch (e: any) {
+      setErr(e?.message ?? "Failed to send expiry reminder");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   const userEmail = session?.user?.email ?? "";
 
   return (
@@ -759,7 +798,7 @@ export default function HouseholdsPage() {
                         <div className="text-sm text-black/60">No members found</div>
                       )}
                     </div>
-                    {/* Export, Chat, and Delete buttons at the bottom */}
+                    {/* Export, Chat, Email Reminder, and Delete buttons at the bottom */}
                     <div className="mt-3 space-y-2">
                       <button
                         onClick={() => exportToExcel(h.id, h.name)}
@@ -774,6 +813,13 @@ export default function HouseholdsPage() {
                         className="w-full px-3 py-2 rounded-xl border border-green-600/30 bg-green-50 text-green-700 hover:bg-green-100 text-sm disabled:opacity-60"
                       >
                         💬 Ask AI about Inventory
+                      </button>
+                      <button
+                        onClick={() => sendExpiryReminder(h.id)}
+                        disabled={busyId === h.id}
+                        className="w-full px-3 py-2 rounded-xl border border-purple-600/30 bg-purple-50 text-purple-700 hover:bg-purple-100 text-sm disabled:opacity-60"
+                      >
+                        📧 Send Expiry Reminder
                       </button>
                       {isOwner && (
                         <button
