@@ -3,7 +3,7 @@ import { createClient } from '@supabase/supabase-js';
 import nodemailer from 'nodemailer';
 import { startOfWeek, endOfWeek, differenceInCalendarWeeks } from 'date-fns';
 import { Database } from '@/src/lib/database.types';
-import { calculateChoreOccurrences } from '@/src/lib/chores';
+import { calculateChoreOccurrences, ChoreOccurrence } from '@/src/lib/chores';
 
 // Initialize Supabase admin client
 function getSupabaseAdmin() {
@@ -22,6 +22,11 @@ type Chore = Database['public']['Tables']['chores']['Row'];
 type ChoreOverride = Database['public']['Tables']['chore_overrides']['Row'];
 type ChoreCompletion = Database['public']['Tables']['chore_completions']['Row'];
 type ChoreZone = Database['public']['Tables']['chore_zones']['Row'];
+
+type HouseholdMemberInfo = {
+  userId: string;
+  email: string | null;
+};
 
 // SMTP configuration
 function createTransporter() {
@@ -53,6 +58,7 @@ type PendingChoreEmailItem = {
   zoneName: string | null;
   dueDate: string;
   weeksOverdue?: number;
+   assigneeIds: string[];
 };
 
 async function getHouseholdChoreSummary(
@@ -119,7 +125,7 @@ async function getHouseholdChoreSummary(
     const choreOverrides = overrides.filter((o) => o.chore_id === chore.id);
     const choreCompletions = completions.filter((c) => c.chore_id === chore.id);
 
-    const occurrences = calculateChoreOccurrences(
+    const occurrences: ChoreOccurrence[] = calculateChoreOccurrences(
       chore,
       choreOverrides,
       choreCompletions,
@@ -127,7 +133,7 @@ async function getHouseholdChoreSummary(
       weekEnd
     );
 
-    occurrences.forEach((occ) => {
+    occurrences.forEach((occ: ChoreOccurrence) => {
       if (occ.status === 'skipped' || occ.status === 'completed') return;
 
       const due = new Date(occ.date);
@@ -142,21 +148,115 @@ async function getHouseholdChoreSummary(
           zoneName,
           dueDate: dueDateStr,
           weeksOverdue: weeksOverdue > 0 ? weeksOverdue : undefined,
+          assigneeIds: occ.assigneeIds || [],
         });
       } else if (due >= weekStart && due <= weekEnd) {
         thisWeek.push({
           title: chore.title,
           zoneName,
           dueDate: dueDateStr,
+          assigneeIds: occ.assigneeIds || [],
         });
       }
     });
   });
 
-  overdue.sort((a, b) => a.dueDate.localeCompare(b.dueDate));
-  thisWeek.sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+  const sortByZoneThenTitle = (a: PendingChoreEmailItem, b: PendingChoreEmailItem) => {
+    const zoneA = a.zoneName || 'ZZZ';
+    const zoneB = b.zoneName || 'ZZZ';
+    const zoneCompare = zoneA.localeCompare(zoneB);
+    if (zoneCompare !== 0) return zoneCompare;
+    return a.title.localeCompare(b.title);
+  };
+
+  overdue.sort(sortByZoneThenTitle);
+  thisWeek.sort(sortByZoneThenTitle);
 
   return { overdue, thisWeek };
+}
+
+async function getHouseholdMembers(
+  supabaseAdmin: SupabaseAdminClient,
+  householdId: string
+): Promise<HouseholdMemberInfo[]> {
+  const { data: membersData, error: membersErr } = await supabaseAdmin
+    .from('household_members')
+    .select('user_id')
+    .eq('household_id', householdId);
+
+  if (membersErr || !membersData) {
+    console.error('Error fetching household members for household', householdId, membersErr);
+    return [];
+  }
+
+  const userIds = membersData.map((m) => m.user_id);
+
+  if (userIds.length === 0) {
+    return [];
+  }
+
+  const { data: emailData, error: emailErr } = await supabaseAdmin.rpc('get_member_emails', {
+    p_user_ids: userIds,
+  });
+
+  if (emailErr || !emailData) {
+    console.error('Error fetching member emails for household', householdId, emailErr);
+    return membersData.map((m) => ({
+      userId: m.user_id,
+      email: null,
+    }));
+  }
+
+  const emailByUserId = new Map<string, string | null>();
+  (emailData as { user_id: string; email: string | null }[]).forEach((row) => {
+    emailByUserId.set(row.user_id, row.email);
+  });
+
+  return membersData.map((m) => ({
+    userId: m.user_id,
+    email: emailByUserId.get(m.user_id) ?? null,
+  }));
+}
+
+function buildChoreRows(
+  items: PendingChoreEmailItem[],
+  members: HouseholdMemberInfo[],
+  recipientEmail: string,
+  statusTextBuilder: (item: PendingChoreEmailItem) => string
+): string {
+  const labelByUserId = new Map<string, string>();
+  members.forEach((m) => {
+    const label = m.email ? m.email.split('@')[0] : m.userId;
+    labelByUserId.set(m.userId, label);
+  });
+
+  const selfUserIds = members
+    .filter((m) => m.email === recipientEmail)
+    .map((m) => m.userId);
+
+  return items
+    .map((item) => {
+      const assigneeIds = item.assigneeIds || [];
+      const assigneeLabels =
+        assigneeIds.length > 0
+          ? assigneeIds.map((id) => labelByUserId.get(id) || 'Unknown')
+          : ['Unassigned'];
+      const assigneeText = assigneeLabels.join(', ');
+      const isMine =
+        selfUserIds.length > 0 && assigneeIds.some((id) => selfUserIds.includes(id));
+      const rowStyle = isMine ? 'font-weight: bold;' : '';
+      const statusText = statusTextBuilder(item);
+
+      return `
+        <tr style="border-bottom: 1px solid #eee; ${rowStyle}">
+          <td style="padding: 8px;">${item.title}</td>
+          <td style="padding: 8px;">${item.zoneName || ''}</td>
+          <td style="padding: 8px;">${assigneeText}</td>
+          <td style="padding: 8px;">${statusText}</td>
+        </tr>
+      `;
+    })
+    .join('');
 }
 
 // Get items expiring soon for a household
@@ -272,6 +372,11 @@ async function handleCron(req: NextRequest) {
         profile.default_household_id
       );
 
+      const members = await getHouseholdMembers(
+        supabaseAdmin,
+        profile.default_household_id
+      );
+
       const hasChores =
         choreSummary.overdue.length > 0 || choreSummary.thisWeek.length > 0;
 
@@ -309,37 +414,22 @@ async function handleCron(req: NextRequest) {
         )
         .join('');
 
-      const overdueChoresRows = choreSummary.overdue
-        .map(
-          (item) => `
-        <tr style="border-bottom: 1px solid #eee;">
-          <td style="padding: 8px;">${item.title}</td>
-          <td style="padding: 8px;">${item.zoneName || ''}</td>
-          <td style="padding: 8px;">${item.dueDate}</td>
-          <td style="padding: 8px; color: red;">
-            ${
-              item.weeksOverdue && item.weeksOverdue > 0
-                ? `Overdue ${item.weeksOverdue} week(s)`
-                : 'Overdue'
-            }
-          </td>
-        </tr>
-      `
-        )
-        .join('');
+      const overdueChoresRows = buildChoreRows(
+        choreSummary.overdue,
+        members,
+        email,
+        (item) =>
+          item.weeksOverdue && item.weeksOverdue > 0
+            ? `Overdue ${item.weeksOverdue} week(s)`
+            : 'Overdue'
+      );
 
-      const thisWeekChoresRows = choreSummary.thisWeek
-        .map(
-          (item) => `
-        <tr style="border-bottom: 1px solid #eee;">
-          <td style="padding: 8px;">${item.title}</td>
-          <td style="padding: 8px;">${item.zoneName || ''}</td>
-          <td style="padding: 8px;">${item.dueDate}</td>
-          <td style="padding: 8px;">This week</td>
-        </tr>
-      `
-        )
-        .join('');
+      const thisWeekChoresRows = buildChoreRows(
+        choreSummary.thisWeek,
+        members,
+        email,
+        () => 'This week'
+      );
 
       const choresSection =
         hasChores &&
@@ -355,7 +445,7 @@ async function handleCron(req: NextRequest) {
                 <tr style="background-color: #f5f5f5; text-align: left;">
                   <th style="padding: 8px;">Chore</th>
                   <th style="padding: 8px;">Zone</th>
-                  <th style="padding: 8px;">Due Date</th>
+                  <th style="padding: 8px;">Assignee(s)</th>
                   <th style="padding: 8px;">Status</th>
                 </tr>
               </thead>
@@ -375,7 +465,7 @@ async function handleCron(req: NextRequest) {
                 <tr style="background-color: #f5f5f5; text-align: left;">
                   <th style="padding: 8px;">Chore</th>
                   <th style="padding: 8px;">Zone</th>
-                  <th style="padding: 8px;">Due Date</th>
+                  <th style="padding: 8px;">Assignee(s)</th>
                   <th style="padding: 8px;">Status</th>
                 </tr>
               </thead>
@@ -449,9 +539,10 @@ async function handleCron(req: NextRequest) {
     }
 
     return NextResponse.json({ success: true, results });
-  } catch (error: any) {
+  } catch (error) {
     console.error('Cron job failed:', error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
 

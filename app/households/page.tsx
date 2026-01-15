@@ -592,13 +592,17 @@ export default function HouseholdsPage() {
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.error || 'Failed to send expiry reminder');
+        throw new Error(errorData.error || 'Failed to send reminder');
       }
 
       const data = await response.json();
-      setToast(`Expiry reminder sent to ${data.recipients} member(s). ${data.itemsCount} expiring items found.`);
+      const itemsCount = data.itemsCount ?? 0;
+      const choresTotal = (data.overdueChoresCount ?? 0) + (data.thisWeekChoresCount ?? 0);
+      setToast(
+        `Reminder sent to ${data.recipients} member(s). ${itemsCount} expiring items, ${choresTotal} chores pending.`
+      );
     } catch (e: any) {
-      setErr(e?.message ?? "Failed to send expiry reminder");
+      setErr(e?.message ?? "Failed to send reminder");
     } finally {
       setBusyId(null);
     }
@@ -773,7 +777,7 @@ export default function HouseholdsPage() {
                         disabled={busyId === h.id}
                         className="w-full px-3 py-2 rounded-xl border border-purple-600/30 bg-purple-50 text-purple-700 hover:bg-purple-100 text-sm disabled:opacity-60"
                       >
-                        📧 Send Expiry Reminder
+                        📧 Send Expiring Items & Chores
                       </button>
                       {isOwner && (
                         <button
