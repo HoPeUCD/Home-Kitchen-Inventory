@@ -635,6 +635,12 @@ export default function HouseholdsPage() {
                 All rooms
               </button>
               <button
+                onClick={() => router.push("/chores")}
+                className="px-3 py-2 rounded-xl border border-black/10 hover:bg-black/5 text-sm"
+              >
+                Chores
+              </button>
+              <button
                 onClick={() => router.push("/onboarding")}
                 className="px-3 py-2 rounded-xl border border-[#2563EB]/25 hover:bg-black/5 text-sm"
               >
@@ -983,4 +989,3 @@ export default function HouseholdsPage() {
   );
   //test
 }
-
