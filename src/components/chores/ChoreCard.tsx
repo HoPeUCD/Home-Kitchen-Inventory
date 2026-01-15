@@ -29,7 +29,12 @@ export default function ChoreCard({
   onStopRule
 }: ChoreCardProps) {
   const chore = chores.find(c => c.id === occurrence.choreId);
-  const assignee = members.find(m => m.user_id === occurrence.assigneeId);
+  const primaryAssigneeId = (occurrence.assigneeIds && occurrence.assigneeIds.length > 0)
+    ? occurrence.assigneeIds[0]
+    : null;
+  const assignee = primaryAssigneeId
+    ? members.find(m => m.user_id === primaryAssigneeId)
+    : undefined;
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   
   if (!chore) return null;
