@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 import nodemailer from 'nodemailer';
+import { Database } from '@/src/lib/database.types';
 
 // Initialize Supabase admin client
 function getSupabaseAdmin() {
@@ -10,7 +11,7 @@ function getSupabaseAdmin() {
   if (!supabaseUrl) throw new Error('NEXT_PUBLIC_SUPABASE_URL is required');
   if (!supabaseServiceKey) throw new Error('SUPABASE_SERVICE_ROLE_KEY is required');
 
-  return createClient(supabaseUrl, supabaseServiceKey);
+  return createClient<Database>(supabaseUrl, supabaseServiceKey);
 }
 
 // SMTP configuration
@@ -41,9 +42,26 @@ function daysUntil(expiresAt: string | null): number | null {
 // Get items expiring soon for a household
 async function getExpiringItems(householdId: string) {
   const supabaseAdmin = getSupabaseAdmin();
+  
+  // Use a single query with joins to fetch all necessary location data
   const { data: itemsData, error: itemsErr } = await supabaseAdmin
     .from('items_v2')
-    .select('id, cell_id, name, qty, expires_at')
+    .select(`
+      id, 
+      cell_id, 
+      name, 
+      qty, 
+      expires_at,
+      room_cells (
+        code,
+        room_columns (
+          name,
+          rooms (
+            name
+          )
+        )
+      )
+    `)
     .eq('household_id', householdId)
     .not('expires_at', 'is', null);
 
@@ -52,256 +70,162 @@ async function getExpiringItems(householdId: string) {
     return [];
   }
 
+  // Process and filter items
   const expiringItems = itemsData
     .map((item) => {
       const days = daysUntil(item.expires_at);
-      return { ...item, daysUntil: days };
+      
+      // Construct location string from joined data
+      let location = 'Unknown';
+      const cell = item.room_cells;
+      if (cell) {
+        const column = cell.room_columns;
+        const room = column?.rooms;
+        
+        // Format: "Room Name - Column Name - Cell Code"
+        const parts = [];
+        if (room?.name) parts.push(room.name);
+        if (column?.name) parts.push(column.name);
+        if (cell.code) parts.push(cell.code);
+        
+        if (parts.length > 0) {
+          location = parts.join(' - ');
+        }
+      }
+
+      return { 
+        id: item.id,
+        name: item.name,
+        qty: item.qty,
+        expires_at: item.expires_at,
+        daysUntil: days,
+        location
+      };
     })
     .filter((item) => item.daysUntil !== null && item.daysUntil <= 30)
     .sort((a, b) => (a.daysUntil ?? Infinity) - (b.daysUntil ?? Infinity));
 
-  const cellIds = [...new Set(expiringItems.map((item) => item.cell_id))];
-  
-  if (cellIds.length === 0) {
-    return [];
-  }
-
-  const { data: cellsData, error: cellsErr } = await supabaseAdmin
-    .from('room_cells')
-    .select('id, column_id, code')
-    .in('id', cellIds);
-
-  if (cellsErr || !cellsData) {
-    return expiringItems.map((item) => ({ ...item, location: 'Unknown' }));
-  }
-
-  const columnIds = [...new Set(cellsData.map((cell) => cell.column_id))];
-  const { data: columnsData, error: columnsErr } = await supabaseAdmin
-    .from('room_columns')
-    .select('id, room_id, name')
-    .in('id', columnIds);
-
-  if (columnsErr || !columnsData) {
-    return expiringItems.map((item) => {
-      const cell = cellsData.find((c) => c.id === item.cell_id);
-      return { ...item, location: cell ? `Cell ${cell.code}` : 'Unknown' };
-    });
-  }
-
-  const roomIds = [...new Set(columnsData.map((col) => col.room_id))];
-  const { data: roomsData, error: roomsErr } = await supabaseAdmin
-    .from('rooms')
-    .select('id, name')
-    .in('id', roomIds);
-
-  if (roomsErr || !roomsData) {
-    return expiringItems.map((item) => {
-      const cell = cellsData.find((c) => c.id === item.cell_id);
-      const column = columnsData.find((col) => col.id === cell?.column_id);
-      return { ...item, location: column ? `${column.name} / ${cell?.code}` : 'Unknown' };
-    });
-  }
-
-  const cellToLocation = new Map<string, string>();
-  cellsData.forEach((cell) => {
-    const column = columnsData.find((col) => col.id === cell.column_id);
-    const room = roomsData.find((r) => r.id === column?.room_id);
-    if (room && column) {
-      cellToLocation.set(cell.id, `${room.name} / ${column.name} / ${cell.code}`);
-    } else {
-      cellToLocation.set(cell.id, 'Unknown');
-    }
-  });
-
-  return expiringItems.map((item) => ({
-    name: item.name,
-    qty: item.qty,
-    expires_at: item.expires_at,
-    daysUntil: item.daysUntil,
-    location: cellToLocation.get(item.cell_id) || 'Unknown',
-  }));
+  return expiringItems;
 }
 
-// Get household members with emails
-async function getHouseholdMembers(householdId: string) {
-  const supabaseAdmin = getSupabaseAdmin();
-  const { data: membersData, error: membersErr } = await supabaseAdmin
-    .from('household_members')
-    .select('user_id')
-    .eq('household_id', householdId);
-
-  if (membersErr || !membersData) {
-    return [];
-  }
-
-  const userIds = membersData.map((m) => m.user_id);
-  if (userIds.length === 0) {
-    return [];
-  }
-
-  const { data: emailData, error: emailErr } = await supabaseAdmin.rpc('get_member_emails', {
-    p_user_ids: userIds,
-  });
-
-  if (emailErr || !emailData) {
-    return [];
-  }
-
-  return emailData
-    .map((row: { user_id: string; email: string | null }) => row.email)
-    .filter((email: string | null): email is string => email !== null && email !== '');
-}
-
-// Generate email content
-function generateEmailContent(householdName: string, items: Array<{ name: string; qty: number | null; expires_at: string; daysUntil: number | null; location: string }>) {
-  if (items.length === 0) {
-    return {
-      subject: `No Expiring Items - ${householdName}`,
-      html: `
-        <html>
-          <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-            <h2>Kitchen Inventory Reminder</h2>
-            <p>Hello,</p>
-            <p>This is a weekly reminder for your household: <strong>${householdName}</strong></p>
-            <p><strong>Good news!</strong> You have no items expiring in the next 30 days.</p>
-            <p>Best regards,<br>Kitchen Inventory System</p>
-          </body>
-        </html>
-      `,
-    };
-  }
-
-  const itemsList = items
-    .map((item) => {
-      const status = item.daysUntil === null 
-        ? '' 
-        : item.daysUntil < 0 
-        ? `(Expired ${Math.abs(item.daysUntil)} days ago)` 
-        : item.daysUntil === 0 
-        ? '(Expires today)' 
-        : `(Expires in ${item.daysUntil} days)`;
-      
-      const qtyText = item.qty !== null ? `Quantity: ${item.qty}` : '';
-      return `<li><strong>${item.name}</strong> ${qtyText} - ${item.location} ${status}</li>`;
-    })
-    .join('');
-
-  return {
-    subject: `Expiring Items Reminder - ${householdName}`,
-    html: `
-      <html>
-        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-          <h2>Kitchen Inventory Reminder</h2>
-          <p>Hello,</p>
-          <p>This is a weekly reminder for your household: <strong>${householdName}</strong></p>
-          <p>The following items are expiring soon (within 30 days) or have already expired:</p>
-          <ul style="list-style-type: disc; padding-left: 20px;">
-            ${itemsList}
-          </ul>
-          <p>Please check these items and use them before they expire!</p>
-          <p>Best regards,<br>Kitchen Inventory System</p>
-        </body>
-      </html>
-    `,
-  };
-}
-
-// Send email
-async function sendEmail(recipients: string[], subject: string, html: string) {
-  const transporter = createTransporter();
-  const fromEmail = process.env.SMTP_FROM || process.env.SMTP_USER;
-
-  if (!fromEmail) {
-    throw new Error('SMTP_FROM or SMTP_USER environment variable is required');
-  }
-
-  await transporter.sendMail({
-    from: fromEmail,
-    to: recipients.join(', '),
-    subject,
-    html,
-  });
-}
-
-// GET endpoint: Called by Vercel Cron (weekly on Sunday at 8 PM)
-export async function GET(req: NextRequest) {
+export async function POST(req: NextRequest) {
   try {
-    // Verify cron secret (optional but recommended for security)
+    // Verify authentication (CRON_SECRET)
     const authHeader = req.headers.get('authorization');
-    const cronSecret = process.env.CRON_SECRET;
-    
-    if (cronSecret && authHeader !== `Bearer ${cronSecret}`) {
+    if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    // Get all households
     const supabaseAdmin = getSupabaseAdmin();
-    const { data: households, error: householdsError } = await supabaseAdmin
-      .from('households')
-      .select('id, name');
 
-    if (householdsError || !households) {
-      console.error('Error fetching households:', householdsError);
-      return NextResponse.json({ error: 'Failed to fetch households' }, { status: 500 });
+    // 1. Get all profiles with a default household
+    // Note: In a real production app with many users, we should paginate this
+    // or use a queue system. For now, fetching all is fine for small scale.
+    const { data: profiles, error: profilesErr } = await supabaseAdmin
+      .from('profiles')
+      .select('user_id, default_household_id')
+      .not('default_household_id', 'is', null);
+
+    if (profilesErr) throw profilesErr;
+    if (!profiles || profiles.length === 0) {
+      return NextResponse.json({ message: 'No profiles found' });
     }
 
+    // 2. Get emails for these users
+    // We can't join auth.users directly, so we use a loop or a specialized RPC if available.
+    // Assuming we have many users, RPC is better, but let's stick to admin API for now 
+    // or use the 'get_member_emails' RPC if it supports batch fetching by user IDs.
+    // For simplicity here, we'll group by household to avoid duplicate processing.
+    
+    // Group users by household to send consolidated reports or just process per user?
+    // The requirement implies sending to the user about their default household.
+    
     const results = [];
+    const transporter = createTransporter();
 
-    // Process each household
-    for (const household of households) {
+    for (const profile of profiles) {
+      if (!profile.default_household_id) continue;
+
+      // Fetch expiring items for this household
+      const items = await getExpiringItems(profile.default_household_id);
+      
+      if (items.length === 0) continue;
+
+      // Get user email
+      const { data: userData, error: userErr } = await supabaseAdmin.auth.admin.getUserById(profile.user_id);
+      
+      if (userErr || !userData.user || !userData.user.email) {
+        console.error(`Could not fetch email for user ${profile.user_id}`);
+        continue;
+      }
+
+      const email = userData.user.email;
+
+      // Compose email
+      const itemsHtml = items
+        .map(
+          (item) => `
+        <tr style="border-bottom: 1px solid #eee;">
+          <td style="padding: 8px;">${item.name}</td>
+          <td style="padding: 8px;">${item.location}</td>
+          <td style="padding: 8px; color: ${
+            (item.daysUntil ?? 0) < 0 ? 'red' : (item.daysUntil ?? 0) <= 7 ? 'orange' : 'black'
+          };">
+            ${
+              (item.daysUntil ?? 0) < 0
+                ? `Expired ${Math.abs(item.daysUntil ?? 0)} days ago`
+                : (item.daysUntil ?? 0) === 0
+                ? 'Expires today'
+                : `Expires in ${item.daysUntil} days`
+            }
+          </td>
+        </tr>
+      `
+        )
+        .join('');
+
+      const html = `
+        <div style="font-family: sans-serif; color: #333;">
+          <h2>Kitchen Inventory Expiry Reminder</h2>
+          <p>You have ${items.length} item(s) expiring soon in your household.</p>
+          
+          <table style="width: 100%; border-collapse: collapse; margin-top: 20px;">
+            <thead>
+              <tr style="background-color: #f5f5f5; text-align: left;">
+                <th style="padding: 8px;">Item</th>
+                <th style="padding: 8px;">Location</th>
+                <th style="padding: 8px;">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${itemsHtml}
+            </tbody>
+          </table>
+          
+          <p style="margin-top: 20px; color: #666; font-size: 12px;">
+            This is an automated weekly reminder from your Kitchen Inventory app.
+          </p>
+        </div>
+      `;
+
+      // Send email
       try {
-        // Get expiring items
-        const expiringItems = await getExpiringItems(household.id);
-
-        // Get household members' emails
-        const memberEmails = await getHouseholdMembers(household.id);
-
-        if (memberEmails.length === 0) {
-          results.push({
-            householdId: household.id,
-            householdName: household.name,
-            status: 'skipped',
-            reason: 'No members with email addresses',
-            itemsCount: expiringItems.length,
-          });
-          continue;
-        }
-
-        // Generate email content
-        const { subject, html } = generateEmailContent(household.name, expiringItems);
-
-        // Send email
-        await sendEmail(memberEmails, subject, html);
-
-        results.push({
-          householdId: household.id,
-          householdName: household.name,
-          status: 'success',
-          recipients: memberEmails.length,
-          itemsCount: expiringItems.length,
+        await transporter.sendMail({
+          from: process.env.SMTP_FROM || '"Kitchen Inventory" <noreply@kitchen-inventory.com>',
+          to: email,
+          subject: `[Kitchen Inventory] ${items.length} Items Expiring Soon`,
+          html,
         });
-      } catch (error: any) {
-        console.error(`Error processing household ${household.id}:`, error);
-        results.push({
-          householdId: household.id,
-          householdName: household.name,
-          status: 'error',
-          error: error.message,
-        });
+        results.push({ userId: profile.user_id, sent: true });
+      } catch (sendErr) {
+        console.error(`Failed to send email to ${email}:`, sendErr);
+        results.push({ userId: profile.user_id, sent: false, error: sendErr });
       }
     }
 
-    return NextResponse.json({
-      success: true,
-      message: 'Weekly reminder processed',
-      timestamp: new Date().toISOString(),
-      results,
-    });
+    return NextResponse.json({ success: true, results });
   } catch (error: any) {
-    console.error('Error in weekly-reminder cron:', error);
-    return NextResponse.json(
-      { error: error.message || 'Internal server error' },
-      { status: 500 }
-    );
+    console.error('Cron job failed:', error);
+    return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }

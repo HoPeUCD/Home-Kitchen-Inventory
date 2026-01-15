@@ -7,6 +7,11 @@ import Fuse from 'fuse.js';
 import AuthGate from "@/src/components/AuthGate";
 import { supabase } from "@/src/lib/supabase";
 import HouseholdTopBar from "@/src/components/HouseholdTopBar";
+import { cx } from "@/src/lib/utils";
+import Modal from "@/src/components/ui/Modal";
+import ConfirmModal from "@/src/components/ui/ConfirmModal";
+import Toast from "@/src/components/ui/Toast";
+import SmallIconButton from "@/src/components/ui/SmallIconButton";
 
 type UUID = string;
 
@@ -34,10 +39,6 @@ const THEME = {
   borderSoft: 'border-black/10',
   blueBorderSoft: 'border-[#2563EB]/25',
 };
-
-function cx(...classes: Array<string | false | null | undefined>) {
-  return classes.filter(Boolean).join(' ');
-}
 
 // ----- date helpers (treat YYYY-MM-DD as local date) -----
 function parseDateOnlyLocalMidnight(dateOnly: string) {
@@ -73,124 +74,6 @@ function toDateOnly(expires_at: string | null) {
   return expires_at.slice(0, 10);
 }
 
-// ----- UI primitives -----
-function Modal({
-  open,
-  title,
-  onClose,
-  children,
-  widthClass = 'max-w-xl',
-}: {
-  open: boolean;
-  title: string;
-  onClose: () => void;
-  children: React.ReactNode;
-  widthClass?: string;
-}) {
-  if (!open) return null;
-  return (
-    <div className="fixed inset-0 z-[60] overflow-y-auto">
-      <div className="absolute inset-0 bg-black/40" onClick={onClose} />
-      <div className="relative min-h-full flex items-center justify-center p-4">
-        <div className={cx('relative w-full my-auto z-10', widthClass)} onClick={(e) => e.stopPropagation()}>
-          <div className={cx('rounded-2xl shadow-xl border flex flex-col max-h-[90vh]', THEME.borderSoft, THEME.oatCard)}>
-            {/* Fixed header */}
-            <div className="px-5 py-4 border-b border-black/10 flex items-center justify-between gap-3 flex-shrink-0">
-              <div className="text-base font-semibold">{title}</div>
-              <button
-                onClick={onClose}
-                className="px-2 py-1 rounded-lg border border-black/10 hover:bg-black/5 text-sm flex-shrink-0"
-                aria-label="Close"
-                title="Close"
-              >
-                ✕
-              </button>
-            </div>
-            {/* Scrollable content */}
-            <div className="p-5 overflow-y-auto flex-1 min-h-0">
-              {children}
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function ConfirmModal({
-  open,
-  title,
-  description,
-  confirmText = 'Delete',
-  cancelText = 'Cancel',
-  destructive = true,
-  onConfirm,
-  onCancel,
-}: {
-  open: boolean;
-  title: string;
-  description: string;
-  confirmText?: string;
-  cancelText?: string;
-  destructive?: boolean;
-  onConfirm: () => void;
-  onCancel: () => void;
-}) {
-  return (
-    <Modal open={open} title={title} onClose={onCancel} widthClass="max-w-lg">
-      <div className="text-sm text-black/80 whitespace-pre-wrap">{description}</div>
-      <div className="mt-5 flex items-center justify-end gap-2">
-        <button className="px-3 py-2 rounded-xl border border-black/10 hover:bg-black/5 text-sm" onClick={onCancel}>
-          {cancelText}
-        </button>
-        <button
-          className={cx(
-            'px-3 py-2 rounded-xl text-sm border',
-            destructive ? 'bg-red-600 text-white border-red-600 hover:bg-red-700' : 'bg-black text-white border-black hover:bg-black/90'
-          )}
-          onClick={onConfirm}
-        >
-          {confirmText}
-        </button>
-      </div>
-    </Modal>
-  );
-}
-
-function SmallIconButton({
-  title,
-  onClick,
-  children,
-  className,
-}: {
-  title: string;
-  onClick: () => void;
-  children: React.ReactNode;
-  className?: string;
-}) {
-  return (
-    <button
-      type="button"
-      title={title}
-      aria-label={title}
-      onClick={onClick}
-      className={cx(
-        'h-8 w-8 inline-flex items-center justify-center rounded-lg border border-black/10 hover:bg-black/5 text-sm select-none',
-        className
-      )}
-    >
-      {children}
-    </button>
-  );
-}
-
-function Toast({ message }: { message: string }) {
-  return (
-    <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[80]">
-      <div className="px-4 py-2 rounded-2xl bg-black text-white text-sm shadow-lg">{message}</div>
-    </div>
-  );
-}
 
 export default function Page() {
   const router = useRouter();

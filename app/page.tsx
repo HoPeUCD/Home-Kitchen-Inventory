@@ -3,12 +3,10 @@
 import React, { useEffect, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { supabase } from "@/src/lib/supabase";
+import { cx } from "@/src/lib/utils";
 import { useRouter } from "next/navigation";
 import AuthGate from "@/src/components/AuthGate";
 
-function cx(...classes: Array<string | false | null | undefined>) {
-  return classes.filter(Boolean).join(" ");
-}
 
 export default function Home() {
   const router = useRouter();
