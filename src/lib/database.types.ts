@@ -44,6 +44,7 @@ export interface Database {
           original_date: string
           is_skipped: boolean
           new_assignee_id: string | null
+          new_assignee_ids: string[] | null
           new_date: string | null
           created_at: string
         }
@@ -53,6 +54,7 @@ export interface Database {
           original_date: string
           is_skipped?: boolean
           new_assignee_id?: string | null
+          new_assignee_ids?: string[] | null
           new_date?: string | null
           created_at?: string
         }
@@ -62,6 +64,7 @@ export interface Database {
           original_date?: string
           is_skipped?: boolean
           new_assignee_id?: string | null
+          new_assignee_ids?: string[] | null
           new_date?: string | null
           created_at?: string
         }
@@ -268,20 +271,52 @@ export interface Database {
           }
         ]
       }
+      chore_zones: {
+        Row: {
+          id: string
+          household_id: string
+          name: string
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          household_id: string
+          name: string
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          household_id?: string
+          name?: string
+          created_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "chore_zones_household_id_fkey"
+            columns: ["household_id"]
+            referencedRelation: "households"
+            referencedColumns: ["id"]
+          }
+        ]
+      }
       chores: {
         Row: {
           id: string
           household_id: string
           title: string
           description: string | null
+          required_consumables: string | null
           zone: string | null
+          zone_id: string | null
           frequency_days: number
           start_date: string
           end_date: string | null
           assignment_strategy: 'none' | 'fixed' | 'rotation'
           fixed_assignee_id: string | null
+          fixed_assignee_ids: string[] | null
           rotation_sequence: string[] | null
           rotation_interval_days: number
+          matrix_order: number | null
           archived: boolean
           created_at: string
           updated_at: string
@@ -291,14 +326,18 @@ export interface Database {
           household_id: string
           title: string
           description?: string | null
+          required_consumables?: string | null
           zone?: string | null
+          zone_id?: string | null
           frequency_days?: number
           start_date?: string
           end_date?: string | null
           assignment_strategy?: 'none' | 'fixed' | 'rotation'
           fixed_assignee_id?: string | null
+          fixed_assignee_ids?: string[] | null
           rotation_sequence?: string[] | null
           rotation_interval_days?: number
+          matrix_order?: number | null
           archived?: boolean
           created_at?: string
           updated_at?: string
@@ -308,14 +347,18 @@ export interface Database {
           household_id?: string
           title?: string
           description?: string | null
+          required_consumables?: string | null
           zone?: string | null
+          zone_id?: string | null
           frequency_days?: number
           start_date?: string
           end_date?: string | null
           assignment_strategy?: 'none' | 'fixed' | 'rotation'
           fixed_assignee_id?: string | null
+          fixed_assignee_ids?: string[] | null
           rotation_sequence?: string[] | null
           rotation_interval_days?: number
+          matrix_order?: number | null
           archived?: boolean
           created_at?: string
           updated_at?: string

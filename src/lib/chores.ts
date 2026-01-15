@@ -8,7 +8,7 @@ export interface ChoreOccurrence {
   choreId: string;
   date: Date; // The effective due date (original or rescheduled)
   originalDate: Date; // The calculated recurrence date (key for overrides)
-  assigneeId: string | null;
+  assigneeIds: string[];
   status: 'pending' | 'completed' | 'skipped';
   completion?: ChoreCompletion;
   override?: ChoreOverride;
@@ -77,7 +77,7 @@ export function calculateChoreOccurrences(
         choreId: chore.id,
         date: originalDate,
         originalDate: originalDate,
-        assigneeId: null,
+        assigneeIds: [],
         status: 'skipped',
         override
       });
@@ -93,15 +93,21 @@ export function calculateChoreOccurrences(
       effectiveDate.setHours(0,0,0,0);
     }
 
-    // Determine Assignee
-    let assigneeId: string | null = null;
+    // Determine Assignees
+    let assigneeIds: string[] = [];
 
-    if (override?.new_assignee_id) {
-      assigneeId = override.new_assignee_id;
+    if (override?.new_assignee_ids && override.new_assignee_ids.length > 0) {
+      assigneeIds = override.new_assignee_ids;
+    } else if (override?.new_assignee_id) {
+      assigneeIds = [override.new_assignee_id];
     } else {
       // Default assignment logic
       if (chore.assignment_strategy === 'fixed') {
-        assigneeId = chore.fixed_assignee_id;
+        if (chore.fixed_assignee_ids && chore.fixed_assignee_ids.length > 0) {
+          assigneeIds = chore.fixed_assignee_ids;
+        } else if (chore.fixed_assignee_id) {
+          assigneeIds = [chore.fixed_assignee_id];
+        }
       } else if (chore.assignment_strategy === 'rotation' && chore.rotation_sequence && chore.rotation_sequence.length > 0) {
         // Rotation logic
         // Calculate days since start to the ORIGINAL date (not rescheduled)
@@ -114,7 +120,7 @@ export function calculateChoreOccurrences(
         const rotationIndex = Math.floor(daysSinceStart / interval);
         const sequenceIndex = rotationIndex % chore.rotation_sequence.length;
         
-        assigneeId = chore.rotation_sequence[sequenceIndex];
+        assigneeIds = [chore.rotation_sequence[sequenceIndex]];
       }
     }
 
@@ -194,7 +200,7 @@ export function calculateChoreOccurrences(
       choreId: chore.id,
       date: effectiveDate,
       originalDate: originalDate,
-      assigneeId,
+      assigneeIds,
       status: matchedCompletion ? 'completed' : 'pending',
       completion: matchedCompletion,
       override

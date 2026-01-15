@@ -3,16 +3,21 @@
 import { useEffect, useState, useMemo } from "react";
 import { supabase } from "@/src/lib/supabase";
 import { Database } from "@/src/lib/database.types";
-import { calculateChoreOccurrences, ChoreOccurrence } from "@/src/lib/chores";
 import AuthGate from "@/src/components/AuthGate";
 import Link from "next/link";
-import ChoreCard from "@/src/components/chores/ChoreCard";
+import ZoneManager from "@/src/components/chores/ZoneManager";
+import ChoreMatrix from "@/src/components/chores/ChoreMatrix";
+import CurrentWeekView from "@/src/components/chores/CurrentWeekView";
+import { cx } from "@/src/lib/utils";
+import Modal from "@/src/components/ui/Modal";
+import ConfirmModal from "@/src/components/ui/ConfirmModal";
+import ChoreForm, { ChoreFormData } from "@/src/components/chores/ChoreForm";
 
 type Chore = Database['public']['Tables']['chores']['Row'];
-type ChoreOverride = Database['public']['Tables']['chore_overrides']['Row'];
 type ChoreCompletion = Database['public']['Tables']['chore_completions']['Row'];
+type Zone = Database['public']['Tables']['chore_zones']['Row'];
 type HouseholdMember = Database['public']['Tables']['household_members']['Row'] & {
-  email?: string; // We might fetch this separately
+  email?: string;
 };
 
 const ACTIVE_HOUSEHOLD_KEY = "active_household_id";
@@ -22,44 +27,18 @@ export default function ChoresPage() {
   const [householdId, setHouseholdId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   
+  const [zones, setZones] = useState<Zone[]>([]);
   const [chores, setChores] = useState<Chore[]>([]);
-  const [overrides, setOverrides] = useState<ChoreOverride[]>([]);
+  const [overrides, setOverrides] = useState<any[]>([]);
   const [completions, setCompletions] = useState<ChoreCompletion[]>([]);
   const [members, setMembers] = useState<HouseholdMember[]>([]);
   
-  // Date Range State (default to next 4 weeks)
-  const [startDate, setStartDate] = useState<Date>(new Date());
-  const [weeksToShow, setWeeksToShow] = useState(4);
-
-  // Computed Schedule
-  const schedule = useMemo(() => {
-    if (!startDate || !householdId) return [];
-    
-    const rangeStart = new Date(startDate);
-    rangeStart.setHours(0,0,0,0);
-    
-    const rangeEnd = new Date(rangeStart);
-    rangeEnd.setDate(rangeEnd.getDate() + weeksToShow * 7);
-    
-    let allOccurrences: ChoreOccurrence[] = [];
-    
-    chores.forEach(chore => {
-      const choreOverrides = overrides.filter(o => o.chore_id === chore.id);
-      const choreCompletions = completions.filter(c => c.chore_id === chore.id);
-      
-      const occurrences = calculateChoreOccurrences(
-        chore,
-        choreOverrides,
-        choreCompletions,
-        rangeStart,
-        rangeEnd
-      );
-      allOccurrences = allOccurrences.concat(occurrences);
-    });
-    
-    // Sort by date
-    return allOccurrences.sort((a, b) => a.date.getTime() - b.date.getTime());
-  }, [chores, overrides, completions, startDate, weeksToShow, householdId]);
+  const [isZoneManagerOpen, setIsZoneManagerOpen] = useState(false);
+  const [viewMode, setViewMode] = useState<'current' | 'matrix'>('current');
+  const [selectedZoneId, setSelectedZoneId] = useState<string | null>(null);
+  const [editingChoreId, setEditingChoreId] = useState<string | null>(null);
+  const [isSavingEdit, setIsSavingEdit] = useState(false);
+  const [choreToDeleteId, setChoreToDeleteId] = useState<string | null>(null);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -75,42 +54,45 @@ export default function ChoresPage() {
     }
   }, [householdId]);
 
+  useEffect(() => {
+    if (zones.length > 0 && !selectedZoneId) {
+      setSelectedZoneId(zones[0].id);
+    }
+  }, [zones, selectedZoneId]);
+
   async function loadData() {
     if (!householdId) return;
     setLoading(true);
     
-    // Fetch Chores (All, including ended ones, so we can see history if needed)
-    // We filter `archived` only if we want to support "soft delete".
-    // Let's assume `archived` means "deleted/hidden".
+    const { data: zonesData } = await supabase
+      .from('chore_zones')
+      .select('*')
+      .eq('household_id', householdId)
+      .order('name');
+
     const { data: choresData } = await supabase
       .from('chores')
       .select('*')
       .eq('household_id', householdId)
       .eq('archived', false);
-      
-    // Fetch Overrides
+
     const { data: overridesData } = await supabase
       .from('chore_overrides')
       .select('*, chores!inner(household_id)')
       .eq('chores.household_id', householdId);
-
-    // Fetch Completions (Last 3 months?)
-    const threeMonthsAgo = new Date();
-    threeMonthsAgo.setMonth(threeMonthsAgo.getMonth() - 3);
-    
+      
+    const startOfYear = new Date(new Date().getFullYear(), 0, 1).toISOString();
     const { data: completionsData } = await supabase
       .from('chore_completions')
       .select('*, chores!inner(household_id)')
       .eq('chores.household_id', householdId)
-      .gte('completed_at', threeMonthsAgo.toISOString());
+      .gte('completed_at', startOfYear);
       
-    // Fetch Members
     const { data: membersData } = await supabase
       .from('household_members')
       .select('*')
       .eq('household_id', householdId);
 
-    // Fetch Emails (Optional, for display name)
     let enrichedMembers: HouseholdMember[] = membersData || [];
     if (membersData && membersData.length > 0) {
        const userIds = membersData.map(m => m.user_id);
@@ -123,64 +105,89 @@ export default function ChoresPage() {
        }
     }
 
-    if (choresData) setChores(choresData);
-    if (overridesData) setOverrides(overridesData as any);
-    if (completionsData) setCompletions(completionsData as any);
+    setZones(zonesData || []);
+    setChores(choresData || []);
+    setOverrides(overridesData || []);
+    setCompletions(completionsData as any || []);
     setMembers(enrichedMembers);
-    
     setLoading(false);
   }
 
-  // Actions
-  async function markComplete(occurrence: ChoreOccurrence) {
-    if (!session?.user || !householdId) return;
-    
-    const note = window.prompt("Add a note (optional):");
-    
-    const { error } = await supabase.from('chore_completions').insert({
-      chore_id: occurrence.choreId,
-      completed_by: session.user.id,
-      notes: note || null,
-      completed_at: new Date().toISOString()
+  const choresByZone = useMemo(() => {
+    const grouped: Record<string, Chore[]> = {};
+    const noZoneChores: Chore[] = [];
+
+    chores.forEach(chore => {
+      if (chore.zone_id) {
+        if (!grouped[chore.zone_id]) grouped[chore.zone_id] = [];
+        grouped[chore.zone_id].push(chore);
+      } else if (chore.zone) {
+        noZoneChores.push(chore);
+      } else {
+        noZoneChores.push(chore);
+      }
     });
-    
-    if (!error) {
-      loadData();
+
+    return { grouped, noZoneChores };
+  }, [chores, zones]);
+
+  const editingChore = useMemo(
+    () => chores.find(c => c.id === editingChoreId) || null,
+    [chores, editingChoreId]
+  );
+
+  function handleOpenEdit(choreId: string) {
+    setEditingChoreId(choreId);
+  }
+
+  function handleCloseEdit() {
+    setEditingChoreId(null);
+  }
+
+  async function handleUpdateChore(data: ChoreFormData) {
+    if (!editingChoreId) return;
+    setIsSavingEdit(true);
+    const { error } = await supabase
+      .from('chores')
+      .update({
+        title: data.title,
+        description: data.description || null,
+        required_consumables: data.requiredConsumables || null,
+        zone: data.zone,
+        zone_id: data.zone_id,
+        frequency_days: data.frequencyDays,
+        start_date: data.startDate,
+        assignment_strategy: data.assignmentStrategy,
+        fixed_assignee_id: data.fixedAssigneeId,
+        fixed_assignee_ids: data.fixedAssigneeIds,
+        rotation_sequence: data.rotationSequence,
+        rotation_interval_days: data.rotationIntervalDays,
+      })
+      .eq('id', editingChoreId);
+
+    if (error) {
+      alert("Error updating chore: " + error.message);
     } else {
-      alert("Failed to complete task");
+      setEditingChoreId(null);
+      await loadData();
     }
+    setIsSavingEdit(false);
   }
 
-  async function undoComplete(completionId: string) {
-    if (!confirm("Undo completion?")) return;
-    const { error } = await supabase.from('chore_completions').delete().eq('id', completionId);
-    if (!error) loadData();
-  }
+  async function handleDeleteChore() {
+    if (!choreToDeleteId) return;
+    const { error } = await supabase
+      .from('chores')
+      .update({ archived: true })
+      .eq('id', choreToDeleteId);
 
-  async function skipChore(occurrence: ChoreOccurrence) {
-    if (!session?.user || !householdId) return;
-    if (!confirm("Skip this occurrence?")) return;
-    
-    // Create an override
-    const { error } = await supabase.from('chore_overrides').insert({
-      chore_id: occurrence.choreId,
-      original_date: occurrence.originalDate.toISOString().split('T')[0],
-      is_skipped: true
-    });
-    
-    if (!error) loadData();
-    else alert("Failed to skip");
-  }
-
-  async function stopRule(occurrence: ChoreOccurrence) {
-    if (!confirm("Stop this recurring rule? Future occurrences will be removed.")) return;
-    
-    const { error } = await supabase.from('chores').update({
-        end_date: new Date().toISOString().split('T')[0]
-    }).eq('id', occurrence.choreId);
-    
-    if (!error) loadData();
-    else alert("Failed to stop rule");
+    if (error) {
+      alert("Error deleting chore: " + error.message);
+    } else {
+      setChoreToDeleteId(null);
+      setEditingChoreId(null);
+      await loadData();
+    }
   }
 
   if (!householdId) {
@@ -194,84 +201,184 @@ export default function ChoresPage() {
   return (
     <AuthGate onAuthed={setSession}>
       <div className="min-h-screen bg-[#F7F1E6] p-4 pb-24">
-        <div className="max-w-4xl mx-auto">
+        <div className="max-w-[95vw] mx-auto">
           <div className="flex justify-between items-center mb-6">
-            <h1 className="text-2xl font-bold">Household Chores</h1>
-            <Link href="/chores/new" className="bg-black text-white px-4 py-2 rounded-lg text-sm">
-              + New Rule
-            </Link>
+            <div className="flex items-center gap-3">
+              <Link
+                href="/rooms"
+                className="inline-flex items-center gap-1 text-xs text-gray-500 hover:text-gray-800"
+              >
+                <span>←</span>
+                <span>Back to household</span>
+              </Link>
+              <h1 className="text-2xl font-bold">Chore Overview</h1>
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setIsZoneManagerOpen(true)}
+                className="bg-white border border-black/10 px-4 py-2 rounded-lg text-sm hover:bg-gray-50"
+              >
+                Manage Zones
+              </button>
+              <Link href="/chores/new" className="bg-white border border-black/10 px-4 py-2 rounded-lg text-sm hover:bg-gray-50">
+                + New Rule
+              </Link>
+            </div>
           </div>
 
-        {loading ? (
-          <div>Loading schedule...</div>
-        ) : (
-          <div className="space-y-8">
-            {/* Today / Overdue Section */}
-            <section>
-              <h2 className="text-lg font-semibold mb-4 text-red-600">Due Now / Overdue</h2>
-              <div className="grid gap-3">
-                {schedule
-                  .filter(o => o.status === 'pending' && o.date <= new Date())
-                  .map(o => (
-                    <ChoreCard 
-                      key={`${o.choreId}-${o.date.toISOString()}`} 
-                      occurrence={o} 
-                      chores={chores}
-                      members={members}
-                      onComplete={() => markComplete(o)}
-                      onSkip={() => skipChore(o)}
-                      onStopRule={() => stopRule(o)}
-                    />
-                  ))}
-                 {schedule.filter(o => o.status === 'pending' && o.date <= new Date()).length === 0 && (
-                   <div className="text-gray-500 italic">No overdue tasks! Great job.</div>
-                 )}
-              </div>
-            </section>
-
-            {/* Upcoming Section */}
-            <section>
-              <h2 className="text-lg font-semibold mb-4">Upcoming</h2>
-              <div className="grid gap-3">
-                {schedule
-                  .filter(o => o.status === 'pending' && o.date > new Date())
-                  .slice(0, 10) // Show next 10
-                  .map(o => (
-                    <ChoreCard 
-                      key={`${o.choreId}-${o.date.toISOString()}`} 
-                      occurrence={o} 
-                      chores={chores}
-                      members={members}
-                      onComplete={() => markComplete(o)}
-                      onSkip={() => skipChore(o)}
-                      onStopRule={() => stopRule(o)}
-                    />
-                  ))}
-              </div>
-            </section>
-            
-            {/* Completed Recently */}
-            <section>
-               <h2 className="text-lg font-semibold mb-4 text-green-700">Completed (This Period)</h2>
-               <div className="grid gap-3 opacity-75">
-                 {schedule
-                   .filter(o => o.status === 'completed' || o.status === 'skipped')
-                   .map(o => (
-                     <ChoreCard 
-                       key={`${o.choreId}-${o.date.toISOString()}`} 
-                       occurrence={o} 
-                       chores={chores}
-                       members={members}
-                       onUndo={() => o.completion && undoComplete(o.completion.id)}
-                       // No skip/stop on completed/skipped items for now
-                     />
-                   ))}
-               </div>
-            </section>
+          <div className="flex gap-6 mb-8 border-b border-black/10">
+            <button 
+              className={cx("pb-3 px-1 font-medium text-sm transition-colors relative", viewMode === 'current' ? "text-black" : "text-gray-400 hover:text-gray-600")}
+              onClick={() => setViewMode('current')}
+            >
+              This Week
+              {viewMode === 'current' && <span className="absolute bottom-0 left-0 w-full h-0.5 bg-black rounded-t-full"></span>}
+            </button>
+            <button 
+              className={cx("pb-3 px-1 font-medium text-sm transition-colors relative", viewMode === 'matrix' ? "text-black" : "text-gray-400 hover:text-gray-600")}
+              onClick={() => setViewMode('matrix')}
+            >
+              Annual Matrix
+              {viewMode === 'matrix' && <span className="absolute bottom-0 left-0 w-full h-0.5 bg-black rounded-t-full"></span>}
+            </button>
           </div>
-        )}
+
+          {loading ? (
+            <div>Loading...</div>
+          ) : (
+            <div className="space-y-8">
+              {viewMode === 'current' ? (
+                <CurrentWeekView 
+                  chores={chores}
+                  completions={completions}
+                  overrides={overrides}
+                  members={members}
+                  zones={zones}
+                  onUpdate={loadData}
+                />
+              ) : (
+                <div className="space-y-6">
+                  <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-hide">
+                    {zones.map(zone => (
+                      <button
+                        key={zone.id}
+                        onClick={() => setSelectedZoneId(zone.id)}
+                        className={cx(
+                          "px-4 py-2 rounded-full text-sm font-medium whitespace-nowrap transition-colors",
+                          selectedZoneId === zone.id 
+                            ? "bg-black text-white" 
+                            : "bg-white border border-black/5 text-gray-600 hover:bg-gray-50"
+                        )}
+                      >
+                        {zone.name}
+                      </button>
+                    ))}
+                    {choresByZone.noZoneChores.length > 0 && (
+                      <button
+                        onClick={() => setSelectedZoneId('uncategorized')}
+                        className={cx(
+                          "px-4 py-2 rounded-full text-sm font-medium whitespace-nowrap transition-colors",
+                          selectedZoneId === 'uncategorized'
+                            ? "bg-black text-white" 
+                            : "bg-white border border-black/5 text-gray-600 hover:bg-gray-50"
+                        )}
+                      >
+                        Uncategorized
+                      </button>
+                    )}
+                  </div>
+
+                  {selectedZoneId && (
+                    <div className="bg-white rounded-2xl p-1 shadow-sm border border-black/5">
+                      {selectedZoneId === 'uncategorized' ? (
+                        <ChoreMatrix
+                          zoneName="Uncategorized"
+                          chores={choresByZone.noZoneChores}
+                          completions={completions}
+                          overrides={overrides}
+                          members={members}
+                          onUpdate={loadData}
+                          onEditChore={handleOpenEdit}
+                        />
+                      ) : (
+                        zones.map(zone => {
+                          if (zone.id !== selectedZoneId) return null;
+                          const zoneChores = choresByZone.grouped[zone.id] || [];
+                          return (
+                            <ChoreMatrix
+                              key={zone.id}
+                              zoneName={zone.name}
+                              chores={zoneChores}
+                              completions={completions}
+                              overrides={overrides}
+                              members={members}
+                              onUpdate={loadData}
+                              onEditChore={handleOpenEdit}
+                            />
+                          );
+                        })
+                      )}
+                    </div>
+                  )}
+
+                  {!selectedZoneId && zones.length === 0 && (
+                     <div className="text-center py-10 text-gray-400">
+                        No zones created. Go to "Manage Zones" to create one.
+                     </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          <ZoneManager
+            householdId={householdId}
+            isOpen={isZoneManagerOpen}
+            onClose={() => setIsZoneManagerOpen(false)}
+            onUpdate={loadData}
+          />
+
+          {editingChore && (
+            <Modal
+              open={!!editingChore}
+              title="Edit Chore Rule"
+              onClose={handleCloseEdit}
+              widthClass="max-w-lg"
+            >
+              <ChoreForm
+                householdId={editingChore.household_id}
+                initialData={{
+                  title: editingChore.title,
+                  description: editingChore.description,
+                  requiredConsumables: editingChore.required_consumables || undefined,
+                  zone: editingChore.zone || "",
+                  zone_id: editingChore.zone_id,
+                  frequencyDays: editingChore.frequency_days,
+                  startDate: editingChore.start_date,
+                  assignmentStrategy: editingChore.assignment_strategy,
+                  fixedAssigneeId: editingChore.fixed_assignee_id,
+                  fixedAssigneeIds: editingChore.fixed_assignee_ids,
+                  rotationSequence: editingChore.rotation_sequence,
+                  rotationIntervalDays: editingChore.rotation_interval_days || editingChore.frequency_days,
+                }}
+                onSubmit={handleUpdateChore}
+                onDelete={() => setChoreToDeleteId(editingChore.id)}
+                isSubmitting={isSavingEdit}
+                submitLabel="Save Changes"
+              />
+            </Modal>
+          )}
+
+          <ConfirmModal
+            open={!!choreToDeleteId}
+            title="Delete Chore Rule"
+            description="Are you sure you want to delete this chore? The rule will be archived."
+            onConfirm={handleDeleteChore}
+            onCancel={() => setChoreToDeleteId(null)}
+            destructive
+          />
+        </div>
       </div>
-    </div>
     </AuthGate>
   );
 }

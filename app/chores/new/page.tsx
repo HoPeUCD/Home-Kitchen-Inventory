@@ -25,11 +25,15 @@ export default function NewChorePage() {
     const { error } = await supabase.from('chores').insert({
       household_id: householdId,
       title: data.title,
+      description: data.description || null,
+      required_consumables: data.requiredConsumables || null,
       zone: data.zone,
+      zone_id: data.zone_id,
       frequency_days: data.frequencyDays,
       start_date: data.startDate,
       assignment_strategy: data.assignmentStrategy,
       fixed_assignee_id: data.fixedAssigneeId,
+      fixed_assignee_ids: data.fixedAssigneeIds,
       rotation_sequence: data.rotationSequence,
       rotation_interval_days: data.rotationIntervalDays,
     });
@@ -46,7 +50,13 @@ export default function NewChorePage() {
   return (
     <AuthGate>
       <div className="min-h-screen bg-[#F7F1E6] p-4 flex items-center justify-center">
-        <div className="bg-white p-6 rounded-xl shadow-lg w-full max-w-lg">
+        <div className="bg-white p-6 rounded-xl shadow-lg w-full max-w-lg relative">
+          <button 
+            onClick={() => router.back()}
+            className="absolute top-4 right-4 text-gray-400 hover:text-gray-600"
+          >
+            ✕
+          </button>
           <h1 className="text-xl font-bold mb-6">New Chore Rule</h1>
           <ChoreForm 
             householdId={householdId} 

@@ -72,6 +72,18 @@ export default function HouseholdTopBar(props: {
           {refreshing ? 'Refreshing…' : 'Refresh'}
         </button>
 
+        <button
+          type="button"
+          onClick={() => router.push('/chores')}
+          className={cx(
+            'px-3 py-2 rounded-xl border text-sm hover:bg-black/5 flex items-center gap-1',
+            'border-black/10'
+          )}
+          title="Chores"
+        >
+          <span>Chores</span>
+        </button>
+
         {/* Account pill（邮箱 + 下拉菜单） */}
         <div className="relative" ref={ref}>
           <button

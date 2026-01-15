@@ -13,6 +13,7 @@ create table if not exists public.chores (
   -- Advanced Assignment Strategy
   assignment_strategy text default 'none', -- 'none', 'fixed', 'rotation'
   fixed_assignee_id uuid references auth.users(id),
+  fixed_assignee_ids uuid[] default null,
   
   -- Rotation Logic
   -- If rotation, we cycle through this list of user_ids based on rotation_interval_days
@@ -31,6 +32,7 @@ create table if not exists public.chore_overrides (
   original_date date not null, -- The calculated due date being modified
   is_skipped boolean default false,
   new_assignee_id uuid references auth.users(id),
+  new_assignee_ids uuid[] default null,
   new_date date, -- If rescheduled
   created_at timestamptz default now()
 );
