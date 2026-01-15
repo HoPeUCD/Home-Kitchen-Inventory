@@ -37,6 +37,43 @@ export interface Database {
           }
         ]
       }
+      chore_overrides: {
+        Row: {
+          id: string
+          chore_id: string
+          original_date: string
+          is_skipped: boolean
+          new_assignee_id: string | null
+          new_date: string | null
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          chore_id: string
+          original_date: string
+          is_skipped?: boolean
+          new_assignee_id?: string | null
+          new_date?: string | null
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          chore_id?: string
+          original_date?: string
+          is_skipped?: boolean
+          new_assignee_id?: string | null
+          new_date?: string | null
+          created_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "chore_overrides_chore_id_fkey"
+            columns: ["chore_id"]
+            referencedRelation: "chores"
+            referencedColumns: ["id"]
+          }
+        ]
+      }
       households: {
         Row: {
           id: string
@@ -231,13 +268,116 @@ export interface Database {
           }
         ]
       }
+      chores: {
+        Row: {
+          id: string
+          household_id: string
+          title: string
+          description: string | null
+          zone: string | null
+          frequency_days: number
+          start_date: string
+          assignment_strategy: 'none' | 'fixed' | 'rotation'
+          fixed_assignee_id: string | null
+          rotation_sequence: string[] | null
+          rotation_interval_days: number
+          archived: boolean
+          created_at: string
+          updated_at: string
+        }
+        Insert: {
+          id?: string
+          household_id: string
+          title: string
+          description?: string | null
+          zone?: string | null
+          frequency_days?: number
+          start_date?: string
+          assignment_strategy?: 'none' | 'fixed' | 'rotation'
+          fixed_assignee_id?: string | null
+          rotation_sequence?: string[] | null
+          rotation_interval_days?: number
+          archived?: boolean
+          created_at?: string
+          updated_at?: string
+        }
+        Update: {
+          id?: string
+          household_id?: string
+          title?: string
+          description?: string | null
+          zone?: string | null
+          frequency_days?: number
+          start_date?: string
+          assignment_strategy?: 'none' | 'fixed' | 'rotation'
+          fixed_assignee_id?: string | null
+          rotation_sequence?: string[] | null
+          rotation_interval_days?: number
+          archived?: boolean
+          created_at?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "chores_household_id_fkey"
+            columns: ["household_id"]
+            referencedRelation: "households"
+            referencedColumns: ["id"]
+          }
+        ]
+      }
+      chore_completions: {
+        Row: {
+          id: string
+          chore_id: string
+          completed_at: string
+          completed_by: string | null
+          notes: string | null
+        }
+        Insert: {
+          id?: string
+          chore_id: string
+          completed_at?: string
+          completed_by?: string | null
+          notes?: string | null
+        }
+        Update: {
+          id?: string
+          chore_id?: string
+          completed_at?: string
+          completed_by?: string | null
+          notes?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "chore_completions_chore_id_fkey"
+            columns: ["chore_id"]
+            referencedRelation: "chores"
+            referencedColumns: ["id"]
+          }
+        ]
+      }
     }
     Views: {
       [_ in never]: never
     }
     Functions: {
-      [_ in never]: never
-    }
+        get_member_emails: {
+          Args: {
+            p_user_ids: string[]
+          }
+          Returns: {
+            user_id: string
+            email: string | null
+          }[]
+        }
+        delete_household: {
+          Args: {
+            p_household_id: string
+          }
+          Returns: void
+        }
+      }
     Enums: {
       [_ in never]: never
     }
