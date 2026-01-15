@@ -380,6 +380,25 @@ export interface Database {
           }
           Returns: void
         }
+        create_household: {
+          Args: {
+            p_name: string
+          }
+          Returns: unknown
+        }
+        request_join_by_code: {
+          Args: {
+            p_join_code: string
+            p_message: string | null
+          }
+          Returns: unknown
+        }
+        accept_household_invite: {
+          Args: {
+            p_token: string
+          }
+          Returns: unknown
+        }
       }
     Enums: {
       [_ in never]: never

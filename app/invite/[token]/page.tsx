@@ -6,6 +6,9 @@ import { supabase } from "@/src/lib/supabase";
 import { useParams, useRouter } from "next/navigation";
 import AuthGate from "@/src/components/AuthGate";
 import HouseholdTopBar from "@/src/components/HouseholdTopBar";
+import Modal from "@/src/components/ui/Modal";
+import Toast from "@/src/components/ui/Toast";
+import { cx } from "@/src/lib/utils";
 
 const ACTIVE_HOUSEHOLD_KEY = "active_household_id";
 
