@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 import nodemailer from 'nodemailer';
+import { startOfWeek, endOfWeek, differenceInCalendarWeeks } from 'date-fns';
+import { Database } from '@/src/lib/database.types';
+import { calculateChoreOccurrences, ChoreOccurrence } from '@/src/lib/chores';
 
 // Initialize Supabase admin client (using service role key for server-side operations)
 function getSupabaseAdmin() {
@@ -12,6 +15,13 @@ function getSupabaseAdmin() {
 
   return createClient(supabaseUrl, supabaseServiceKey);
 }
+
+type SupabaseAdminClient = ReturnType<typeof getSupabaseAdmin>;
+
+type Chore = Database['public']['Tables']['chores']['Row'];
+type ChoreOverride = Database['public']['Tables']['chore_overrides']['Row'];
+type ChoreCompletion = Database['public']['Tables']['chore_completions']['Row'];
+type ChoreZone = Database['public']['Tables']['chore_zones']['Row'];
 
 // SMTP configuration from environment variables
 function createTransporter() {
@@ -36,6 +46,117 @@ function daysUntil(expiresAt: string | null): number | null {
   const diffTime = expiry.getTime() - today.getTime();
   const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
   return diffDays;
+}
+
+type PendingChoreEmailItem = {
+  title: string;
+  zoneName: string | null;
+  dueDate: string;
+  weeksOverdue?: number;
+};
+
+async function getHouseholdChoreSummary(
+  supabaseAdmin: SupabaseAdminClient,
+  householdId: string
+): Promise<{ overdue: PendingChoreEmailItem[]; thisWeek: PendingChoreEmailItem[] }> {
+  const { data: choresData, error: choresErr } = await supabaseAdmin
+    .from('chores')
+    .select('*')
+    .eq('household_id', householdId)
+    .eq('archived', false);
+
+  if (choresErr || !choresData || choresData.length === 0) {
+    if (choresErr) {
+      console.error('Error fetching chores for household', householdId, choresErr);
+    }
+    return { overdue: [], thisWeek: [] };
+  }
+
+  const choreIds = choresData.map((c) => c.id);
+
+  const { data: overridesData, error: overridesErr } = await supabaseAdmin
+    .from('chore_overrides')
+    .select('*')
+    .in('chore_id', choreIds);
+
+  if (overridesErr) {
+    console.error('Error fetching chore overrides for household', householdId, overridesErr);
+  }
+
+  const now = new Date();
+  const weekStart = startOfWeek(now, { weekStartsOn: 1 });
+  const weekEnd = endOfWeek(now, { weekStartsOn: 1 });
+  const yearStart = new Date(now.getFullYear(), 0, 1);
+  const startOfYearIso = yearStart.toISOString();
+
+  const { data: completionsData, error: completionsErr } = await supabaseAdmin
+    .from('chore_completions')
+    .select('*')
+    .in('chore_id', choreIds)
+    .gte('completed_at', startOfYearIso);
+
+  if (completionsErr) {
+    console.error('Error fetching chore completions for household', householdId, completionsErr);
+  }
+
+  const { data: zonesData, error: zonesErr } = await supabaseAdmin
+    .from('chore_zones')
+    .select('*')
+    .eq('household_id', householdId);
+
+  if (zonesErr) {
+    console.error('Error fetching chore zones for household', householdId, zonesErr);
+  }
+
+  const overrides = (overridesData || []) as ChoreOverride[];
+  const completions = (completionsData || []) as ChoreCompletion[];
+  const zones = (zonesData || []) as ChoreZone[];
+
+  const overdue: PendingChoreEmailItem[] = [];
+  const thisWeek: PendingChoreEmailItem[] = [];
+
+  (choresData as Chore[]).forEach((chore) => {
+    const choreOverrides = overrides.filter((o) => o.chore_id === chore.id);
+    const choreCompletions = completions.filter((c) => c.chore_id === chore.id);
+
+    const occurrences: ChoreOccurrence[] = calculateChoreOccurrences(
+      chore,
+      choreOverrides,
+      choreCompletions,
+      yearStart,
+      weekEnd
+    );
+
+    occurrences.forEach((occ: ChoreOccurrence) => {
+      if (occ.status === 'skipped' || occ.status === 'completed') return;
+
+      const due = new Date(occ.date);
+      const dueDateStr = due.toISOString().split('T')[0];
+      const zone = zones.find((z) => z.id === chore.zone_id);
+      const zoneName = zone?.name || chore.zone || null;
+
+      if (due < weekStart) {
+        const weeksOverdue = differenceInCalendarWeeks(now, due);
+        overdue.push({
+          title: chore.title,
+          zoneName,
+          dueDate: dueDateStr,
+          weeksOverdue: weeksOverdue > 0 ? weeksOverdue : undefined,
+        });
+      } else if (due >= weekStart && due <= weekEnd) {
+        thisWeek.push({
+          title: chore.title,
+          zoneName,
+          dueDate: dueDateStr,
+        });
+      }
+    });
+  });
+
+  overdue.sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+  thisWeek.sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+
+  return { overdue, thisWeek };
 }
 
 // Get items expiring soon (within next 30 days or already expired)
@@ -166,58 +287,106 @@ async function getHouseholdMembers(householdId: string) {
     .filter((email: string | null): email is string => email !== null && email !== '');
 }
 
-// Generate email HTML content
-function generateEmailContent(householdName: string, items: Array<{ name: string; qty: number | null; expires_at: string; daysUntil: number | null; location: string }>) {
-  if (items.length === 0) {
-    return {
-      subject: `No Expiring Items - ${householdName}`,
-      html: `
-        <html>
-          <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-            <h2>Kitchen Inventory Reminder</h2>
-            <p>Hello,</p>
-            <p>This is a weekly reminder for your household: <strong>${householdName}</strong></p>
-            <p><strong>Good news!</strong> You have no items expiring in the next 30 days.</p>
-            <p>Best regards,<br>Kitchen Inventory System</p>
-          </body>
-        </html>
-      `,
-    };
-  }
+function generateEmailContent(
+  householdName: string,
+  items: Array<{ name: string; qty: number | null; expires_at: string; daysUntil: number | null; location: string }>,
+  choreSummary: { overdue: PendingChoreEmailItem[]; thisWeek: PendingChoreEmailItem[] }
+) {
+  const hasItems = items.length > 0;
+  const hasChores =
+    choreSummary.overdue.length > 0 || choreSummary.thisWeek.length > 0;
 
   const itemsList = items
     .map((item) => {
-      const status = item.daysUntil === null 
-        ? '' 
-        : item.daysUntil < 0 
-        ? `(Expired ${Math.abs(item.daysUntil)} days ago)` 
-        : item.daysUntil === 0 
-        ? '(Expires today)' 
+      const status = item.daysUntil === null
+        ? ''
+        : item.daysUntil < 0
+        ? `(Expired ${Math.abs(item.daysUntil)} days ago)`
+        : item.daysUntil === 0
+        ? '(Expires today)'
         : `(Expires in ${item.daysUntil} days)`;
-      
+
       const qtyText = item.qty !== null ? `Quantity: ${item.qty}` : '';
       return `<li><strong>${item.name}</strong> ${qtyText} - ${item.location} ${status}</li>`;
     })
     .join('');
 
-  return {
-    subject: `Expiring Items Reminder - ${householdName}`,
-    html: `
+  const overdueChoresList = choreSummary.overdue
+    .map((item) => {
+      const status =
+        item.weeksOverdue && item.weeksOverdue > 0
+          ? `Overdue ${item.weeksOverdue} week(s)`
+          : 'Overdue';
+      return `<li><strong>${item.title}</strong> - ${item.zoneName || ''} - ${item.dueDate} (${status})</li>`;
+    })
+    .join('');
+
+  const thisWeekChoresList = choreSummary.thisWeek
+    .map(
+      (item) =>
+        `<li><strong>${item.title}</strong> - ${item.zoneName || ''} - ${item.dueDate} (This week)</li>`
+    )
+    .join('');
+
+  const subjectParts: string[] = [];
+  if (hasItems) subjectParts.push('Expiring Items');
+  if (hasChores) subjectParts.push('Chores');
+  const subjectBase =
+    subjectParts.length > 0
+      ? subjectParts.join(' + ')
+      : 'Kitchen Inventory Reminder';
+
+  const subject = `${subjectBase} - ${householdName}`;
+
+  const inventorySection = hasItems
+    ? `
+      <p>The following items are expiring soon (within 30 days) or have already expired:</p>
+      <ul style="list-style-type: disc; padding-left: 20px; margin-bottom: 16px;">
+        ${itemsList}
+      </ul>
+    `
+    : '<p>You have no items expiring in the next 30 days.</p>';
+
+  const choresSection = hasChores
+    ? `
+      <h3>Chores This Week</h3>
+      ${
+        choreSummary.overdue.length > 0
+          ? `
+      <p><strong>Overdue:</strong></p>
+      <ul style="list-style-type: disc; padding-left: 20px; margin-bottom: 8px;">
+        ${overdueChoresList}
+      </ul>
+      `
+          : ''
+      }
+      ${
+        choreSummary.thisWeek.length > 0
+          ? `
+      <p><strong>To Do This Week:</strong></p>
+      <ul style="list-style-type: disc; padding-left: 20px;">
+        ${thisWeekChoresList}
+      </ul>
+      `
+          : ''
+      }
+    `
+    : '';
+
+  const html = `
       <html>
         <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
           <h2>Kitchen Inventory Reminder</h2>
           <p>Hello,</p>
-          <p>This is a weekly reminder for your household: <strong>${householdName}</strong></p>
-          <p>The following items are expiring soon (within 30 days) or have already expired:</p>
-          <ul style="list-style-type: disc; padding-left: 20px;">
-            ${itemsList}
-          </ul>
-          <p>Please check these items and use them before they expire!</p>
+          <p>This is a reminder for your household: <strong>${householdName}</strong></p>
+          ${inventorySection}
+          ${choresSection}
           <p>Best regards,<br>Kitchen Inventory System</p>
         </body>
       </html>
-    `,
-  };
+    `;
+
+  return { subject, html };
 }
 
 // Send email to a list of recipients
@@ -289,8 +458,12 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Household not found' }, { status: 404 });
     }
 
-    // Get expiring items
     const expiringItems = await getExpiringItems(householdId);
+
+    const choreSummary = await getHouseholdChoreSummary(
+      supabaseAdmin as SupabaseAdminClient,
+      householdId
+    );
 
     // Get household members' emails
     const memberEmails = await getHouseholdMembers(householdId);
@@ -302,8 +475,11 @@ export async function POST(req: NextRequest) {
       }, { status: 400 });
     }
 
-    // Generate email content
-    const { subject, html } = generateEmailContent(household.name, expiringItems);
+    const { subject, html } = generateEmailContent(
+      household.name,
+      expiringItems,
+      choreSummary
+    );
 
     // Send email
     await sendEmail(memberEmails, subject, html);

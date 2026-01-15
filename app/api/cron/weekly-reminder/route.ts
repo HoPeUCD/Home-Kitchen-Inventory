@@ -228,14 +228,13 @@ async function getExpiringItems(householdId: string) {
   return expiringItems;
 }
 
-export async function POST(req: NextRequest) {
-  try {
-    // Verify authentication (CRON_SECRET)
-    const authHeader = req.headers.get('authorization');
-    if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
+async function handleCron(req: NextRequest) {
+  const authHeader = req.headers.get('authorization');
+  if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
 
+  try {
     const supabaseAdmin = getSupabaseAdmin();
 
     // 1. Get all profiles with a default household
@@ -454,4 +453,12 @@ export async function POST(req: NextRequest) {
     console.error('Cron job failed:', error);
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
+}
+
+export async function POST(req: NextRequest) {
+  return handleCron(req);
+}
+
+export async function GET(req: NextRequest) {
+  return handleCron(req);
 }
