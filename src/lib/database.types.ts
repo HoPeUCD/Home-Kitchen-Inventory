@@ -277,6 +277,7 @@ export interface Database {
           zone: string | null
           frequency_days: number
           start_date: string
+          end_date: string | null
           assignment_strategy: 'none' | 'fixed' | 'rotation'
           fixed_assignee_id: string | null
           rotation_sequence: string[] | null
@@ -293,6 +294,7 @@ export interface Database {
           zone?: string | null
           frequency_days?: number
           start_date?: string
+          end_date?: string | null
           assignment_strategy?: 'none' | 'fixed' | 'rotation'
           fixed_assignee_id?: string | null
           rotation_sequence?: string[] | null
@@ -309,6 +311,7 @@ export interface Database {
           zone?: string | null
           frequency_days?: number
           start_date?: string
+          end_date?: string | null
           assignment_strategy?: 'none' | 'fixed' | 'rotation'
           fixed_assignee_id?: string | null
           rotation_sequence?: string[] | null
