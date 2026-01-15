@@ -110,6 +110,13 @@ export default function ChoreCard({
                     Skip this one
                   </button>
                 )}
+                <Link 
+                  href={`/chores/${occurrence.choreId}/edit`}
+                  className="block w-full text-left px-4 py-2 text-sm hover:bg-gray-50 text-gray-700"
+                  onClick={() => setIsMenuOpen(false)}
+                >
+                  Edit Rule
+                </Link>
                 {onStopRule && (
                     <button 
                         onClick={() => { onStopRule(); setIsMenuOpen(false); }}
